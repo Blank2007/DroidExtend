@@ -35,7 +35,8 @@ SHOTS = r"D:\dsh projects\droid-extend\tools\shots"
 u = ctypes.windll.user32
 u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
 
-TITLE = "DroidExtend \u2014 \u5b89\u5353\u62d3\u5c55\u5c4f"
+PREFIX = "DroidExtend"
+MAIN_HWND = 0
 HWND_TOPMOST = -1
 SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
 
@@ -68,16 +69,74 @@ def port_open(port, host="127.0.0.1", timeout=0.4):
 
 
 def wait_window(timeout=25.0):
+    """Find the main window by title prefix.
+
+    The title carries the version now ("DroidExtend — 安卓拓展屏   v1.2.0"), so
+    an exact FindWindowW on the old string stops matching after every bump.
+    """
     end = time.time() + timeout
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def cb(hwnd, _):
+        if u.IsWindowVisible(hwnd):
+            n = u.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, buf, n + 1)
+                if buf.value.startswith(PREFIX):
+                    found.append(hwnd)
+                    return False
+        return True
+
     while time.time() < end:
-        h = u.FindWindowW(None, TITLE)
-        if h:
-            return h
+        u.EnumWindows(cb, None)
+        if found:
+            return found[0]
         time.sleep(0.4)
     return 0
 
 
-def click(inj, frac, label):
+def app_dialogs(pid):
+    """Visible #32770 windows owned by the app - i.e. tkinter message boxes."""
+    out = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def cb(hwnd, _):
+        owner = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and u.IsWindowVisible(hwnd):
+            cls = ctypes.create_unicode_buffer(256)
+            u.GetClassNameW(hwnd, cls, 256)
+            if cls.value == "#32770":
+                out.append(hwnd)
+        return True
+
+    u.EnumWindows(cb, None)
+    return out
+
+
+def dismiss_dialogs(pid, when=""):
+    """Close any modal box the app put up.
+
+    PrintWindow only captures the window we ask for, so a modal dialog is
+    invisible in the screenshots while it quietly blocks the whole UI - which is
+    exactly how "I clicked and nothing happened" looks from the outside.
+    """
+    n = 0
+    for hwnd in app_dialogs(pid):
+        title = ctypes.create_unicode_buffer(256)
+        u.GetWindowTextW(hwnd, title, 256)
+        print("  !! app dialog hwnd=%d title=%r (%s) - closing it"
+              % (hwnd, title.value, when), flush=True)
+        u.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        n += 1
+    return n
+
+
+def click(inj, frac, label, pid=None):
+    if pid:
+        dismiss_dialogs(pid, "clicking " + label)
     nx, ny = int(frac[0] * 65535), int(frac[1] * 65535)
     inj.down(nx, ny)
     time.sleep(0.05)
@@ -86,12 +145,19 @@ def click(inj, frac, label):
     under = u.WindowFromPoint(p)
     root = u.GetAncestor(under, 2) if under else 0  # GA_ROOT
     print("  -> cursor (%d,%d) window_under=%d root=%d" % (p.x, p.y, under, root), flush=True)
+    if MAIN_HWND and root != MAIN_HWND:
+        buf = ctypes.create_unicode_buffer(256)
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetWindowTextW(root, buf, 256)
+        u.GetClassNameW(root, cls, 256)
+        print("  !! click landed on %s (%s) - window not on top" % (buf.value, cls.value), flush=True)
     time.sleep(0.12)
     inj.up(nx, ny)
     print("  clicked %s" % label, flush=True)
 
 
 def main():
+    global MAIN_HWND
     print("live before: %s" % live(), flush=True)
     adapter = vdd.status()["adapter"]["name"]
     if adapter in live():
@@ -107,12 +173,26 @@ def main():
     if not hwnd:
         raise SystemExit("window never appeared")
     print("window hwnd=%d" % hwnd, flush=True)
+    MAIN_HWND = hwnd
 
     u.ShowWindow(hwnd, 5)
-    u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
-    time.sleep(0.8)
-    u.SetForegroundWindow(hwnd)
-    time.sleep(1.2)
+    # Windows refuses SetForegroundWindow from a process that is not already
+    # foreground, and a refusal means the synthetic click lands on whatever is
+    # on top instead of on the button.  Attaching to the current foreground
+    # thread's input queue is the documented way around that.
+    for attempt in range(5):
+        u.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        fg = u.GetForegroundWindow()
+        tid_fg = u.GetWindowThreadProcessId(fg, None)
+        tid_me = ctypes.windll.kernel32.GetCurrentThreadId()
+        u.AttachThreadInput(tid_me, tid_fg, True)
+        u.BringWindowToTop(hwnd)
+        u.SetForegroundWindow(hwnd)
+        u.AttachThreadInput(tid_me, tid_fg, False)
+        time.sleep(0.6)
+        if u.GetForegroundWindow() == hwnd:
+            break
+    time.sleep(0.6)
 
     r = wintypes.RECT()
     u.GetWindowRect(hwnd, ctypes.byref(r))
@@ -122,8 +202,15 @@ def main():
 
     inj = Injector(rect, log=lambda m: None)
 
+    # The app fires its first environment refresh 300ms after startup and it
+    # takes a couple of seconds (adb server + driver status).  Give it room to
+    # finish, and clear anything modal it may have popped up meanwhile.
+    time.sleep(4.0)
+    dismiss_dialogs(proc.pid, "before start")
+    time.sleep(0.5)
+
     print("\n[1] click 开始投屏", flush=True)
-    click(inj, BTN_START, "开始投屏")
+    click(inj, BTN_START, "开始投屏", pid=proc.pid)
 
     ok = None
     touch_up = None
@@ -173,7 +260,7 @@ def main():
     print("\n[3] click 停止", flush=True)
     gone = False
     for attempt in range(4):
-        click(inj, BTN_STOP, "停止")
+        click(inj, BTN_STOP, "停止", pid=proc.pid)
         for i in range(20):
             time.sleep(1.0)
             names = live()
