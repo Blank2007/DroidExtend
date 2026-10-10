@@ -1,0 +1,29 @@
+# ───────── 二进制运行时依赖（体积大，不进仓库）─────────
+# 这些是随包分发的第三方二进制：ffmpeg / adb / Android SDK / 虚拟显示驱动。
+# 安装包（DroidExtend-Setup-*.exe）里已经带齐，源码仓库不重复存一份。
+tools/ffmpeg/
+tools/platform-tools/
+tools/sdk/
+tools/vdd/
+
+# ───────── 构建产物 ─────────
+_internal/
+DroidExtend.exe
+dist/
+android/build/
+tools/pybuild/
+*.spec
+
+# ───────── 调试与临时文件 ─────────
+tools/tmp/
+tools/shots/
+__pycache__/
+*.pyc
+*.log
+*.h264
+
+# ───────── 编辑器 / 系统 ─────────
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
