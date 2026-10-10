@@ -10,7 +10,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.1.0"
+#define AppVer "1.2.0"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -88,6 +88,11 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "{#P}\DroidExtend.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\DroidExtend.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+; MIT (VDD, nefcon) / Apache-2.0 (adb) / BSD-3 (R8) all require the notice to
+; travel with the binary copy, so the licence file ships next to the exe and
+; 帮助 -> 第三方组件许可 opens it.
+Source: "{#P}\第三方组件许可.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#P}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#P}\tools\ffmpeg\bin\ffmpeg.exe"; DestDir: "{app}\tools\ffmpeg\bin"; Flags: ignoreversion
 Source: "{#P}\tools\platform-tools\adb.exe"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion
