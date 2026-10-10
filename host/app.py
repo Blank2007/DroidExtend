@@ -7,11 +7,13 @@ the USB cable to the phone through an adb reverse tunnel.
 """
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+import webbrowser
+from tkinter import ttk, messagebox, filedialog
 
 
 class _NullStream:
@@ -45,6 +47,11 @@ DPI = wd.set_dpi_aware()          # must precede Tk: gives us real pixels
 from capture import ENCODERS, NVENC_PRESETS, X264_PRESETS, list_hardware_encoders  # noqa: E402
 from paths import ROOT, apk_path, adb_exe, ffmpeg_exe                             # noqa: E402
 from session import Session, DEFAULTS, VddMissing                                  # noqa: E402
+import manual as mn                                                               # noqa: E402
+import settings as st                                                             # noqa: E402
+import update as upd                                                              # noqa: E402
+from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER,   # noqa: E402
+                     EMAILS, REPO_URL, RELEASES_URL, ISSUES_URL)
 
 RESOLUTIONS = [
     (1280, 720), (1600, 900), (1920, 1080), (1920, 1200),
@@ -64,29 +71,209 @@ FG = "#e6e6e6"
 ACCENT = "#4c9aff"
 PANEL = "#1c1f26"
 
+# (component, licence, where it comes from) -- also mirrored in 使用说明 and in
+# the README, because two of these are redistributed inside the installer and
+# MIT asks for the notice to travel with the copy.
+CREDITS = [
+    ("Virtual Display Driver (VDD)", "MIT", "github.com/VirtualDrivers/Virtual-Display-Driver"),
+    ("nefcon", "MIT", "github.com/nefarius/nefcon"),
+    ("FFmpeg 6.0 (gyan.dev essentials)", "GPL-3.0", "ffmpeg.org"),
+    ("Android SDK Platform-Tools / adb", "Apache-2.0", "developer.android.com/tools/releases/platform-tools"),
+    ("R8 / D8 (Android build-tools)", "BSD-3-Clause", "r8.googlesource.com/r8"),
+    ("Python", "PSF-2.0", "python.org"),
+    ("Tcl/Tk", "BSD-style", "tcl.tk"),
+    ("PyInstaller", "GPL-2.0 + bootloader exception", "pyinstaller.org"),
+    ("Inno Setup（只用于生成安装包）", "Inno Setup License", "jrsoftware.org/isinfo.php"),
+]
+
+# Shipped next to DroidExtend.exe by the installer; MIT/Apache/BSD all want the
+# notice to travel with the binary copy.
+LICENSES = "第三方组件许可.txt"
+
+
+def _label_for(pairs, key, default=""):
+    for v, t in pairs:
+        if v == key:
+            return t
+    return default
+
+
+def _key_for(pairs, label, default=""):
+    for v, t in pairs:
+        if t == label:
+            return v
+    return default
+
+
+def _safe_geometry(s, fallback="980x760"):
+    """Only trust a saved geometry that is a sane size and on this screen."""
+    m = re.match(r"^(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?$", str(s or "").strip())
+    if not m:
+        return fallback
+    w, h = int(m.group(1)), int(m.group(2))
+    if not (760 <= w <= 8000 and 540 <= h <= 6000):
+        return fallback
+    if m.group(3) is None:
+        return "%dx%d" % (w, h)
+    x, y = int(m.group(3)), int(m.group(4))
+    if abs(x) > 12000 or abs(y) > 12000:
+        return "%dx%d" % (w, h)
+    return "%dx%d+%d+%d" % (w, h, x, y)
+
 
 class App(tk.Tk):
     def __init__(self):
         tk.Tk.__init__(self)
-        self.title("DroidExtend — 安卓拓展屏")
+        # Read the settings before anything is built: every widget is created
+        # with the value you used last time instead of a hard-coded default.
+        self.settings = st.load()
+        self.upd_busy = False
+        self._manual_win = None
+        self._manual_txt = None
+
+        self.title("%s — %s   v%s" % (APP_NAME, APP_TITLE, APP_VERSION))
         self.configure(bg=BG)
-        self.geometry("980x720")
-        self.minsize(880, 640)
+        self.geometry(_safe_geometry(self.settings.get("window")))
+        self.minsize(900, 660)
 
         self.logq = queue.Queue()
         self.session = Session(log=self.log)
         self.busy = False
+        self.refr_busy = False
+        self._build_menu()
         self._build()
+        self._apply_settings_to_form(self.settings)
+        self._load_encoders()
         self.after(120, self._drain_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.log("DroidExtend 启动  (DPI: %s)" % DPI)
+        self.log("%s v%s 启动  (DPI: %s)" % (APP_NAME, APP_VERSION, DPI))
         self.log("adb: %s" % (adb_exe() or "缺失"))
         self.log("ffmpeg: %s" % (ffmpeg_exe() or "缺失"))
+        self.log("设置文件: %s%s" % (st.where(),
+                                    "" if os.path.exists(st.FILE) else "  （还没有，退出时会创建）"))
         apk = apk_path()
         self.log("APK: %s%s" % (apk or "(缺失)", "" if apk else "  ← 先运行 build_apk.bat 构建"))
         if not apk:
             self.log("提示：双击 build_apk.bat 可以重新构建手机端安装包。", "err")
         self.after(300, self.refresh_env)
+        if self.settings.get("check_updates", True):
+            self.after(2500, lambda: self.on_check_updates(manual=False))
+
+    # ------------------------------------------------------------------- menu
+    def _build_menu(self):
+        bar = tk.Menu(self, tearoff=0)
+
+        m_file = tk.Menu(bar, tearoff=0)
+        m_file.add_command(label="打开设置目录", command=self.on_open_config_dir)
+        m_file.add_command(label="打开程序目录", command=self.on_open_root_dir)
+        m_file.add_separator()
+        m_file.add_command(label="退出", command=self._on_close)
+        bar.add_cascade(label="文件", menu=m_file)
+
+        m_tool = tk.Menu(bar, tearoff=0)
+        m_tool.add_command(label="安装虚拟显示器驱动…", command=self.on_install_driver)
+        m_tool.add_command(label="仅安装 APK 并启动", command=self.on_install_apk)
+        m_tool.add_separator()
+        m_tool.add_command(label="测一下数据线速度", command=self.on_linkspeed)
+        m_tool.add_separator()
+        self.chk_var = tk.BooleanVar(value=bool(self.settings.get("check_updates", True)))
+        m_tool.add_checkbutton(label="启动时自动检查更新", variable=self.chk_var,
+                               command=self._save_settings)
+        m_tool.add_command(label="检查更新…", command=lambda: self.on_check_updates(manual=True))
+        m_tool.add_separator()
+        m_tool.add_command(label="重置为默认设置", command=self.on_reset_settings)
+        m_tool.add_separator()
+        m_tool.add_command(label="复制全部日志到剪贴板", command=self.on_copy_log)
+        m_tool.add_command(label="日志另存为…", command=self.on_save_log)
+        bar.add_cascade(label="工具", menu=m_tool)
+
+        m_help = tk.Menu(bar, tearoff=0)
+        m_help.add_command(label="使用说明", command=self.on_manual)
+        m_help.add_command(label="常见问题", command=lambda: self.on_manual("【六、常见问题】"))
+        m_help.add_command(label="参数怎么选", command=lambda: self.on_manual("【五、参数怎么选】"))
+        m_help.add_separator()
+        m_help.add_command(label="项目主页（GitHub）", command=lambda: self.open_url(REPO_URL))
+        m_help.add_command(label="反馈问题 / 提建议", command=lambda: self.open_url(ISSUES_URL))
+        m_help.add_command(label="检查更新…", command=lambda: self.on_check_updates(manual=True))
+        m_help.add_separator()
+        m_help.add_command(label="第三方组件许可", command=self.on_licenses)
+        m_help.add_command(label="关于 " + APP_NAME, command=self.on_about)
+        bar.add_cascade(label="帮助", menu=m_help)
+
+        self.configure(menu=bar)
+
+    # --------------------------------------------------------------- settings
+    def _apply_settings_to_form(self, s):
+        """Push a settings dict into the widgets."""
+        res = "%dx%d" % (int(s.get("width", 1920)), int(s.get("height", 1080)))
+        known = ["%dx%d" % r for r in RESOLUTIONS]
+        custom = bool(s.get("custom_res")) or res not in known
+        self.res_var.set("自定义" if custom else res)
+        self.w_var.set(str(s.get("width", 1920)))
+        self.h_var.set(str(s.get("height", 1080)))
+        self.mode_var.set(s.get("mode", "extend"))
+        self.hz_var.set(str(s.get("hz", 60)))
+        self.fps_var.set(str(s.get("fps", 60)))
+        self.br_var.set(str(s.get("bitrate_mbps", 40)))
+        self.rc_var.set(_label_for(RATECONTROL, s.get("rate_control", "vbr"), RATECONTROL[0][1]))
+        self.q_var.set(str(s.get("quality", 20)))
+        self.enc_var.set(s.get("encoder", "h264_nvenc"))
+        self.pre_var.set(s.get("preset", "p4"))
+        self.be_var.set(_label_for(BACKENDS, s.get("backend", "auto"), BACKENDS[0][1]))
+        self.pos_var.set(_label_for(POSITIONS, s.get("position", "right"), POSITIONS[0][1]))
+        self.mouse_var.set(bool(s.get("draw_mouse", False)))
+        self.inst_var.set(bool(s.get("install_apk", True)))
+        if hasattr(self, "chk_var"):
+            self.chk_var.set(bool(s.get("check_updates", True)))
+        self._res_changed()
+        self._rc_changed()
+
+    def _form_values(self):
+        """Snapshot the widgets into a settings dict.  Never raises."""
+        s = dict(self.settings)
+        try:
+            if self.res_var.get() == "自定义":
+                s["custom_res"] = "1"
+                s["width"] = int(self.w_var.get())
+                s["height"] = int(self.h_var.get())
+            else:
+                s["custom_res"] = ""
+                w, h = self.res_var.get().split("x")
+                s["width"], s["height"] = int(w), int(h)
+        except Exception:
+            pass
+        for key, var in (("hz", self.hz_var), ("fps", self.fps_var),
+                         ("bitrate_mbps", self.br_var), ("quality", self.q_var)):
+            try:
+                s[key] = int(var.get())
+            except Exception:
+                pass
+        s["rate_control"] = self._rate_control()
+        s["encoder"] = self._enc_name()
+        s["preset"] = self.pre_var.get()
+        s["backend"] = self._backend()
+        s["position"] = self._position()
+        s["draw_mouse"] = bool(self.mouse_var.get())
+        s["install_apk"] = bool(self.inst_var.get())
+        s["mode"] = self.mode_var.get()
+        if hasattr(self, "chk_var"):
+            s["check_updates"] = bool(self.chk_var.get())
+        try:
+            if self.state() == "normal":
+                s["window"] = self.geometry()
+        except Exception:
+            pass
+        return s
+
+    def _save_settings(self, *_):
+        try:
+            self.settings = self._form_values()
+            st.save(self.settings)
+        except Exception as e:            # saving must never break the app
+            self.log("保存设置失败: %s" % e, "err")
+
+    def _changed_any(self, *_):
+        self._save_settings()
 
     # ------------------------------------------------------------------ build
     def _build(self):
@@ -252,11 +439,11 @@ class App(tk.Tk):
         self.pos_cb.grid(row=6, column=3, sticky="w", pady=3)
 
         self.mouse_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(right, text="显示鼠标指针", variable=self.mouse_var).grid(
-            row=7, column=1, sticky="w", pady=3)
+        self.mouse_chk = ttk.Checkbutton(right, text="显示鼠标指针", variable=self.mouse_var)
+        self.mouse_chk.grid(row=7, column=1, sticky="w", pady=3)
         self.inst_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(right, text="每次重新安装 APK", variable=self.inst_var).grid(
-            row=7, column=2, columnspan=2, sticky="w", pady=3)
+        self.inst_chk = ttk.Checkbutton(right, text="每次重新安装 APK", variable=self.inst_var)
+        self.inst_chk.grid(row=7, column=2, columnspan=2, sticky="w", pady=3)
 
         self.link_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.link_var, style="Dim.TLabel", wraplength=430,
@@ -275,31 +462,69 @@ class App(tk.Tk):
         self.btn_stop.pack(side="left", padx=8)
         self.stat_var = tk.StringVar(value="就绪")
         ttk.Label(act, textvariable=self.stat_var, style="Big.TLabel").pack(side="left", padx=16)
+        ttk.Button(act, text="使用说明", command=self.on_manual).pack(side="right")
+        ttk.Button(act, text="检查更新", command=lambda: self.on_check_updates(manual=True)).pack(
+            side="right", padx=6)
         self.perf_var = tk.StringVar(value="")
-        ttk.Label(act, textvariable=self.perf_var, style="Mono.TLabel").pack(side="right")
+        ttk.Label(act, textvariable=self.perf_var, style="Mono.TLabel").pack(side="right", padx=10)
 
         # -- log -------------------------------------------------------------
         logf = ttk.Labelframe(outer, text=" 日志 ", padding=6)
         logf.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        logf.rowconfigure(0, weight=1)
+        logf.rowconfigure(1, weight=1)
         logf.columnconfigure(0, weight=1)
+        lbar = ttk.Frame(logf)
+        lbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Button(lbar, text="复制全部", width=10, command=self.on_copy_log).pack(side="left")
+        ttk.Button(lbar, text="另存为…", width=10, command=self.on_save_log).pack(side="left", padx=6)
+        ttk.Button(lbar, text="清空", width=8, command=self.on_clear_log).pack(side="left")
+        self.log_hint_var = tk.StringVar(value="")
+        ttk.Label(lbar, textvariable=self.log_hint_var, style="Dim.TLabel").pack(side="right")
         self.log_txt = tk.Text(logf, bg="#0f1115", fg="#c8d0da", insertbackground=FG,
                                font=("Consolas", 9), wrap="word", relief="flat", height=12)
-        self.log_txt.grid(row=0, column=0, sticky="nsew")
+        self.log_txt.grid(row=1, column=0, sticky="nsew")
         sb = ttk.Scrollbar(logf, command=self.log_txt.yview)
-        sb.grid(row=0, column=1, sticky="ns")
+        sb.grid(row=1, column=1, sticky="ns")
         self.log_txt.configure(yscrollcommand=sb.set, state="disabled")
         self.log_txt.tag_configure("err", foreground="#ff7b72")
         self.log_txt.tag_configure("ok", foreground="#7ee787")
         self.log_txt.tag_configure("hl", foreground=ACCENT)
 
+        # -- status bar ------------------------------------------------------
+        bar = ttk.Frame(outer)
+        bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(bar, text="%s v%s" % (APP_NAME, APP_VERSION), style="Dim.TLabel").pack(side="left")
+        ttk.Label(bar, text=REPO_URL, style="Dim.TLabel").pack(side="left", padx=12)
+        self.file_var = tk.StringVar(value="设置: %s" % st.where())
+        ttk.Label(bar, textvariable=self.file_var, style="Dim.TLabel").pack(side="right")
+
+        # Any settings change is written straight out, so even a crash leaves
+        # the next start on the settings you picked.  add="+" keeps the existing
+        # handlers (which fix up presets and the Q field) running first.
+        for cb in (self.res_cb, self.hz_cb, self.fps_cb, self.br_cb, self.rc_cb,
+                   self.q_cb, self.enc_cb, self.pre_cb, self.be_cb, self.pos_cb):
+            cb.bind("<<ComboboxSelected>>", self._changed_any, add="+")
+        for chk in (self.mouse_chk, self.inst_chk):
+            chk.configure(command=self._changed_any)
+
         self.after(900, self._poll_perf)
-        self._load_encoders()
-        self._rc_changed()
 
     # ------------------------------------------------------------------ utils
     def log(self, msg, tag=None):
         self.logq.put((time.strftime("%H:%M:%S ") + str(msg), tag))
+
+    def _later(self, fn):
+        """Schedule onto the UI thread from a worker.
+
+        Closing the window while a background job is still in flight used to
+        raise "main thread is not in main loop" inside that thread, because
+        self.after() on a destroyed interpreter is an error.  A closed window is
+        not a failure, so swallow it.
+        """
+        try:
+            self.after(0, fn)
+        except (RuntimeError, tk.TclError):
+            pass
 
     def _drain_log(self):
         try:
@@ -318,12 +543,14 @@ class App(tk.Tk):
     def _load_encoders(self):
         have = list_hardware_encoders()
         items = [k for k in ENCODERS if k in have] or ["libx264"]
-        if "h264_nvenc" not in items and "libx264" in items:
-            self.enc_var.set("libx264")
+        # Keep whatever the settings file asked for, as long as this machine can
+        # actually encode with it; only fall back when it cannot.  (The old code
+        # always forced h264_nvenc/libx264 and threw a saved choice away.)
+        if self.enc_var.get() not in items:
+            self.enc_var.set("h264_nvenc" if "h264_nvenc" in items else items[0])
         self.enc_cb["values"] = ["%s — %s" % (k, ENCODERS[k]["label"]) for k in items]
         self._enc_items = items
-        self.enc_cb.set("%s — %s" % (self.enc_var.get() if self.enc_var.get() in items else items[0],
-                                     ENCODERS[self.enc_var.get() if self.enc_var.get() in items else items[0]]["label"]))
+        self.enc_cb.set("%s — %s" % (self.enc_var.get(), ENCODERS[self.enc_var.get()]["label"]))
         self.log("可用编码器: " + ", ".join(items))
         self._enc_changed()
 
@@ -369,7 +596,7 @@ class App(tk.Tk):
     def _linkspeed_work(self):
         import linkspeed
         from adb import Adb
-        self.after(0, lambda: self.stat_var.set("测量链路…"))
+        self._later(lambda: self.stat_var.set("测量链路…"))
         adb = Adb()
         rows = [r for r in adb.devices() if r["state"] == "device"]
         if not rows:
@@ -382,19 +609,19 @@ class App(tk.Tk):
         self.log("正在测量 %s 的 USB 链路（约 6 秒）…" % serial)
         r = linkspeed.measure(adb, serial, log=self.log)
         if r["error"]:
-            self.after(0, lambda: self.link_var.set("链路测速失败: " + r["error"]))
-            self.after(0, lambda: self.stat_var.set("测速失败"))
+            self._later(lambda: self.link_var.set("链路测速失败: " + r["error"]))
+            self._later(lambda: self.stat_var.set("测速失败"))
             return
         v = linkspeed.verdict(r["mbps"])
         # leave a little headroom for protocol overhead and bursts
         cap = max(2, int(r["mbps"] * 0.75))
         text = "链路 %.1f Mbps（%s）→ 建议码率上限不超过 %d Mbps" % (r["mbps"], v, cap)
-        self.after(0, lambda: self.link_var.set(text))
-        self.after(0, lambda: self.stat_var.set("测速完成"))
+        self._later(lambda: self.link_var.set(text))
+        self._later(lambda: self.stat_var.set("测速完成"))
         if int(self.br_var.get()) > cap:
             self.log("当前码率上限 %s Mbps 高于链路可承载的 %d Mbps，已自动下调。"
                      % (self.br_var.get(), cap), "err")
-            self.after(0, lambda: self.br_var.set(str(cap)))
+            self._later(lambda: self.br_var.set(str(cap)))
         self.log(text, "ok")
 
     def _mode_changed(self):
@@ -415,34 +642,52 @@ class App(tk.Tk):
         return "right"
 
     # ------------------------------------------------------------- background
-    def run_bg(self, fn, done=None):
-        if self.busy:
-            messagebox.showinfo("请稍候", "上一个任务还在进行中。")
-            return
-        self.busy = True
-        self.btn_start.configure(state="disabled")
+    def run_bg(self, fn, done=None, exclusive=True):
+        # An exclusive job owns the start button and the `busy` flag.  The
+        # environment refresh must not: it runs 300ms after launch and takes a
+        # couple of seconds (adb server + driver status), so a click on 开始投屏
+        # during that window used to hit "上一个任务还在进行中" - a modal dialog
+        # that blocks the UI and makes the button look broken.
+        if exclusive:
+            if self.busy:
+                messagebox.showinfo("请稍候", "上一个任务还在进行中。")
+                return
+            self.busy = True
+            self.btn_start.configure(state="disabled")
+        else:
+            if self.refr_busy:
+                return
+            self.refr_busy = True
 
         def work():
             err = None
             try:
-                fn()
-            except VddMissing as e:
-                err = ("虚拟显示器未就绪：%s\n\n请先点“安装虚拟显示器驱动（需要管理员）”。" % e)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                err = "%s: %s" % (type(e).__name__, e)
-            self.after(0, lambda: self._bg_done(err, done))
+                try:
+                    fn()
+                except VddMissing as e:
+                    err = ("虚拟显示器未就绪：%s\n\n请先点“安装虚拟显示器驱动（需要管理员）”。" % e)
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    err = "%s: %s" % (type(e).__name__, e)
+            finally:
+                # Must happen even if handling the error above blew up: this is
+                # the only place that clears `busy`, and a stuck `busy` means the
+                # start button silently does nothing but say "请稍候" for ever.
+                self._later(lambda: self._bg_done(err, done, exclusive))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _bg_done(self, err, done):
-        self.busy = False
-        # run_bg() greys the start button out for the duration of the job, so it
-        # has to be handed back here.  Forgetting this left the very first
-        # refresh_env() (fired 300ms after startup) with the button disabled for
-        # good, and the UI could never start a stream.
-        if not (self.session and self.session.running):
+    def _bg_done(self, err, done, exclusive=True):
+        if exclusive:
+            self.busy = False
+        else:
+            self.refr_busy = False
+        # run_bg() greys the start button out for the duration of an exclusive
+        # job, so it has to be handed back here.  Forgetting this left the very
+        # first refresh_env() (fired 300ms after startup) with the button
+        # disabled for good, and the UI could never start a stream.
+        if exclusive and not (self.session and self.session.running):
             self.btn_start.configure(state="normal")
         if err:
             self.log(err.replace("\n", " "), "err")
@@ -462,7 +707,7 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ env
     def refresh_env(self):
-        self.run_bg(self._refresh_work, done="quiet")
+        self.run_bg(self._refresh_work, done="quiet", exclusive=False)
 
     def _refresh_work(self):
         import vdd as vd
@@ -474,23 +719,23 @@ class App(tk.Tk):
             self.log("adb 不可用: %s" % e)
         ready = [r for r in rows if r["state"] == "device"]
         if ready:
-            self.after(0, lambda: self.dev_var.set(ready[0]["label"]))
+            self._later(lambda: self.dev_var.set(ready[0]["label"]))
         elif rows:
-            self.after(0, lambda: self.dev_var.set(
+            self._later(lambda: self.dev_var.set(
                 "已连接但未授权: " + ", ".join(r["serial"] + "=" + r["state"] for r in rows)))
         else:
-            self.after(0, lambda: self.dev_var.set("未检测到设备（请用数据线连接并打开 USB 调试）"))
+            self._later(lambda: self.dev_var.set("未检测到设备（请用数据线连接并打开 USB 调试）"))
 
         st = vd.status()
-        self.after(0, lambda: self.drv_var.set(vd.summary_line(st)))
-        self.after(0, lambda: self.btn_install.configure(
+        self._later(lambda: self.drv_var.set(vd.summary_line(st)))
+        self._later(lambda: self.btn_install.configure(
             state="disabled" if st["state"] == "ready" else "normal"))
 
         mons = wd.live_monitors()
         text = "\n".join("%-12s %-28s %dx%d@%d  @(%d,%d)%s" % (
             m["name"], (m["monitor"] or m["desc"])[:28], m["width"], m["height"],
             m["hz"], m["left"], m["top"], "  [主]" if m["primary"] else "") for m in mons)
-        self.after(0, lambda: self.mon_var.set("当前桌面显示器:\n" + (text or "（无）")))
+        self._later(lambda: self.mon_var.set("当前桌面显示器:\n" + (text or "（无）")))
         if st["state"] != "ready":
             self.log("虚拟显示器状态: " + vd.summary_line(st))
 
@@ -506,40 +751,41 @@ class App(tk.Tk):
 
     def _install_driver_work(self):
         import vdd as vd
-        self.after(0, lambda: self.stat_var.set("安装驱动…"))
+        self._later(lambda: self.stat_var.set("安装驱动…"))
         ok, out = vd.install(log=self.log)
         for line in (out or "").splitlines()[-40:]:
             self.log("  " + line)
         if not ok:
             raise RuntimeError("驱动安装未成功，详见日志。")
         self.log("虚拟显示器驱动安装完成。", "ok")
-        self.after(0, lambda: self.stat_var.set("驱动已安装"))
+        self._later(lambda: self.stat_var.set("驱动已安装"))
         self._refresh_work()
 
     def on_install_apk(self):
         self.run_bg(self._install_apk_work)
 
     def _install_apk_work(self):
-        self.after(0, lambda: self.stat_var.set("安装 APK…"))
+        self._later(lambda: self.stat_var.set("安装 APK…"))
         self.session.cfg["install_apk"] = self.inst_var.get()
         self.session.find_device()
         self.session.prepare_device()
-        self.after(0, lambda: self.stat_var.set("APK 已就绪"))
+        self._later(lambda: self.stat_var.set("APK 已就绪"))
 
     def on_start(self):
         self._apply_form()
+        self._save_settings()          # starting is a good moment to persist
         self.run_bg(self._start_work)
 
     def _start_work(self):
-        self.after(0, lambda: self.stat_var.set("准备拓展屏…"))
+        self._later(lambda: self.stat_var.set("准备拓展屏…"))
         self.session.apply_display()
-        self.after(0, lambda: self.stat_var.set("连接手机…"))
+        self._later(lambda: self.stat_var.set("连接手机…"))
         self.session.find_device()
         self.session.prepare_device()
-        self.after(0, lambda: self.stat_var.set("启动编码…"))
+        self._later(lambda: self.stat_var.set("启动编码…"))
         self.session.start_stream()
         self.log("=== 投屏已开始：%s ===" % self.session.describe(), "ok")
-        self.after(0, self._started)
+        self._later(self._started)
 
     def _started(self):
         self.stat_var.set("投屏中")
@@ -590,12 +836,202 @@ class App(tk.Tk):
         self.after(700, self._poll_perf)
 
     def _on_close(self):
+        self._save_settings()          # remember the window and the parameters
         try:
             if self.session.running or self.session.server:
                 self.session.stop()
         except Exception:
             pass
         self.destroy()
+
+    # ----------------------------------------------------------- log helpers
+    def _log_text(self):
+        return self.log_txt.get("1.0", "end-1c")
+
+    def _flash_hint(self, msg):
+        self.log_hint_var.set(msg)
+        self.after(3000, lambda: self.log_hint_var.set(""))
+
+    def on_copy_log(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self._log_text())
+            self._flash_hint("日志已复制到剪贴板")
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e), parent=self)
+
+    def on_save_log(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, title="保存日志", defaultextension=".txt",
+            initialfile="DroidExtend-%s.txt" % time.strftime("%Y%m%d-%H%M%S"),
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self._log_text())
+            self._flash_hint("日志已保存到 " + path)
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e), parent=self)
+
+    def on_clear_log(self):
+        self.log_txt.configure(state="normal")
+        self.log_txt.delete("1.0", "end")
+        self.log_txt.configure(state="disabled")
+        self.log("日志已清空。")
+
+    # ------------------------------------------------------- menu glue / help
+    def open_url(self, url):
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror("打开浏览器失败", "%s\n\n地址：%s" % (e, url), parent=self)
+
+    def on_open_config_dir(self):
+        d = os.path.dirname(st.FILE)
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.startfile(d)
+        except Exception as e:
+            messagebox.showerror("打开失败", "%s\n\n%s" % (e, d), parent=self)
+
+    def on_open_root_dir(self):
+        try:
+            os.startfile(ROOT)
+        except Exception as e:
+            messagebox.showerror("打开失败", "%s\n\n%s" % (e, ROOT), parent=self)
+
+    def on_licenses(self):
+        """Show 第三方组件许可.txt: the MIT/Apache/BSD texts we must ship."""
+        path = os.path.join(ROOT, LICENSES)
+        if not os.path.exists(path):
+            messagebox.showinfo(
+                "第三方组件许可",
+                "没有找到 %s。\n\n它随安装包一起分发，来源见：\n%s" % (LICENSES, REPO_URL),
+                parent=self)
+            return
+        try:
+            os.startfile(path)
+        except Exception as e:
+            messagebox.showerror("打开失败", "%s\n\n%s" % (e, path), parent=self)
+
+    def on_manual(self, anchor=None):
+        if self._manual_win is not None and self._manual_win.winfo_exists():
+            win = self._manual_win
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+        else:
+            win = tk.Toplevel(self)
+            self._manual_win = win
+            win.title("使用说明 — %s v%s" % (APP_NAME, APP_VERSION))
+            win.configure(bg=BG)
+            win.geometry("880x720")
+            win.minsize(560, 400)
+            win.rowconfigure(0, weight=1)
+            win.columnconfigure(0, weight=1)
+            txt = tk.Text(win, bg="#0f1115", fg="#c8d0da", insertbackground=FG,
+                          font=("Microsoft YaHei UI", 10), wrap="word", relief="flat",
+                          padx=16, pady=12, spacing1=1, spacing3=1)
+            txt.grid(row=0, column=0, sticky="nsew")
+            sb = ttk.Scrollbar(win, command=txt.yview)
+            sb.grid(row=0, column=1, sticky="ns")
+            txt.configure(yscrollcommand=sb.set)
+            txt.insert("1.0", mn.TEXT)
+            txt.configure(state="disabled")
+            self._manual_txt = txt
+            foot = ttk.Frame(win, padding=(12, 8))
+            foot.grid(row=1, column=0, columnspan=2, sticky="ew")
+            ttk.Button(foot, text="项目主页", command=lambda: self.open_url(REPO_URL)).pack(side="left")
+            ttk.Button(foot, text="反馈问题", command=lambda: self.open_url(ISSUES_URL)).pack(
+                side="left", padx=6)
+            ttk.Button(foot, text="关闭", command=win.destroy).pack(side="right")
+        if anchor and self._manual_txt is not None:
+            txt = self._manual_txt
+            try:
+                hit = txt.search(anchor, "1.0", stopindex="end")
+                if hit:
+                    txt.see(hit)
+            except tk.TclError:
+                pass
+
+    def on_about(self):
+        lines = [
+            "%s — %s" % (APP_NAME, APP_TITLE),
+            "版本 v%s  (%s)" % (APP_VERSION, APP_DATE),
+            "",
+            "用一根 USB 数据线，把安卓手机/平板变成 Windows 的第二块显示器。",
+            "真扩展桌面，不是投屏镜像；端到端延迟实测 5~11 ms，支持触摸反控。",
+            "",
+            "代码作者：%s" % AUTHOR,
+            "人类只负责提需求、给方向和验收。",
+            "项目所有者：%s" % OWNER,
+            "",
+            "仓库：%s" % REPO_URL,
+            "反馈：%s" % ISSUES_URL,
+            "邮箱：%s" % " / ".join(EMAILS),
+            "",
+            "—— 用到的第三方组件 ——",
+        ]
+        lines += ["· %s（%s）  %s" % c for c in CREDITS]
+        lines += ["", "完整许可与出处见 帮助 -> 第三方组件许可"]
+        lines += ["（程序目录下的《%s》）" % LICENSES]
+        messagebox.showinfo("关于 %s" % APP_NAME, "\n".join(lines), parent=self)
+
+    def on_reset_settings(self):
+        if not messagebox.askyesno(
+                "重置为默认设置",
+                "把界面上的参数恢复成默认值，并删掉已保存的设置文件。\n\n继续吗？", parent=self):
+            return
+        try:
+            if os.path.exists(st.FILE):
+                os.remove(st.FILE)
+        except Exception as e:
+            self.log("删除设置文件失败: %s" % e, "err")
+        default = st.load()
+        self.settings = default
+        self._apply_settings_to_form(default)
+        self._load_encoders()
+        self._save_settings()
+        self.log("设置已重置为默认值。", "ok")
+
+    # ---------------------------------------------------------------- updates
+    def on_check_updates(self, manual=False):
+        if self.upd_busy:
+            if manual:
+                self.log("上一次检查还没结束，稍等一下。")
+            return
+        self.upd_busy = True
+        if manual:
+            self.log("正在向 GitHub 查询最新版本…")
+
+        def work():
+            r = upd.check()
+            self._later(lambda: self._upd_done(r, manual))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _upd_done(self, r, manual):
+        self.upd_busy = False
+        if not r["ok"]:
+            self.log("检查更新失败：%s" % r["error"], "err")
+            if manual:
+                messagebox.showwarning(
+                    "检查更新",
+                    "查询 GitHub 失败：\n%s\n\n（离线 / 被墙都不影响正常使用，"
+                    "可以手动打开：\n%s）" % (r["error"], RELEASES_URL), parent=self)
+            return
+        if r["newer"]:
+            self.log("发现新版本 v%s（当前 v%s）：%s" % (r["latest"], APP_VERSION, r["url"]), "ok")
+            if messagebox.askyesno(
+                    "发现新版本",
+                    "有新版本 v%s，当前是 v%s。\n\n要打开下载页面吗？\n%s"
+                    % (r["latest"], APP_VERSION, r["url"]), parent=self):
+                self.open_url(r["url"])
+        else:
+            self.log("已是最新版本 v%s。" % APP_VERSION, "ok")
+            if manual:
+                messagebox.showinfo("检查更新", "已经是最新版本 v%s。" % APP_VERSION, parent=self)
 
 
 def main():
