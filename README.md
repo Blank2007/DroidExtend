@@ -374,3 +374,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
   否则 Inno 会按 ANSI 解析，中文全乱。
 * 改脚本时注意：`[Setup]` 段用 `=`，而 `[Files] / [Icons] / [Run] / [Tasks]` 段的参数用 **`:`** ——
   写成 `Comment="…"` 会直接编译失败（`Unrecognized parameter name`）。
+
+## 九.如果有用到其他作者的开源项目代码请联系我 我会在下一版写明 有侵权也及时联系我
+
+**邮箱：1553008865@qq.com / lsw1553008865@gmail.com(备用)
