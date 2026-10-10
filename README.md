@@ -13,7 +13,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-10 的一次会话内从零写完并交付到可安装的 1.1.0。
+> 于 2026-10-10 的一次会话内从零写完并交付到可安装的 1.2.0。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -33,11 +33,28 @@
 | 📦 **开箱即用** | 34 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.1.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.1.0.exe)**（34 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.2.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.2.0.exe)**（34 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（21 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
 > 本仓库只放源码 —— 二进制依赖（ffmpeg、adb、Android SDK、虚拟显示驱动）加起来 370 MB，没有进仓库。
+
+### 1.2.0 加了什么
+
+* **参数会被记住** —— 调好的分辨率 / 帧率 / 码率 / 模式 / 屏幕位置，关掉软件再打开还是上次那套，
+  存在 `%USERPROFILE%\.droidextend\settings.json`（菜单 `文件 → 打开设置目录`）。
+  窗口大小和位置也会记住。`工具 → 重置为默认设置` 可以一键还原。
+* **检查更新** —— `工具 → 检查更新` 会去 GitHub 查最新 Release，有新版本会问你要不要打开下载页；
+  默认每次启动静默查一次，可以在 `工具` 菜单里关掉。
+* **软件里就有使用说明** —— `帮助 → 使用说明`（或直接点界面上的“使用说明”按钮），
+  按“这是什么 / 手机准备 / 第一次使用 / 触摸怎么用 / 参数怎么选 / 常见问题”分节，
+  支持从 `帮助 → 常见问题`、`帮助 → 参数怎么选` 直接跳进对应小节。
+* **界面整理**：加了菜单栏和底部状态栏（显示版本、仓库地址、设置文件位置）、
+  日志区加了“复制全部 / 另存为 / 清空”工具条、动作按钮旁加了“使用说明 / 检查更新”。
+* **认屏更保险**：ddagrab 只认 DXGI 输出序号，分辨率**不是**身份。当虚拟屏和物理屏分辨率相同时
+  （比如 1080p 笔记本 + 1080p 虚拟屏），旧代码会静默抓到笔记本自己那块屏上去。
+  现在会先按尺寸筛、尺寸撞车就抓缩略图逐像素比对，**认不出来就退回 gdigrab**（按桌面坐标抓，必然正确），
+  绝不猜一个序号。
 
 ---
 
@@ -109,6 +126,9 @@
 ---
 
 ## 二、界面说明
+
+顶部是菜单栏（**文件 / 工具 / 帮助**），底部状态栏显示版本号、仓库地址和设置文件位置。
+中间左半边看设备和显示器状态，右半边调画质与帧率。
 
 | 项目 | 说明 |
 | --- | --- |
@@ -358,7 +378,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
   "D:\dsh projects\droid-extend\tools\installer\DroidExtend.iss"
 ```
 
-产物直接覆盖 `dist\DroidExtend-Setup-1.1.0.exe`（约 18 秒，lzma2/max）。
+产物直接覆盖 `dist\DroidExtend-Setup-1.2.0.exe`（约 18 秒，lzma2/max）。
 
 脚本在 `tools/installer/DroidExtend.iss`，要点：
 
@@ -375,6 +395,50 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 * 改脚本时注意：`[Setup]` 段用 `=`，而 `[Files] / [Icons] / [Run] / [Tasks]` 段的参数用 **`:`** ——
   写成 `Comment="…"` 会直接编译失败（`Unrecognized parameter name`）。
 
-## 九.如果有用到其他作者的开源项目代码请联系我 我会在下一版写明 有侵权也及时联系我
+---
 
-**邮箱：1553008865@qq.com / lsw1553008865@gmail.com(备用)
+## 九、致谢、联系与许可
+
+### 用到的第三方组件
+
+这个项目是站在别人的肩膀上的，下面这些组件**不是我写的**，在此一并致谢：
+
+| 组件 | 用途 | 许可 | 出处 |
+| --- | --- | --- | --- |
+| **Virtual Display Driver (VDD)** | 让 Windows 真的多出一块虚拟显示器 —— “真扩展桌面”的地基 | MIT | [VirtualDrivers/Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) |
+| **nefcon** | 静默安装／卸载设备驱动（代替手工开设备管理器） | MIT | [nefarius/nefcon](https://github.com/nefarius/nefcon) |
+| **FFmpeg** | `ddagrab` 桌面复制 + `h264_nvenc` 硬件编码（以独立进程调用） | GPL-3.0 | [ffmpeg.org](https://ffmpeg.org/) |
+| **Android SDK Platform-Tools (adb)** | 安装手机端 APK、建立两条 `adb reverse` 隧道 | Apache-2.0 | [developer.android.com](https://developer.android.com/tools/releases/platform-tools) |
+| **R8 / D8** | 只在**构建** APK 时把 Java 编成 dex（运行期不分发） | BSD-3-Clause | [r8.googlesource.com/r8](https://r8.googlesource.com/r8) |
+| **Python / Tcl-Tk** | 程序本体与图形界面 | PSF-2.0 / BSD-style | [python.org](https://www.python.org/) · [tcl.tk](https://www.tcl.tk/) |
+| **PyInstaller** | 打包成 `DroidExtend.exe` | GPL-2.0 + bootloader exception | [pyinstaller.org](https://pyinstaller.org/) |
+| **Inno Setup** | 生成安装程序 | Inno Setup License | [jrsoftware.org](https://jrsoftware.org/isinfo.php) |
+
+许可全文、版权声明和每个组件的具体分发内容，都写在
+**[`第三方组件许可.txt`](第三方组件许可.txt)** 里（安装包里也有，程序里走
+`帮助 → 第三方组件许可` 可以直接打开）。MIT / Apache-2.0 / BSD 这些许可都要求
+「分发二进制时一并附上声明」，所以这份文件是随安装包一起走的，不是可选项。
+
+本项目自己的代码（`host/` 的 Python、`android/src/` 的 Java、`tools/` 的脚本、
+图标和文档）以 **MIT** 许可发布，见 [LICENSE](LICENSE)。
+图标是 `tools/make_icon.py` 用代码画像素生成的，没有使用任何现成素材或字体。
+
+> ⚠️ **如果你发现这里用了你的作品却漏了署名，或者署名／许可写错了，
+> 请联系我，我会在下一个版本里补上。有侵权也请直接联系，我会立刻处理。**
+
+### 联系我
+
+| | |
+| --- | --- |
+| 👤 **作者** | [@Blank2007](https://github.com/Blank2007)（Void_Blank） |
+| 🐙 **GitHub** | 提 Issue / 建议 / 反馈 bug：[**Blank2007/DroidExtend/issues**](https://github.com/Blank2007/DroidExtend/issues) —— 这是最快的联系方式 |
+| 💬 **GitHub 讨论** | 也欢迎直接来仓库 [主页](https://github.com/Blank2007/DroidExtend) 点 ⭐ 或开 Discussion |
+| 📧 **邮箱** | 1553008865@qq.com |
+| 📧 **备用邮箱** | lsw1553008865@gmail.com |
+
+### 最后说一句
+
+这个软件——从第一行 Python 到 APK、从图标到安装包、包括这份 README——
+**全部由 AI 编码代理（DeepSeek Harness / deepseek-flash）在 2026-10-10 的一次会话里写完**。
+人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、给方向、插上真机测试和验收。
+整个过程、踩过的每一个坑和所有实测数据都在 **[开发日志.md](开发日志.md)** 里。
