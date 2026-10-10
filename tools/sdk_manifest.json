@@ -1,0 +1,12 @@
+{
+  "build-tools;34.0.0": {
+    "url": "https://dl.google.com/android/repository/build-tools_r34-windows.zip",
+    "file": "D:\\dsh projects\\droid-extend\\tools\\build-tools_r34-windows.zip",
+    "size": 58253258
+  },
+  "platforms;android-34": {
+    "url": "https://dl.google.com/android/repository/platform-34-ext12_r01.zip",
+    "file": "D:\\dsh projects\\droid-extend\\tools\\platform-34-ext12_r01.zip",
+    "size": 63559957
+  }
+}
