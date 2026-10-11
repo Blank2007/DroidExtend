@@ -129,7 +129,7 @@ def ddagrab_outputs(ffmpeg=None, refresh=False):
     return _DDA_OUTPUTS
 
 
-def _run_thumb(cmd, size, timeout=25):
+def _run_thumb(cmd, size, timeout=8):
     """Run a one-frame ffmpeg grab and return its raw thumbnail bytes."""
     try:
         p = subprocess.run(cmd, capture_output=True, timeout=timeout,
@@ -141,12 +141,19 @@ def _run_thumb(cmd, size, timeout=25):
     return p.stdout
 
 
+# The probe runs at 30 fps even though it takes a single frame: ddagrab's first
+# frame is the one before the duplication has anything in it, so the filter
+# drops frame 0 and keeps frame 1 -- at 1 fps that is a two-second wait, which
+# is exactly how "identify the output" turned into a nine-second stall.
+_THUMB_FPS = 30
+
+
 def _thumb_output(idx, ff, size=_THUMB):
     """size x size grayscale thumbnail of one DXGI output."""
     return _run_thumb([ff, "-hide_banner", "-loglevel", "error", "-nostdin",
                        "-init_hw_device", "d3d11va=gpu", "-filter_hw_device", "gpu",
                        "-f", "lavfi", "-i",
-                       "ddagrab=output_idx=%d:framerate=1:draw_mouse=0" % idx,
+                       "ddagrab=output_idx=%d:framerate=%d:draw_mouse=0" % (idx, _THUMB_FPS),
                        "-vf", r"hwdownload,format=bgra,select=gt(n\,0),"
                               "scale=%d:%d,format=gray" % (size, size),
                        "-frames:v", "1", "-f", "rawvideo", "-"], size)
@@ -155,7 +162,7 @@ def _thumb_output(idx, ff, size=_THUMB):
 def _thumb_desktop(rect, ff, size=_THUMB):
     """size x size grayscale thumbnail of the desktop region the VDD occupies."""
     return _run_thumb([ff, "-hide_banner", "-loglevel", "error", "-nostdin",
-                       "-f", "gdigrab", "-framerate", "1", "-draw_mouse", "0",
+                       "-f", "gdigrab", "-framerate", str(_THUMB_FPS), "-draw_mouse", "0",
                        "-offset_x", str(int(rect["left"])),
                        "-offset_y", str(int(rect["top"])),
                        "-video_size", "%dx%d" % (int(rect["width"]), int(rect["height"])),
