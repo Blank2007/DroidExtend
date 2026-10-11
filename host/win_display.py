@@ -370,6 +370,41 @@ def available_modes(device_name):
     return sorted(modes, key=lambda t: (-t[0] * t[1], -t[2]))
 
 
+def best_mode(device_name, width, height, hz=60):
+    """The advertised mode that best matches a wanted size.
+
+    Returns (width, height, hz, exact), or None when the display reports no
+    modes at all.
+
+    An exact size always wins.  Otherwise we judge by *aspect ratio*, because
+    that is what decides whether the picture fills the tablet or sits inside
+    black bars; among equally-close aspects the one closest in area wins, so a
+    phone asking for 3200x2136 gets 2560x1600 rather than 3840x2160.
+    """
+    modes = available_modes(device_name)
+    if not modes:
+        return None
+    sizes = sorted({(m[0], m[1]) for m in modes})
+    want = (int(width), int(height))
+    if want in sizes:
+        return (want[0], want[1],
+                min((m[2] for m in modes if (m[0], m[1]) == want),
+                    key=lambda r: abs(r - hz)),
+                True)
+    want_aspect = want[0] / float(want[1] or 1)
+
+    def score(size):
+        aspect = size[0] / float(size[1] or 1)
+        return (abs(aspect - want_aspect),
+                abs(size[0] * size[1] - want[0] * want[1]))
+
+    size = min(sizes, key=score)
+    return (size[0], size[1],
+            min((m[2] for m in modes if (m[0], m[1]) == size),
+                key=lambda r: abs(r - hz)),
+            False)
+
+
 def desktop_rect(device_name):
     """The display's rectangle in physical desktop coordinates (capture origin)."""
     m = current_mode(device_name)
