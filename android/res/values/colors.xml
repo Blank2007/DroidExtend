@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Used by the adaptive launcher icon background layer. -->
+    <color name="ic_launcher_background">#1B4AD8</color>
+
+    <!-- HUD palette.  Kept here so the drawn overlay and the settings sheet
+         cannot drift apart. -->
+    <color name="hud_panel">#CC0A1020</color>
+    <color name="hud_stroke">#44FFFFFF</color>
+    <color name="hud_text">#FFFFFFFF</color>
+    <color name="hud_dim">#99FFFFFF</color>
+    <color name="hud_good">#FF5BE39A</color>
+    <color name="hud_warn">#FFFFC45B</color>
+    <color name="hud_bad">#FFFF7B72</color>
+
+    <!-- Settings sheet. -->
+    <color name="sheet_bg">#F2101728</color>
+    <color name="sheet_row">#14FFFFFF</color>
+    <color name="accent">#FF4C86FF</color>
+</resources>
