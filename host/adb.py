@@ -123,6 +123,19 @@ class Adb(object):
             args.append("-r")
         args.append(apk)
         rc, out = self.run(*args, timeout=180)
+        ok = rc == 0 and "Success" in out
+        if not ok and "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in out:
+            # The APK that is on the phone was signed with a different key
+            # (that happens whenever the build keystore is regenerated), and
+            # Android refuses to replace it in place.  Drop the old package and
+            # install cleanly rather than leaving the user with a stale app.
+            self.uninstall(serial)
+            rc, out = self.run(*args, timeout=180)
+            ok = rc == 0 and "Success" in out
+        return ok, out
+
+    def uninstall(self, serial, package="com.droidextend"):
+        rc, out = self.run("-s", serial, "uninstall", package, timeout=90)
         return rc == 0 and "Success" in out, out
 
     def is_installed(self, serial, package="com.droidextend"):
@@ -138,3 +151,25 @@ class Adb(object):
     def display_info(self, serial):
         rc, out = self.run("-s", serial, "shell", "wm", "size", timeout=20)
         return out.strip()
+
+    def physical_size(self, serial):
+        """The panel's real resolution as (width, height), or None.
+
+        `wm size` prints an override as well as the physical size when they
+        differ; the physical one is the panel, which is what we want the
+        virtual screen to match.  The pair comes back in the panel's natural
+        (usually portrait) orientation - the caller decides what to do with
+        that.
+        """
+        rc, out = self.run("-s", serial, "shell", "wm", "size", timeout=20)
+        if rc != 0:
+            return None
+        m = (re.search(r"Physical size:\s*(\d+)\s*x\s*(\d+)", out)
+             or re.search(r"Override size:\s*(\d+)\s*x\s*(\d+)", out)
+             or re.search(r"(\d+)\s*x\s*(\d+)", out))
+        if not m:
+            return None
+        w, h = int(m.group(1)), int(m.group(2))
+        if w <= 0 or h <= 0:
+            return None
+        return w, h
