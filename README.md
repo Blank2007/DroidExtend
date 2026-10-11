@@ -13,7 +13,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-10 的一次会话内从零写完并交付到可安装的 1.2.0。
+> 于 2026-10-11 的几次会话内从零写完并交付到可安装的 1.3.0。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -33,11 +33,33 @@
 | 📦 **开箱即用** | 34 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.2.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.2.0.exe)**（34 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.3.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.3.0.exe)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（21 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
 > 本仓库只放源码 —— 二进制依赖（ffmpeg、adb、Android SDK、虚拟显示驱动）加起来 370 MB，没有进仓库。
+
+### 1.3.0 加了什么
+
+这一版几乎全在手机端，外加一处让画面真的「撑满」的能力。
+
+* **手机端有图标和界面了** —— 图标是用 Pillow 一个像素一个像素画出来的（蓝色圆角方块 + 白色显示器 + 白色手机），
+  含自适应图标前景层，从 mdpi 到 xxxhdpi 五种密度；以前 manifest 里根本没有 `android:icon`，桌面显示的是系统默认图标。
+* **实时状态浮窗**：左上角一块半透明面板，显示 **分辨率 / 帧率 / 码率 / 延迟（含峰值）/ 画质**，
+  延迟按 18 ms / 40 ms 两档染色（绿 → 琥珀 → 红），追帧时会额外标出来。
+  整个浮窗是 `onDraw` 手绘的（没有 layout XML、没有每秒两次的 inflate），
+  **只在右上角齿轮上吃触摸**，其它位置的点按照常传给电脑。
+* **手机端设置面板**：点齿轮打开，三个开关 —— 状态浮窗、让画面铺满屏幕（裁掉多余边缘）、把日志写到文件。
+  「铺满」默认开启：手机是 3200x2136、桌面是 2560x1600 时按比例缩放会留黑边，
+  改成裁切后就是真正的满屏。选择记在 SharedPreferences 里，重开 App 还在。
+* **日志改成可选**：默认只写 logcat；打开开关后写 `Android/data/com.droidextend/files/DroidExtend.log`
+  （不需要存储权限），面板里会显示完整路径并给一个「清空日志」按钮。
+* **虚拟屏跟着手机分辨率走**：主机端开机时读手机的物理分辨率（`wm size`），
+  从驱动模式表里挑一个**长宽比完全相同**的模式，撑满整块屏。驱动分辨率表从 5 条扩到 **22 条**
+  （含 3200x2136、2712x1220、1600x720 这些常见机型横屏尺寸），表里真没有就把手机分辨率写进
+  `C:\VirtualDisplayDriver\vdd_settings.xml`（这个文件不需要管理员权限就能写），下次重装驱动/重启后生效。
+* **认屏不再慢**：上一版靠抓缩略图逐像素比对来确认哪块屏是虚拟屏，但缩略图按 1 fps 抓、还要跳过纯黑的第 0 帧，
+  三次调用要等 **9 秒**。改成 30 fps 抓帧后降到 **1 秒**。
 
 ### 1.2.0 加了什么
 
@@ -340,7 +362,7 @@ A：不用。协议和分辨率都是运行时握手的，任何 Android 5.0+ �
 
 ## 七、重新构建手机端（可选）
 
-只有改了 `android/src/**` 里的 Java 代码才需要：
+只有改了 `android/src/**` 里的 Java 代码或 `android/res/**` 里的资源才需要：
 
 ```
 双击 构建手机端 APK.bat
@@ -348,6 +370,25 @@ A：不用。协议和分辨率都是运行时握手的，任何 Android 5.0+ �
 
 它会用随包的 `tools/sdk` 里的 aapt2 / javac / d8 / apksigner 走完整条链路，
 产物覆盖 `dist/DroidExtend.apk`。不需要装 Android Studio，也不需要 Gradle。
+
+两个容易踩的点：
+
+* 资源要 **`aapt2 compile --dir android\res` 先编成 `res.zip`**，再把 zip 当位置参数交给 `aapt2 link`；
+  并且必须给 `link` 加 **`--java <dir>`** 才会生成 `R.java` —— 不给的话，任何用 `R.color.xxx`
+  的代码都会以 `找不到符号 R` 编译失败。生成出来的 `R.java` 要一并丢给 javac。
+* 版本号只写在 `AndroidManifest.xml` 里。命令行上**不要**再传 `--version-code/--version-name`，
+  否则就有了第二个真相来源，早晚会对不上。
+* 签名密钥在 `android/droidextend.keystore`（不在 `android/build/` 里，因为 `--clean` 会删掉那个目录）。
+  换密钥会让后续安装一律 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，只能先卸载再装 —— 而 `host/adb.py`
+  的 `install()` 已经会在撞上这个错误时自动 `uninstall()` 重装。
+
+图标（`android/res/mipmap-*` 和 `DroidExtend.ico`）是画出来的，不是素材：
+
+```powershell
+& 'C:\Users\15530\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe' android\make_icon.py
+```
+
+必须用**带 Pillow 的解释器**（上面这个是 DSH 自带的，Pillow 12.3.0）；`C:\Python314` 里没有 PIL。
 
 Windows 端的 exe 同理，改了 `host/**` 里的 Python 代码才需要重打（需要 `pyinstaller`）：
 
@@ -378,7 +419,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
   "D:\dsh projects\droid-extend\tools\installer\DroidExtend.iss"
 ```
 
-产物直接覆盖 `dist\DroidExtend-Setup-1.2.0.exe`（约 18 秒，lzma2/max）。
+产物直接覆盖 `dist\DroidExtend-Setup-1.3.0.exe`（约 18 秒，lzma2/max）。
 
 脚本在 `tools/installer/DroidExtend.iss`，要点：
 
