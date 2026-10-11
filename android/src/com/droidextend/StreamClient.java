@@ -26,6 +26,12 @@ public class StreamClient extends Thread {
 
         /** Fired once per connection with the geometry from the host handshake. */
         void onVideoSize(int width, int height);
+
+        /** Fired roughly twice a second while video is flowing. */
+        void onStats(Stats stats);
+
+        /** Fired once per connection with the host's description of the picture. */
+        void onNote(String note);
     }
 
     private final String host;
@@ -57,6 +63,10 @@ public class StreamClient extends Thread {
 
     private void videoSize(int w, int h) {
         if (listener != null) listener.onVideoSize(w, h);
+    }
+
+    private void stats(Stats s) {
+        if (listener != null) listener.onStats(s);
     }
 
     @Override
@@ -101,24 +111,39 @@ public class StreamClient extends Thread {
 
         byte[] magic = new byte[4];
         in.readFully(magic);
-        if (magic[0] != 'D' || magic[1] != 'X' || magic[2] != 'S' || magic[3] != '2') {
+        if (magic[0] != 'D' || magic[1] != 'X' || magic[2] != 'S'
+                || (magic[3] != '2' && magic[3] != '3')) {
             throw new IOException("bad handshake " + new String(magic));
         }
         int w = readIntLE(in);
         int h = readIntLE(in);
         int fps = readIntLE(in);
         long hostNowUs = readLongLE(in);
+        String note = "";
+        if (magic[3] == '3') {
+            int n = in.read();
+            if (n > 0) {
+                byte[] nb = new byte[n];
+                in.readFully(nb);
+                note = new String(nb, "UTF-8");
+            }
+        }
         // The two clocks have a fixed, unknown offset; assume the handshake
         // crossed the cable instantly (<1 ms over adb reverse) and use it to
         // line them up.  Everything after this measures capture -> display.
         clockSkewUs = SystemClock.elapsedRealtimeNanos() / 1000 - hostNowUs;
         decoder.setFormat(w, h, fps);
         videoSize(w, h);
+        if (listener != null) {
+            listener.onNote(note);
+        }
         status(w + "x" + h + " @" + fps + "fps  已连接", true);
-        Log.i(TAG, "handshake " + w + "x" + h + "@" + fps + " skew=" + clockSkewUs + "us");
+        Log.i(TAG, "handshake " + w + "x" + h + "@" + fps + " skew=" + clockSkewUs
+                + "us note=" + note);
 
         boolean skipUntilKey = false;
         long frames = 0;
+        long bytes = 0;
         long lastReport = System.currentTimeMillis();
         long latSum = 0;
         long latMax = 0;
@@ -133,6 +158,7 @@ public class StreamClient extends Thread {
                 unit = new byte[len];
             }
             in.readFully(unit, 0, len);
+            bytes += len + 12;      // + the length and timestamp prefixes
 
             if (raw.available() > BACKLOG_DROP_BYTES) {
                 skipUntilKey = true;
@@ -157,17 +183,30 @@ public class StreamClient extends Thread {
             long now = System.currentTimeMillis();
             if (now - lastReport >= 2000) {
                 long secs = Math.max(now - lastReport, 1);
-                long avgMs = latCount > 0 ? latSum / latCount / 1000 : -1;
+                Stats st = new Stats();
+                st.width = w;
+                st.height = h;
+                st.fps = fps;
+                st.streaming = true;
+                st.streamFps = frames * 1000.0 / secs;
+                st.mbps = bytes * 8.0 / 1000.0 / secs;
+                st.latencyMs = latCount > 0 ? latSum / (double) latCount / 1000.0 : -1;
+                st.latencyMaxMs = latMax / 1000.0;
+                st.frames = frames;
+                st.bytes = bytes;
+                st.catchingUp = skipUntilKey;
                 // This is the number that matters: ms from the frame leaving
                 // the encoder on the PC to the decoder handing it to the screen.
-                Log.i(TAG, "perf fps=" + (frames * 1000 / secs)
-                        + " latency_avg_ms=" + avgMs
-                        + " latency_max_ms=" + (latMax / 1000)
+                Log.i(TAG, "perf fps=" + Math.round(st.streamFps)
+                        + " mbps=" + String.format(java.util.Locale.US, "%.2f", st.mbps)
+                        + " latency_avg_ms=" + Math.round(st.latencyMs)
+                        + " latency_max_ms=" + Math.round(st.latencyMaxMs)
                         + " samples=" + latCount
                         + (skipUntilKey ? " (dropping to keyframe)" : ""));
-                status(w + "x" + h + "  " + (frames * 1000 / secs) + " fps"
-                        + (avgMs >= 0 ? "  延迟 " + avgMs + " ms" : ""), true);
+                stats(st);
+                status(w + "x" + h + "  " + Math.round(st.streamFps) + " fps", true);
                 frames = 0;
+                bytes = 0;
                 latSum = 0;
                 latMax = 0;
                 latCount = 0;
