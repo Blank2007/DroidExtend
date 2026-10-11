@@ -30,7 +30,11 @@ BUILD = os.path.join(HERE, "build")
 DIST = os.path.join(ROOT, "dist")
 PKG = "com.droidextend"
 APP_NAME = "DroidExtend"
-KEYSTORE = os.path.join(BUILD, "droidextend.keystore")
+# The keystore lives OUTSIDE build/ on purpose: `--clean` must not destroy it,
+# because a new key makes every future update refuse to install over the old
+# one (INSTALL_FAILED_UPDATE_INCOMPATIBLE).  It is a throwaway debug key with
+# the password printed right here, so keeping it in the tree is fine.
+KEYSTORE = os.path.join(HERE, "droidextend.keystore")
 KS_PASS = "droidextend"
 KS_ALIAS = "droidextend"
 
@@ -109,17 +113,44 @@ def main():
     log("source files: %d" % len(srcs))
 
     # 1. resources + manifest -> base apk (no dex yet)
-    log("\n[1/6] aapt2 link")
+    log("\n[1/7] aapt2 compile")
+    res_dir = os.path.join(HERE, "res")
+    res_zip = os.path.join(BUILD, "res.zip")
+    res_args = []
+    if os.path.isdir(res_dir):
+        if os.path.exists(res_zip):
+            os.remove(res_zip)
+        run([aapt2, "compile", "--dir", res_dir, "-o", res_zip], java_home=jdk)
+        res_args = [res_zip]
+        log("    compiled %d resource files -> %.1f KB"
+            % (sum(len(f) for _, _, f in os.walk(res_dir)), os.path.getsize(res_zip) / 1024))
+    else:
+        log("    no res/ directory, building without resources")
+
+    log("\n[2/7] aapt2 link")
     base_apk = os.path.join(BUILD, "base.apk")
+    # aapt2 writes R.java here, and our sources reference R.color.* -- so it has
+    # to be compiled along with them.  No resources means no R.java and nothing
+    # to add; the app still has to compile without one.
+    gendir = os.path.join(BUILD, "gen")
+    shutil.rmtree(gendir, ignore_errors=True)
+    os.makedirs(gendir, exist_ok=True)
+    # versionCode / versionName come from AndroidManifest.xml -- passing them
+    # here too would be a second source of truth that silently drifts.
     run([aapt2, "link", "-o", base_apk,
          "-I", android_jar,
          "--manifest", os.path.join(HERE, "AndroidManifest.xml"),
          "--min-sdk-version", "21", "--target-sdk-version", "34",
-         "--version-code", "1", "--version-name", "1.0",
-         "--no-version-vectors"], java_home=jdk)
+         "--java", gendir,
+         "--no-version-vectors"] + res_args, java_home=jdk)
+    for base, _, files in os.walk(gendir):
+        for f in files:
+            if f.endswith(".java"):
+                srcs.append(os.path.join(base, f))
+    log("    generated %d R.java" % len([s for s in srcs if s.endswith("R.java")]))
 
     # 2. javac
-    log("\n[2/6] javac")
+    log("\n[3/7] javac")
     classes = os.path.join(BUILD, "classes")
     os.makedirs(classes, exist_ok=True)
     # NOTE: do NOT pass -g:none here.  R8/D8 dereferences the SourceFile
@@ -137,7 +168,7 @@ def main():
     # <parameter1> is null" on MainActivity$1.class no matter which javac
     # -source/-target/--release combination produced it.  Standalone R8 9.5.23
     # from maven.google.com dexes the identical class files without complaint.
-    log("\n[3/6] d8 (R8 9.5.23)")
+    log("\n[4/7] d8 (R8 9.5.23)")
     classfiles = []
     for base, _, files in os.walk(classes):
         for f in files:
@@ -156,7 +187,7 @@ def main():
              "--output", dexdir] + classfiles, java_home=jdk)
 
     # 4. fold the dex into the apk
-    log("\n[4/6] packaging classes.dex")
+    log("\n[5/7] packaging classes.dex")
     unsigned = os.path.join(BUILD, "unsigned.apk")
     if os.path.exists(unsigned):
         os.remove(unsigned)
@@ -171,7 +202,7 @@ def main():
     log("    dex files: %s  ->  %.1f KB" % (",".join(dexes), os.path.getsize(unsigned) / 1024))
 
     # 5. zipalign
-    log("\n[5/6] zipalign")
+    log("\n[6/7] zipalign")
     aligned = os.path.join(BUILD, "aligned.apk")
     if os.path.exists(aligned):
         os.remove(aligned)
@@ -184,7 +215,7 @@ def main():
         return
 
     # 6. sign
-    log("\n[6/6] sign")
+    log("\n[7/7] sign")
     if not os.path.exists(KEYSTORE):
         log("    generating keystore")
         run([keytool, "-genkeypair", "-keystore", KEYSTORE,
