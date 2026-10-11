@@ -13,6 +13,12 @@ dist/
 android/build/
 tools/pybuild/
 *.spec
+# The signing key must never be published: anyone holding it can ship an
+# "update" that Android will happily install over the real app.  build.py
+# regenerates one automatically if it is missing.
+android/droidextend.keystore
+*.keystore
+*.jks
 
 # ───────── 调试与临时文件 ─────────
 tools/tmp/
