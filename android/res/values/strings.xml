@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DroidExtend</string>
+    <string name="hud_connecting">正在查找电脑端…</string>
+    <string name="hud_hint">用数据线连上电脑，然后在电脑端点「开始投屏」</string>
+</resources>
