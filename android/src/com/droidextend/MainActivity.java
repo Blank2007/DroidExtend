@@ -2,10 +2,12 @@ package com.droidextend;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.PowerManager;
-import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -15,7 +17,11 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 /**
@@ -25,6 +31,17 @@ import android.widget.TextView;
  * The PC side is reachable on 127.0.0.1:<port> because the Windows app installs
  * an `adb reverse` tunnel over the USB cable - no Wi-Fi, no pairing.  Video
  * arrives on 27183, this screen's touches leave on 27184.
+ *
+ * There is no layout XML anywhere in this app.  The whole screen is three
+ * hand-built layers:
+ *
+ *     VideoSurface   the decoded picture, letterboxed or cropped
+ *     HudView        the live link read-out (drawn, not laid out)
+ *     sheet          the display settings, built on demand
+ *
+ * The overlay only claims the gear button; every other touch falls through to
+ * the picture, because a floating window that ate taps would make the desktop
+ * unusable.
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
@@ -38,22 +55,31 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final float TAP_SLOP = 24f;
 
     private VideoSurface surfaceView;
-    private TextView statusView;
+    private HudView hud;
     private VideoDecoder decoder;
     private StreamClient client;
     private InputClient input;
     private PowerManager.WakeLock wakeLock;
+    private Prefs prefs;
+    private FrameLayout root;
+    private View sheet;
     private boolean started;
 
     /**
-     * A SurfaceView that keeps the stream's aspect ratio inside the screen
-     * instead of stretching the desktop to the panel.  Without this a 16:9
-     * desktop is smeared across a 3:2 tablet, and it also makes the touch
-     * mapping trivial: the view *is* the picture, so view coordinates
-     * normalise straight onto the remote screen.
+     * A SurfaceView that keeps the stream's aspect ratio.
+     *
+     * Two modes, both of which make touch mapping trivial because the view *is*
+     * the picture:
+     *
+     *   contain  the picture fits inside the screen; the leftover edge is black
+     *   cover    the picture fills the screen; the overflow is cropped by the
+     *            parent, and because the view is centred the visible region is
+     *            exactly the middle of the picture, so normalising a touch by
+     *            getWidth()/getHeight() still lands in the right place
      */
     private static class VideoSurface extends SurfaceView {
         private float aspect = 16f / 9f;
+        private boolean fill = true;
 
         VideoSurface(Context c) {
             super(c);
@@ -70,18 +96,33 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             return aspect;
         }
 
+        void setFill(boolean on) {
+            if (fill != on) {
+                fill = on;
+                requestLayout();
+            }
+        }
+
         @Override
         protected void onMeasure(int widthSpec, int heightSpec) {
             int w = MeasureSpec.getSize(widthSpec);
             int h = MeasureSpec.getSize(heightSpec);
             if (w > 0 && h > 0 && aspect > 0f) {
-                if (w / (float) h > aspect) {
-                    w = Math.round(h * aspect);
+                if (fill) {
+                    if (w / (float) h > aspect) {
+                        h = Math.round(w / aspect);
+                    } else {
+                        w = Math.round(h * aspect);
+                    }
                 } else {
-                    h = Math.round(w / aspect);
+                    if (w / (float) h > aspect) {
+                        w = Math.round(h * aspect);
+                    } else {
+                        h = Math.round(w / aspect);
+                    }
                 }
             }
-            setMeasuredDimension(w, h);
+            setMeasuredDimension(Math.max(1, w), Math.max(1, h));
         }
     }
 
@@ -91,16 +132,24 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private float startCx, startCy;
     private long gestureStart;
 
+    private float dp(float v) {
+        return v * getResources().getDisplayMetrics().density;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = new Prefs(this);
+        AppLog.init(this);
+        AppLog.setEnabled(prefs.logging());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
 
-        FrameLayout root = new FrameLayout(this);
+        root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
 
         surfaceView = new VideoSurface(this);
+        surfaceView.setFill(prefs.fill());
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) {
@@ -112,16 +161,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         vp.gravity = Gravity.CENTER;
         root.addView(surfaceView, vp);
 
-        statusView = new TextView(this);
-        statusView.setTextColor(Color.WHITE);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        statusView.setShadowLayer(4f, 0f, 0f, Color.BLACK);
-        statusView.setPadding(28, 20, 28, 20);
-        statusView.setText("DroidExtend 已启动，正在查找电脑端…\n(USB 调试模式下由电脑端发起)");
-        FrameLayout.LayoutParams sp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sp.gravity = Gravity.START | Gravity.TOP;
-        root.addView(statusView, sp);
+        hud = new HudView(this);
+        hud.setPanelWanted(prefs.showHud());
+        hud.setListener(new HudView.Listener() {
+            @Override public void onGear() {
+                showSettings();
+            }
+        });
+        root.addView(hud, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(root);
         decoder = new VideoDecoder();
@@ -131,6 +179,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (pm != null) {
             wakeLock = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, "droidextend:stream");
             wakeLock.setReferenceCounted(false);
+        }
+        AppLog.i("main  启动 v" + versionName() + "  fill=" + prefs.fill()
+                + " hud=" + prefs.showHud() + " log=" + prefs.logging());
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
         }
     }
 
@@ -153,6 +211,153 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
     }
 
+    // ------------------------------------------------------------- settings
+    private void showSettings() {
+        if (sheet != null) {
+            return;
+        }
+        final FrameLayout scrim = new FrameLayout(this);
+        scrim.setBackgroundColor(0x99000000);
+        scrim.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                hideSettings();
+            }
+        });
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(getResources().getColor(R.color.sheet_bg));
+        bg.setCornerRadius(dp(20));
+        bg.setStroke(Math.round(dp(1)), getResources().getColor(R.color.hud_stroke));
+        card.setBackground(bg);
+        int pad = Math.round(dp(20));
+        card.setPadding(pad, pad, pad, pad);
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                // swallow: a tap inside the card is not a tap on the scrim
+            }
+        });
+
+        TextView title = new TextView(this);
+        title.setText("显示设置");
+        title.setTextColor(getResources().getColor(R.color.hud_text));
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        card.addView(title);
+
+        card.addView(check("状态浮窗（码率 / 帧率 / 延迟）", prefs.showHud(),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                        prefs.set(Prefs.SHOW_HUD, on);
+                        hud.setPanelWanted(on);
+                    }
+                }));
+
+        card.addView(check("让画面铺满屏幕（裁掉多余边缘）", prefs.fill(),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                        prefs.set(Prefs.FILL, on);
+                        surfaceView.setFill(on);
+                    }
+                }));
+
+        final LinearLayout logBox = new LinearLayout(this);
+        logBox.setOrientation(LinearLayout.VERTICAL);
+        logBox.setVisibility(prefs.logging() ? View.VISIBLE : View.GONE);
+
+        TextView logPath = new TextView(this);
+        logPath.setText("日志文件：\n" + AppLog.path());
+        logPath.setTextColor(getResources().getColor(R.color.hud_dim));
+        logPath.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        logPath.setTextIsSelectable(true);
+        logBox.addView(logPath);
+
+        Button clear = new Button(this);
+        clear.setText("清空日志");
+        clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        clear.setTextColor(getResources().getColor(R.color.hud_text));
+        clear.setBackgroundTintList(ColorStateList.valueOf(0x33FFFFFF));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = Math.round(dp(6));
+        clear.setLayoutParams(clp);
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                AppLog.clear();
+                AppLog.i("log   用户清空了日志文件");
+            }
+        });
+        logBox.addView(clear);
+        card.addView(logBox);
+
+        card.addView(check("把日志写到文件（默认关闭）", prefs.logging(),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                        prefs.set(Prefs.LOGGING, on);
+                        AppLog.setEnabled(on);
+                        logBox.setVisibility(on ? View.VISIBLE : View.GONE);
+                    }
+                }));
+
+        TextView hint = new TextView(this);
+        hint.setText("浮窗只占用左上角，右侧齿轮随时可以打开这里；"
+                + "其它位置的点按都会照常传到电脑。");
+        hint.setTextColor(getResources().getColor(R.color.hud_dim));
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        hint.setPadding(0, Math.round(dp(10)), 0, 0);
+        card.addView(hint);
+
+        Button close = new Button(this);
+        close.setText("关闭");
+        close.setTextColor(getResources().getColor(R.color.hud_text));
+        close.setBackgroundTintList(ColorStateList.valueOf(
+                getResources().getColor(R.color.accent)));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = Math.round(dp(12));
+        close.setLayoutParams(blp);
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                hideSettings();
+            }
+        });
+        card.addView(close);
+
+        FrameLayout.LayoutParams cl = new FrameLayout.LayoutParams(
+                Math.min(Math.round(dp(560)), getResources().getDisplayMetrics().widthPixels
+                        - Math.round(dp(56))),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        cl.gravity = Gravity.CENTER;
+        scrim.addView(card, cl);
+
+        sheet = scrim;
+        root.addView(sheet, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        AppLog.i("ui    打开显示设置");
+    }
+
+    private CheckBox check(String text, boolean on,
+                           CompoundButton.OnCheckedChangeListener l) {
+        CheckBox cb = new CheckBox(this);
+        cb.setText(text);
+        cb.setTextColor(getResources().getColor(R.color.hud_text));
+        cb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        cb.setChecked(on);
+        cb.setButtonTintList(ColorStateList.valueOf(getResources().getColor(R.color.accent)));
+        cb.setOnCheckedChangeListener(l);
+        cb.setPadding(0, Math.round(dp(10)), 0, Math.round(dp(10)));
+        return cb;
+    }
+
+    private void hideSettings() {
+        if (sheet == null) {
+            return;
+        }
+        root.removeView(sheet);
+        sheet = null;
+    }
+
     // ------------------------------------------------------------- touch -> PC
     private float nx(float viewX) {
         float w = Math.max(surfaceView.getWidth(), 1);
@@ -173,14 +378,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return d;
     }
 
-    private float centroidX(MotionEvent e) {
-        return e.getX(0) * surfaceView.getAspect();
-    }
-
-    private float centroidY(MotionEvent e) {
-        return e.getY(0);
-    }
-
     private float twoX(MotionEvent e) {
         return (e.getX(0) + e.getX(1)) * 0.5f * surfaceView.getAspect();
     }
@@ -199,7 +396,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 || e.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN
                 || e.getActionMasked() == MotionEvent.ACTION_UP
                 || e.getActionMasked() == MotionEvent.ACTION_POINTER_UP) {
-            Log.i(TAG, "touch action=" + e.getActionMasked() + " ptrs=" + e.getPointerCount()
+            AppLog.i("touch action=" + e.getActionMasked() + " ptrs=" + e.getPointerCount()
                     + " at " + e.getX() + "," + e.getY()
                     + " view=" + surfaceView.getWidth() + "x" + surfaceView.getHeight());
         }
@@ -308,11 +505,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             @Override public void onStatus(final String text, final boolean streaming) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        if (statusView != null) {
-                            statusView.setText(text);
-                            if (streaming) {
-                                statusView.setVisibility(View.GONE);
-                            }
+                        if (hud != null) {
+                            hud.setStatus(text, streaming);
                         }
                     }
                 });
@@ -327,9 +521,29 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 });
             }
+
+            @Override public void onStats(final Stats s) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (hud != null) {
+                            hud.setStats(s);
+                        }
+                    }
+                });
+            }
+
+            @Override public void onNote(final String note) {
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (hud != null) {
+                            hud.setNote(note);
+                        }
+                    }
+                });
+            }
         });
         client.start();
-        Log.i(TAG, "client started");
+        AppLog.i("client started");
     }
 
     @Override
@@ -365,6 +579,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     public void onBackPressed() {
+        if (sheet != null) {
+            hideSettings();
+            return;
+        }
         stopStream();
         super.onBackPressed();
     }
