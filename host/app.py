@@ -54,8 +54,11 @@ from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER, 
                      EMAILS, REPO_URL, RELEASES_URL, ISSUES_URL)
 
 RESOLUTIONS = [
-    (1280, 720), (1600, 900), (1920, 1080), (1920, 1200),
-    (2160, 1080), (2560, 1440), (2560, 1600), (3840, 2160),
+    (1280, 720), (1600, 720), (1600, 900), (1920, 864), (1920, 1080),
+    (1920, 1200), (2000, 1200), (2160, 1080), (2280, 1080), (2340, 1080),
+    (2400, 1080), (2412, 1080), (2560, 1440), (2560, 1600), (2700, 1224),
+    (2712, 1220), (2800, 1260), (3040, 1440), (3120, 1440), (3200, 1440),
+    (3200, 2136), (3840, 2160),
 ]
 HZ_CHOICES = ["30", "60", "75", "90", "120", "144", "165", "240"]
 FPS_CHOICES = ["24", "30", "40", "48", "50", "60", "75", "90", "120", "144"]
@@ -223,6 +226,7 @@ class App(tk.Tk):
         self.pos_var.set(_label_for(POSITIONS, s.get("position", "right"), POSITIONS[0][1]))
         self.mouse_var.set(bool(s.get("draw_mouse", False)))
         self.inst_var.set(bool(s.get("install_apk", True)))
+        self.match_var.set(bool(s.get("match_phone", True)))
         if hasattr(self, "chk_var"):
             self.chk_var.set(bool(s.get("check_updates", True)))
         self._res_changed()
@@ -255,6 +259,7 @@ class App(tk.Tk):
         s["position"] = self._position()
         s["draw_mouse"] = bool(self.mouse_var.get())
         s["install_apk"] = bool(self.inst_var.get())
+        s["match_phone"] = bool(self.match_var.get())
         s["mode"] = self.mode_var.get()
         if hasattr(self, "chk_var"):
             s["check_updates"] = bool(self.chk_var.get())
@@ -413,6 +418,15 @@ class App(tk.Tk):
         ttk.Entry(self.custom_frame, textvariable=self.h_var, width=6).pack(side="left", padx=3)
         self.custom_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
         self.custom_frame.grid_remove()
+
+        # Row 4 is shared: either "follow the phone's own resolution" or the
+        # custom width/height entries, never both.  Following the phone is the
+        # default because it is the only way to fill the panel edge to edge.
+        self.match_var = tk.BooleanVar(value=bool(DEFAULTS.get("match_phone", True)))
+        self.match_chk = ttk.Checkbutton(
+            right, text="跟随手机分辨率（撑满整块屏，不留黑边）",
+            variable=self.match_var, command=self._match_changed)
+        self.match_chk.grid(row=4, column=0, columnspan=4, sticky="w", pady=3)
         self.res_cb.bind("<<ComboboxSelected>>", self._res_changed)
 
         self.enc_var = tk.StringVar(value="h264_nvenc")
@@ -570,10 +584,28 @@ class App(tk.Tk):
                 self.pre_var.set("p4")
 
     def _res_changed(self, *_):
-        if self.res_var.get() == "自定义":
+        custom = self.res_var.get() == "自定义"
+        if custom:
             self.custom_frame.grid()
         else:
             self.custom_frame.grid_remove()
+        if custom and self.match_var.get():
+            # the two are mutually exclusive: picking a custom size means the
+            # user wants that size, not whatever the phone reports
+            self.match_var.set(False)
+        self._sync_match()
+
+    def _match_changed(self):
+        if self.match_var.get() and self.res_var.get() == "自定义":
+            self.res_var.set("%dx%d" % (RESOLUTIONS[0][0], RESOLUTIONS[0][1]))
+        self._sync_match()
+
+    def _sync_match(self):
+        """Greying out the size box is the whole point: when the phone decides,
+        the dropdown is a lie waiting to happen."""
+        follow = self.match_var.get()
+        self.res_cb.configure(state="disabled" if follow else "readonly")
+        self.match_chk.grid() if not (self.res_var.get() == "自定义") else self.match_chk.grid_remove()
 
     def _rate_control(self):
         label = self.rc_var.get()
