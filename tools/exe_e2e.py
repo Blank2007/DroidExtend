@@ -40,9 +40,12 @@ MAIN_HWND = 0
 HWND_TOPMOST = -1
 SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
 
-# window-relative button positions, from a PrintWindow capture of the 998x767 UI
-BTN_START = (0.103, 0.583)
-BTN_STOP = (0.218, 0.583)
+# Button centres as PIXELS from the window's top-left corner.  The action row
+# is anchored to the left edge, so these do not move when the window is
+# resized - unlike fractions, which silently slide onto the button's border
+# (or past it) as soon as the user widens the window.
+BTN_START = (98, 504)
+BTN_STOP = (214, 504)
 
 
 class POINT(ctypes.Structure):
@@ -134,17 +137,27 @@ def dismiss_dialogs(pid, when=""):
     return n
 
 
-def click(inj, frac, label, pid=None):
+def norm(off, rect):
+    """Pixel offset inside the window -> the 0..65535 grid Injector maps over that rect."""
+    w = max(rect["width"] - 1, 1)
+    h = max(rect["height"] - 1, 1)
+    return (int(round(65535.0 * off[0] / w)), int(round(65535.0 * off[1] / h)))
+
+
+def click(inj, off, label, rect, pid=None):
     if pid:
         dismiss_dialogs(pid, "clicking " + label)
-    nx, ny = int(frac[0] * 65535), int(frac[1] * 65535)
+    abs_x = rect["left"] + off[0]
+    abs_y = rect["top"] + off[1]
+    nx, ny = norm(off, rect)
     inj.down(nx, ny)
     time.sleep(0.05)
     p = POINT()
     u.GetCursorPos(ctypes.byref(p))
     under = u.WindowFromPoint(p)
     root = u.GetAncestor(under, 2) if under else 0  # GA_ROOT
-    print("  -> cursor (%d,%d) window_under=%d root=%d" % (p.x, p.y, under, root), flush=True)
+    print("  -> want (%d,%d) cursor (%d,%d) window_under=%d root=%d"
+          % (abs_x, abs_y, p.x, p.y, under, root), flush=True)
     if MAIN_HWND and root != MAIN_HWND:
         buf = ctypes.create_unicode_buffer(256)
         cls = ctypes.create_unicode_buffer(256)
@@ -210,7 +223,7 @@ def main():
     time.sleep(0.5)
 
     print("\n[1] click 开始投屏", flush=True)
-    click(inj, BTN_START, "开始投屏", pid=proc.pid)
+    click(inj, BTN_START, "开始投屏", rect, pid=proc.pid)
 
     ok = None
     touch_up = None
@@ -252,15 +265,27 @@ def main():
         mid = cursor()
         s.sendall(REC.pack(UP, int(0.15 * 65535), int(0.70 * 65535), 0))
         time.sleep(0.25)
-        # the virtual screen sits at (2560,0) 1920x1080, so 15%,70% should be
-        # (2560 + 288, 756) = (2848, 756)
-        print("  cursor %s -> %s (期望约 (2848, 756))" % (before, mid), flush=True)
+        # The virtual screen can sit on any side, so read its real rectangle
+        # instead of assuming (2560, 0) - the position is a persisted setting.
+        vr = None
+        for m in wd.live_monitors():
+            if m.get("name") == adapter:
+                vr = m
+                break
+        if vr:
+            ex = vr["left"] + int(round(0.15 * vr["width"]))
+            ey = vr["top"] + int(round(0.70 * vr["height"]))
+            dx, dy = abs(mid[0] - ex), abs(mid[1] - ey)
+            print("  virtual screen %s %dx%d at (%d,%d)"
+                  % (vr["name"], vr["width"], vr["height"], vr["left"], vr["top"]), flush=True)
+            print("  cursor %s -> %s (期望 (%d,%d), 偏差 %d,%d px)"
+                  % (before, mid, ex, ey, dx, dy), flush=True)
         s.close()
 
     print("\n[3] click 停止", flush=True)
     gone = False
     for attempt in range(4):
-        click(inj, BTN_STOP, "停止", pid=proc.pid)
+        click(inj, BTN_STOP, "停止", rect, pid=proc.pid)
         for i in range(20):
             time.sleep(1.0)
             names = live()
