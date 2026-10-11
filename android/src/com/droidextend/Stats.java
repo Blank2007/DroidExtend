@@ -1,0 +1,52 @@
+package com.droidextend;
+
+/**
+ * One snapshot of "how is the link doing", handed to the overlay.
+ *
+ * The overlay used to be a TextView fed a pre-formatted string, which meant the
+ * number of things it could show was decided by whoever wrote that string.
+ * Passing the numbers instead lets the HUD draw them properly.
+ */
+public final class Stats {
+
+    /** Geometry from the handshake: what the PC is actually sending. */
+    public int width;
+    public int height;
+    public int fps;
+
+    /** Decoded access units per second, measured over the last window. */
+    public double streamFps;
+
+    /** Payload bitrate actually received, in megabits per second. */
+    public double mbps;
+
+    /** Encode-to-display latency, averaged over the window; -1 when unknown. */
+    public double latencyMs = -1;
+    public double latencyMaxMs;
+
+    /** Totals since the connection was established. */
+    public long frames;
+    public long bytes;
+
+    /** True while the client is discarding packets to catch the next keyframe. */
+    public boolean catchingUp;
+
+    /** True once a connection is up and video is flowing. */
+    public boolean streaming;
+
+    public Stats copy() {
+        Stats s = new Stats();
+        s.width = width;
+        s.height = height;
+        s.fps = fps;
+        s.streamFps = streamFps;
+        s.mbps = mbps;
+        s.latencyMs = latencyMs;
+        s.latencyMaxMs = latencyMaxMs;
+        s.frames = frames;
+        s.bytes = bytes;
+        s.catchingUp = catchingUp;
+        s.streaming = streaming;
+        return s;
+    }
+}
