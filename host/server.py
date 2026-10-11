@@ -17,7 +17,7 @@ import struct
 import threading
 import time
 
-MAGIC = b"DXS2"
+MAGIC = b"DXS3"
 HOST_PORT = 27183
 MAX_UNIT = 8 * 1024 * 1024
 
@@ -26,12 +26,19 @@ def _now_us():
     return int(time.time() * 1000000)
 
 
-def header(width, height, fps):
-    """DXS2 = DXS1 plus a host timestamp, so the phone can report the real
-    end-to-end latency instead of just decoding blindly.  The phone subtracts
-    its own clock from this once at connect time to work out the offset, then
-    every frame carries the moment its bytes left ffmpeg."""
-    return struct.pack("<4sIIIQ", MAGIC, int(width), int(height), int(fps), _now_us())
+def header(width, height, fps, note=""):
+    """DXS3 = DXS2 plus a free-form description of the current picture quality.
+
+    DXS2 added a host timestamp so the phone can report the real end-to-end
+    latency instead of just decoding blindly.  DXS3 appends the encoder, rate
+    control and quality the host is actually using, so the phone's overlay can
+    say what 画质 you are looking at instead of guessing from the bitrate.
+    The note is length-prefixed UTF-8, so a phone that does not know about it
+    reads exactly the bytes it expects and stops.
+    """
+    raw = (note or "").encode("utf-8")[:255]
+    return struct.pack("<4sIIIQ", MAGIC, int(width), int(height), int(fps),
+                       _now_us()) + struct.pack("<B", len(raw)) + raw
 
 
 class StreamServer(object):
@@ -125,12 +132,13 @@ class StreamServer(object):
         with self._cv:
             self._cv.notify_all()
 
-    def send_header(self, width, height, fps):
+    def send_header(self, width, height, fps, note=""):
         if not self.conn:
             return False
         try:
-            self.conn.sendall(header(width, height, fps))
-            self.log("已发送握手 %dx%d@%d" % (width, height, fps))
+            self.conn.sendall(header(width, height, fps, note))
+            self.log("已发送握手 %dx%d@%d%s" % (width, height, fps,
+                                             ("  " + note) if note else ""))
             return True
         except OSError as e:
             self.log("握手失败: %s" % e)
