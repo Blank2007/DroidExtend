@@ -1,6 +1,11 @@
 # Install the Virtual Display Driver (VDD 25.7.23, SignPath-signed) - must run ELEVATED.
-# Creates C:\VirtualDisplayDriver, writes vdd_settings.xml, trusts the catalog signer,
+# Creates C:\VirtualDisplayDriver, drops in vdd_settings.xml, trusts the catalog signer,
 # then root-enumerates + installs the device with nefcon.
+#
+# The mode table lives in ONE place: tools\vdd\vdd25\VirtualDisplayDriver\vdd_settings.xml.
+# It is copied here together with the driver binaries and is what the driver reads when its
+# device node starts.  Keep it broad - DroidExtend reads the phone's native resolution over
+# adb and picks the closest entry, so more entries mean less black bar on the phone.
 param(
     [string]$Src  = 'D:\dsh projects\droid-extend\tools\vdd\vdd25\VirtualDisplayDriver',
     [string]$Nef  = 'D:\dsh projects\droid-extend\tools\vdd\nefcon\x64\nefconw.exe',
@@ -30,47 +35,20 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Copy-Item -Path (Join-Path $Src '*') -Destination $Dest -Recurse -Force
 Log "copied driver files -> $Dest"
 
-$xml = @'
-<?xml version="1.0" encoding="utf-8"?>
-<vdd_settings>
-    <monitors>
-        <count>1</count>
-    </monitors>
-    <gpu>
-        <friendlyname>default</friendlyname>
-    </gpu>
-    <global>
-        <g_refresh_rate>30</g_refresh_rate>
-        <g_refresh_rate>60</g_refresh_rate>
-        <g_refresh_rate>90</g_refresh_rate>
-        <g_refresh_rate>120</g_refresh_rate>
-        <g_refresh_rate>144</g_refresh_rate>
-    </global>
-    <resolutions>
-        <resolution><width>1280</width><height>720</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>1600</width><height>900</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>1920</width><height>1080</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>1920</width><height>1200</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>2160</width><height>1080</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>2560</width><height>1440</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>2560</width><height>1600</height><refresh_rate>60</refresh_rate></resolution>
-        <resolution><width>3840</width><height>2160</height><refresh_rate>60</refresh_rate></resolution>
-    </resolutions>
-    <options>
-        <CustomEdid>false</CustomEdid>
-        <PreventSpoof>false</PreventSpoof>
-        <EdidCeaOverride>false</EdidCeaOverride>
-        <HardwareCursor>true</HardwareCursor>
-        <SDR10bit>false</SDR10bit>
-        <HDRPlus>false</HDRPlus>
-        <logging>false</logging>
-        <debuglogging>false</debuglogging>
-    </options>
-</vdd_settings>
-'@
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText((Join-Path $Dest 'vdd_settings.xml'), $xml, $utf8NoBom)
-Log 'wrote vdd_settings.xml (8 resolutions x 30/60/90/120/144 Hz)'
+$settings = Join-Path $Dest 'vdd_settings.xml'
+if (-not (Test-Path $settings)) {
+    Log "ERROR: $settings is missing - the mode table ships next to the driver, cannot continue"
+    exit 5
+}
+try {
+    [xml]$cfg = Get-Content -Path $settings -Raw -ErrorAction Stop
+    $res = @($cfg.vdd_settings.resolutions.resolution)
+    $hz  = @($cfg.vdd_settings.global.g_refresh_rate)
+    Log ("vdd_settings.xml: " + $res.Count + " resolutions x " + $hz.Count + " refresh rates (" + ($hz -join '/') + " Hz)")
+    foreach ($r in $res) { Log ("  mode " + $r.width + "x" + $r.height) }
+} catch {
+    Log ("WARNING: could not parse $settings : " + $_)
+}
 
 # ---- 2. trust the catalog signer -------------------------------------------
 $cat = Join-Path $Dest 'mttvdd.cat'
