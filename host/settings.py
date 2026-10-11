@@ -22,7 +22,7 @@ FILE = os.path.join(CONFIG_DIR, "settings.json")
 KEYS = (
     "width", "height", "hz", "fps", "bitrate_mbps", "rate_control", "quality",
     "encoder", "preset", "backend", "position", "mode", "draw_mouse",
-    "install_apk",
+    "install_apk", "match_phone",
 )
 # Extra, non-cfg keys.
 EXTRA = ("window", "check_updates", "custom_res")
