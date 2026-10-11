@@ -9,6 +9,7 @@ here, surfacing progress and the UAC prompt honestly.
 """
 import ctypes
 import os
+import re
 import subprocess
 import sys
 import time
@@ -175,6 +176,48 @@ def install(elevate=True, log=None):
         return False, "安装脚本检测到没有管理员权限。\n\n" + text
     ok = code == 0 and "=== VDD install done ===" in text
     return ok, text
+
+
+def settings_path():
+    return os.path.join(VDD_SETTINGS_DIR, "vdd_settings.xml")
+
+
+def add_resolution(width, height, hz=60):
+    """List a resolution in the driver's mode table if it is not there yet.
+
+    Returns True when the file changed, False when the size was already listed,
+    and None when we could not touch it at all (no file, or read-only).
+
+    Why we can do this without elevating: the installer creates
+    C:\\VirtualDisplayDriver for the user who ran it, so the settings file stays
+    writable.  The driver only reads it while its device node is starting, so a
+    new entry goes live after the next reboot - or immediately after
+    「安装虚拟显示器驱动」, which rewrites the file and re-creates the node.
+    """
+    path = settings_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    if re.search(r"<width>\s*%d\s*</width>\s*<height>\s*%d\s*</height>" % (int(width), int(height)),
+                 text):
+        return False
+    if "</resolutions>" not in text:
+        return None
+    row = ("        <resolution><width>%d</width><height>%d</height>"
+           "<refresh_rate>%d</refresh_rate></resolution>\n" % (int(width), int(height), int(hz)))
+    text = text.replace("</resolutions>", row + "    </resolutions>", 1)
+    try:
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        return None
+    return True
 
 
 def summary_line(st):
