@@ -23,6 +23,7 @@ import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 /**
  * DroidExtend receiver: renders the PC's virtual second screen and sends
@@ -163,9 +164,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         hud = new HudView(this);
         hud.setPanelWanted(prefs.showHud());
+        hud.setGearFraction(prefs.gearX(), prefs.gearY());
         hud.setListener(new HudView.Listener() {
             @Override public void onGear() {
                 showSettings();
+            }
+
+            @Override public void onGearMoved(float fx, float fy) {
+                prefs.setGear(fx, fy);
             }
         });
         root.addView(hud, new FrameLayout.LayoutParams(
@@ -181,7 +187,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             wakeLock.setReferenceCounted(false);
         }
         AppLog.i("main  启动 v" + versionName() + "  fill=" + prefs.fill()
-                + " hud=" + prefs.showHud() + " log=" + prefs.logging());
+                + " hud=" + prefs.showHud() + " log=" + prefs.logging()
+                + " gear=" + prefs.gearX() + "," + prefs.gearY());
     }
 
     private String versionName() {
@@ -286,6 +293,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             @Override public void onClick(View v) {
                 AppLog.clear();
                 AppLog.i("log   用户清空了日志文件");
+                // Clearing a file is exactly the kind of thing that gives no
+                // visible feedback, so say it out loud.
+                Toast.makeText(MainActivity.this, "已清空日志", Toast.LENGTH_SHORT).show();
             }
         });
         logBox.addView(clear);

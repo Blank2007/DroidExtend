@@ -13,7 +13,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-11 的几次会话内从零写完并交付到可安装的 1.3.0。
+> 于 2026-10-11 的几次会话内从零写完并交付到可安装的 1.4.0。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -33,56 +33,22 @@
 | 📦 **开箱即用** | 34 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.3.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.3.0.exe)**（35 MB）
-> * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（122 KB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.4.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.4.0.exe)**（35 MB）
+> * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（186 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
 > 本仓库只放源码 —— 二进制依赖（ffmpeg、adb、Android SDK、虚拟显示驱动）加起来 370 MB，没有进仓库。
 
-### 1.3.0 加了什么
+### 各版本改了什么
 
-这一版几乎全在手机端，外加一处让画面真的「撑满」的能力。
-
-* **手机端有图标和界面了** —— 图标是用 Pillow 一个像素一个像素画出来的（蓝色圆角方块 + 白色显示器 + 白色手机），
-  含自适应图标前景层，从 mdpi 到 xxxhdpi 五种密度；以前 manifest 里根本没有 `android:icon`，桌面显示的是系统默认图标。
-* **实时状态浮窗**：左上角一块半透明面板，显示 **分辨率 / 帧率 / 码率 / 延迟（含峰值）/ 画质**，
-  延迟按 18 ms / 40 ms 两档染色（绿 → 琥珀 → 红），追帧时会额外标出来。
-  整个浮窗是 `onDraw` 手绘的（没有 layout XML、没有每秒两次的 inflate），
-  **只在右上角齿轮上吃触摸**，其它位置的点按照常传给电脑。
-* **手机端设置面板**：点齿轮打开，三个开关 —— 状态浮窗、让画面铺满屏幕（裁掉多余边缘）、把日志写到文件。
-  「铺满」默认开启：手机是 3200x2136、桌面是 2560x1600 时按比例缩放会留黑边，
-  改成裁切后就是真正的满屏。选择记在 SharedPreferences 里，重开 App 还在。
-* **日志改成可选**：默认只写 logcat；打开开关后写 `Android/data/com.droidextend/files/DroidExtend.log`
-  （不需要存储权限），面板里会显示完整路径并给一个「清空日志」按钮。
-* **虚拟屏跟着手机分辨率走**：主机端开机时读手机的物理分辨率（`wm size`），
-  从驱动模式表里挑一个**长宽比完全相同**的模式，撑满整块屏。驱动分辨率表从 5 条扩到 **22 条**
-  （含 3200x2136、2712x1220、1600x720 这些常见机型横屏尺寸），表里真没有就把手机分辨率写进
-  `C:\VirtualDisplayDriver\vdd_settings.xml`（这个文件不需要管理员权限就能写），下次重装驱动/重启后生效。
-* **认屏不再慢**：上一版靠抓缩略图逐像素比对来确认哪块屏是虚拟屏，但缩略图按 1 fps 抓、还要跳过纯黑的第 0 帧，
-  三次调用要等 **9 秒**。改成 30 fps 抓帧后降到 **1 秒**。
-
-### 1.2.0 加了什么
-
-* **参数会被记住** —— 调好的分辨率 / 帧率 / 码率 / 模式 / 屏幕位置，关掉软件再打开还是上次那套，
-  存在 `%USERPROFILE%\.droidextend\settings.json`（菜单 `文件 → 打开设置目录`）。
-  窗口大小和位置也会记住。`工具 → 重置为默认设置` 可以一键还原。
-* **检查更新** —— `工具 → 检查更新` 会去 GitHub 查最新 Release，有新版本会问你要不要打开下载页；
-  默认每次启动静默查一次，可以在 `工具` 菜单里关掉。
-* **软件里就有使用说明** —— `帮助 → 使用说明`（或直接点界面上的“使用说明”按钮），
-  按“这是什么 / 手机准备 / 第一次使用 / 触摸怎么用 / 参数怎么选 / 常见问题”分节，
-  支持从 `帮助 → 常见问题`、`帮助 → 参数怎么选` 直接跳进对应小节。
-* **界面整理**：加了菜单栏和底部状态栏（显示版本、仓库地址、设置文件位置）、
-  日志区加了“复制全部 / 另存为 / 清空”工具条、动作按钮旁加了“使用说明 / 检查更新”。
-* **认屏更保险**：ddagrab 只认 DXGI 输出序号，分辨率**不是**身份。当虚拟屏和物理屏分辨率相同时
-  （比如 1080p 笔记本 + 1080p 虚拟屏），旧代码会静默抓到笔记本自己那块屏上去。
-  现在会先按尺寸筛、尺寸撞车就抓缩略图逐像素比对，**认不出来就退回 gdigrab**（按桌面坐标抓，必然正确），
-  绝不猜一个序号。
+放在 **[开发日志.md](开发日志.md)** 里，一版一节，附带当时的实测数据和踩过的坑。
+这里只讲怎么用。
 
 ---
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.1.0.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.4.0.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -92,15 +58,6 @@
 
 > 安装包只往你的用户目录里放文件，**不动系统**。虚拟显示驱动属于系统级组件，
 > 由程序界面上的按钮单独装（见下面第 1 步），那一步才会弹 UAC。
-
-> **1.1.0 修了什么**
-> * **拓展屏模式不会再传成主屏画面。** ddagrab 只能按 DXGI *输出序号* 抓屏，而 1.0.0 是拿
->   分辨率去认屏的 —— 笔记本屏和虚拟屏分辨率一样时（比如常见的 1920x1080 本子）就会静默
->   选中「0 号输出」＝ 笔记本自己的屏幕。现在多个输出尺寸相同时会抓缩略图逐像素比对，
->   认不出来就退回 gdigrab 按桌面坐标抓（慢一点但永远对），**绝不猜**。
-> * **安装程序第一个页面就能自己选安装路径**（原来升级时会静默沿用旧目录、整页被跳过）。
-> * 顺手：虚拟屏空着时，手机上看就是同一张壁纸加一条任务栏，很容易被当成主屏；
->   现在日志会直接标出虚拟屏的桌面坐标，告诉你要把窗口往哪个方向拖。
 
 ---
 
@@ -194,6 +151,21 @@ Windows 就当是那块屏上的真实鼠标。
 > 现在走的是 `SetDisplayConfig(SDC_USE_SUPPLIED_DISPLAY_CONFIG)`，只摘掉虚拟屏那一条路径，
 > **不会碰你的真实外接显示器**。驱动本身还在，下次点 `开始投屏` 会自动接回来。
 
+### 设置和日志放在哪
+
+两个文件永远待在**同一个目录**里：
+
+* `settings.json` —— 你调好的分辨率 / 帧率 / 码率 / 模式 / 屏幕位置 / 窗口大小
+* `DroidExtend.log` —— 运行日志（界面日志区里那些行，同一个文件里也有；超过 2 MB 自动滚成 `.1`）
+
+默认就是**程序所在目录**——用安装包装的话，就是你安装时选的那个目录。
+菜单 `文件 → 更改数据目录…` 可以换到别处（会顺手把这两个文件一起搬过去），
+`文件 → 打开数据目录（设置与日志）` 直接在资源管理器里打开。底部状态栏一直显示当前用的是哪个目录。
+
+> 程序目录写不进去时（比如装到了 `Program Files`）会自动回落到 `%LOCALAPPDATA%\DroidExtend`，
+> 记下选择的是这个目录下的 `data_dir.txt`。
+> 1.4.0 之前的设置放在 `%USERPROFILE%\.droidextend\settings.json`，第一次启动会自动搬过来。
+
 ---
 
 ## 三、性能与调优（实测数据）
@@ -259,7 +231,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.1.0.exe ← Windows 安装程序（34 MB）
+│   └─ DroidExtend-Setup-1.4.0.exe ← Windows 安装程序（34 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）
@@ -272,12 +244,21 @@ droid-extend/
 │   ├─ vdd.py                    虚拟显示驱动的安装与状态检查
 │   ├─ adb.py                    adb 封装（reverse 隧道、安装、启动）
 │   ├─ linkspeed.py              USB 链路测速
-│   └─ paths.py                  定位随包的 adb / ffmpeg / JDK / SDK
+│   ├─ paths.py                  定位随包的 adb / ffmpeg / JDK / SDK，以及数据目录
+│   ├─ settings.py               设置的读写（原子写 + 白名单 + 旧位置迁移）
+│   ├─ applog.py                 写 DroidExtend.log（2 MB 滚动，失败绝不拖垮程序）
+│   ├─ update.py                 查 GitHub 最新 Release
+│   ├─ manual.py                 软件内使用说明的正文
+│   └─ version.py                版本号与仓库地址（一处改、处处生效）
 ├─ android/                       ← 手机端（纯 Java，无 Gradle）
 │   ├─ src/com/droidextend/MainActivity.java
 │   ├─ src/com/droidextend/StreamClient.java
 │   ├─ src/com/droidextend/VideoDecoder.java
 │   ├─ src/com/droidextend/InputClient.java
+│   ├─ src/com/droidextend/HudView.java      状态浮窗 + 可拖动的设置按钮（全手绘）
+│   ├─ src/com/droidextend/Stats.java        一帧的统计数字
+│   ├─ src/com/droidextend/AppLog.java       日志开关与落盘
+│   ├─ src/com/droidextend/Prefs.java        三个开关 + 按钮位置
 │   ├─ AndroidManifest.xml
 │   └─ build.py                  aapt2 → javac → d8 → 打包 → apksigner 一键构建
 ├─ tools/                         ← 随包工具链与安装脚本
@@ -419,7 +400,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
   "D:\dsh projects\droid-extend\tools\installer\DroidExtend.iss"
 ```
 
-产物直接覆盖 `dist\DroidExtend-Setup-1.3.0.exe`（约 18 秒，lzma2/max）。
+产物直接覆盖 `dist\DroidExtend-Setup-1.4.0.exe`（约 20 秒，lzma2/max）。
 
 脚本在 `tools/installer/DroidExtend.iss`，要点：
 

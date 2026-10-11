@@ -78,6 +78,15 @@ class Session(object):
         self._last_bytes = 0
         self._display_applied = None
         self._prev_mode = None
+        # -- capture watchdog ----------------------------------------------
+        # ddagrab dies whenever Windows invalidates the desktop duplication:
+        # a display-mode change, or a UAC prompt switching to the secure
+        # desktop.  ffmpeg exits, the reader thread ends, and the phone keeps
+        # showing the last frame forever.  The watchdog restarts the capture
+        # instead of leaving the user with a frozen picture.
+        self._last_recover = 0.0
+        self._recover_tries = 0
+        self.fatal = None
 
     # ------------------------------------------------------------------ state
     @property
@@ -365,10 +374,115 @@ class Session(object):
 
     def _pump_loop(self):
         while not self._stop.is_set():
-            units = self.capture.get_units(0.4) if self.capture else []
-            if units and self.server:
-                self.server.put(units)
-            self._tick()
+            # Nothing in here may kill this thread: it is the only thing moving
+            # frames from ffmpeg to the phone, and if it dies the picture
+            # freezes while the app still says 投屏中.
+            try:
+                units = self.capture.get_units(0.4) if self.capture else []
+                if units and self.server:
+                    self.server.put(units)
+                self._tick()
+                self._watch_capture()
+            except Exception as e:
+                self.log("采集循环异常（已忽略）: %r" % (e,))
+                time.sleep(0.5)
+
+    # ------------------------------------------------------ capture watchdog
+    STALL_LIMIT = 3.0        # seconds of silence before we call it dead
+    RECOVER_WAIT = 4.0       # seconds between restart attempts
+
+    def _watch_capture(self):
+        cap = self.capture
+        if cap is None or self._stop.is_set() or self.fatal:
+            return
+        now = time.time()
+        if cap.dead():
+            why = "采集进程已退出"
+        elif cap.stalled(self.STALL_LIMIT):
+            why = "采集卡住（%.0f 秒没有画面）" % (now - cap.last_data)
+        else:
+            self._recover_tries = 0
+            return
+        if now - self._last_recover < self.RECOVER_WAIT:
+            return
+        self._last_recover = now
+        self._recover_capture(why)
+
+    def _recover_capture(self, why):
+        """Restart ffmpeg after the desktop duplication was invalidated."""
+        cap = self.capture
+        self._recover_tries += 1
+        n = self._recover_tries
+        # Only speak up on the first failure and then once every 30 s, so a
+        # machine with the display unplugged does not fill the log.
+        quiet = n > 1 and n % 6 != 0
+        if not quiet:
+            hint = ""
+            if cap is not None and cap.access_lost():
+                hint = "（DXGI 报 887a0026 ACCESS_LOST：显示模式变了，或者刚弹过 UAC 提权窗口）"
+            self.log("采集中断：%s%s，正在重连采集…" % (why, hint))
+            if cap is not None and cap.err_tail.strip():
+                self.log("  ffmpeg: " + cap.err_tail.strip().splitlines()[-1])
+        if cap is not None:
+            try:
+                cap.stop()
+            except Exception:
+                pass
+        self.capture = None
+
+        # The user may have changed the size while we were away -- that is
+        # exactly what Windows' 显示设置 does -- so re-read the real rectangle.
+        old = self.rect or {}
+        old_wh = (old.get("width"), old.get("height"))
+        changed = self._refresh_rect()
+        if changed is None:
+            self.fatal = "虚拟显示器已从桌面消失，投屏停止"
+            self.log("采集中断：" + self.fatal)
+            return
+        try:
+            cap = Capture(self.cfg, self.rect, log=self.log)
+            backend = cap.start()
+        except Exception as e:
+            if not quiet:
+                self.log("  重连失败: %s" % e)
+            return
+        self.capture = cap
+        self._recover_tries = 0
+        self.log("  采集已恢复: %s  %dx%d@%d" % (
+            backend, self.rect["width"], self.rect["height"], self.cfg["fps"]))
+        if changed and self.server is not None:
+            # The phone's decoder was configured for the old size, so the new
+            # pictures would be rejected.  Dropping the connection makes the
+            # app's retry loop reconnect and pick up a fresh handshake.
+            self.log("  画面尺寸变了 %dx%d → %dx%d，让手机重新握手" % (
+                old_wh[0], old_wh[1], self.rect["width"], self.rect["height"]))
+            if self.touch is not None:
+                try:
+                    self.touch.rect = self.rect
+                except Exception:
+                    pass
+            self.server.drop_client()
+
+    def _refresh_rect(self):
+        """Re-read the captured screen's rectangle.
+
+        Returns None if the display vanished, True if the size changed, and
+        False when nothing moved.
+        """
+        name = self._display_applied or self.target
+        if not name:
+            return False
+        mon = next((m for m in wd.live_monitors() if m["name"] == name), None)
+        if mon is None:
+            return None
+        old = self.rect or {}
+        changed = (old.get("width") != mon["width"]
+                   or old.get("height") != mon["height"]
+                   or old.get("left") != mon["left"]
+                   or old.get("top") != mon["top"])
+        self.rect = dict(mon)
+        self._display_applied = name
+        return True if changed else False
 
     def _tick(self):
         now = time.time()

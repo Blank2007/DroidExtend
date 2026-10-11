@@ -132,6 +132,17 @@ class StreamServer(object):
         with self._cv:
             self._cv.notify_all()
 
+    def drop_client(self):
+        """Kick the current phone off on purpose.
+
+        Used when the picture size changes mid-session (the user picked a new
+        resolution in Windows' display settings, and the capture watchdog
+        recovered at the new size): the phone's decoder is configured for the
+        old size, so the only clean fix is to make it reconnect and take a
+        fresh handshake.  Its retry loop does that within a second or two.
+        """
+        self._drop_client()
+
     def send_header(self, width, height, fps, note=""):
         if not self.conn:
             return False

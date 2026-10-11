@@ -93,10 +93,15 @@ def detect_ddagrab_outputs(ffmpeg=None, limit=8, timeout=25):
     found = []
     misses = 0
     for idx in range(limit):
+        # framerate=30, not 1: ddagrab paces its output, so at 1 fps the first
+        # frame costs a whole second and the sweep took 5 s -- five seconds of
+        # frozen picture every time the capture had to be restarted, which is
+        # exactly what a UAC prompt or a display-mode change forces.  Measured
+        # on this machine: 2.25 s at framerate=1, 0.31 s at 30, 0.29 s at 60.
         cmd = [ff, "-hide_banner", "-loglevel", "info", "-nostdin",
                "-init_hw_device", "d3d11va=gpu", "-filter_hw_device", "gpu",
                "-f", "lavfi", "-i",
-               "ddagrab=output_idx=%d:framerate=1:draw_mouse=0" % idx,
+               "ddagrab=output_idx=%d:framerate=30:draw_mouse=0" % idx,
                "-vf", "hwdownload,format=bgra,showinfo",
                "-frames:v", "1", "-f", "null", "-"]
         try:
@@ -301,6 +306,50 @@ class Capture(object):
         self.stats = {"frames": 0, "bytes": 0, "dropped": 0, "t": time.time()}
         self.error = None
         self.backend_used = None
+        # -- liveness -------------------------------------------------------
+        # ffmpeg's ddagrab gives up as soon as Windows invalidates the desktop
+        # duplication: AcquireNextFrame returns 887a0026 (DXGI_ERROR_ACCESS_LOST)
+        # and the filter dies with "Generic error in an external library".  That
+        # happens on every display-mode change (including one made from Windows'
+        # 显示设置 while 投屏 is running) and every time a UAC prompt switches to
+        # the secure desktop.  Before the watchdog existed the reader thread just
+        # ended, the app kept saying 投屏中, and the phone froze on the last frame
+        # until it was stopped by hand.
+        self.last_data = time.time()
+        self.err_tail = ""
+        self.ever_started = False
+
+    # -- liveness ----------------------------------------------------------
+    def dead(self):
+        """True once ffmpeg has exited (or was never started)."""
+        return self.proc is None or self.proc.poll() is not None
+
+    def stalled(self, limit=3.0):
+        """True when ffmpeg is alive but has handed over nothing for `limit` s.
+
+        ddagrab duplicates at the requested framerate whether or not the screen
+        changes, so a long silence is never just "nothing moved".
+        """
+        return (not self.dead()) and (time.time() - self.last_data) > limit
+
+    def access_lost(self):
+        return "887a0026" in (self.err_tail or "").lower()
+
+    def _drain_err(self, p):
+        """Keep the tail of ffmpeg's stderr.
+
+        A pipe nobody reads fills up and blocks ffmpeg, so this runs from the
+        moment the process starts -- the tail is what tells us *why* it died.
+        """
+        try:
+            while True:
+                chunk = p.stderr.read(4096)
+                if not chunk:
+                    break
+                self.err_tail = (self.err_tail +
+                                 chunk.decode("utf-8", "replace"))[-4000:]
+        except Exception:
+            pass
 
     # -- command line ------------------------------------------------------
     def command(self, backend):
@@ -442,6 +491,9 @@ class Capture(object):
                 continue
             self.proc = p
             self.backend_used = backend
+            self.ever_started = True
+            threading.Thread(target=self._drain_err, args=(p,),
+                             name="ffmpeg-stderr", daemon=True).start()
             self.log("  %s 采集已开始 %dx%d@%d" % (backend, self.rect["width"],
                                                    self.rect["height"], self.cfg.get("fps", 60)))
             self._thread = threading.Thread(target=self._reader, name="ffmpeg-reader", daemon=True)
@@ -469,6 +521,7 @@ class Capture(object):
                 break
             if not chunk:
                 break
+            self.last_data = time.time()
             buf += chunk
             units, buf = split_access_units(buf)
             if len(buf) > 16 * 1024 * 1024:

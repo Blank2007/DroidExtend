@@ -3,7 +3,7 @@ package com.droidextend;
 import android.content.Context;
 import android.content.SharedPreferences;
 
-/** The three switches the phone gets to keep between runs. */
+/** The handful of choices the phone gets to keep between runs. */
 public final class Prefs {
 
     private static final String FILE = "droidextend";
@@ -11,6 +11,8 @@ public final class Prefs {
     public static final String SHOW_HUD = "show_hud";
     public static final String LOGGING = "logging";
     public static final String FILL = "fill";
+    public static final String GEAR_X = "gear_x";
+    public static final String GEAR_Y = "gear_y";
 
     private final SharedPreferences sp;
 
@@ -38,5 +40,21 @@ public final class Prefs {
 
     public void set(String key, boolean value) {
         sp.edit().putBoolean(key, value).apply();
+    }
+
+    /**
+     * Where the settings button was left, as a fraction of the screen (0..1).
+     * Defaults to the top-right corner.
+     */
+    public float gearX() {
+        return sp.getFloat(GEAR_X, 1f);
+    }
+
+    public float gearY() {
+        return sp.getFloat(GEAR_Y, 0f);
+    }
+
+    public void setGear(float fx, float fy) {
+        sp.edit().putFloat(GEAR_X, fx).putFloat(GEAR_Y, fy).apply();
     }
 }

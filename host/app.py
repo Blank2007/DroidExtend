@@ -8,6 +8,7 @@ the USB cable to the phone through an adb reverse tunnel.
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -47,7 +48,9 @@ DPI = wd.set_dpi_aware()          # must precede Tk: gives us real pixels
 from capture import ENCODERS, NVENC_PRESETS, X264_PRESETS, list_hardware_encoders  # noqa: E402
 from paths import ROOT, apk_path, adb_exe, ffmpeg_exe                             # noqa: E402
 from session import Session, DEFAULTS, VddMissing                                  # noqa: E402
+import applog                                                                     # noqa: E402
 import manual as mn                                                               # noqa: E402
+import paths                                                                      # noqa: E402
 import settings as st                                                             # noqa: E402
 import update as upd                                                              # noqa: E402
 from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER,   # noqa: E402
@@ -152,8 +155,10 @@ class App(tk.Tk):
         self.log("%s v%s 启动  (DPI: %s)" % (APP_NAME, APP_VERSION, DPI))
         self.log("adb: %s" % (adb_exe() or "缺失"))
         self.log("ffmpeg: %s" % (ffmpeg_exe() or "缺失"))
+        self.log("设置与日志目录: %s" % paths.data_dir())
         self.log("设置文件: %s%s" % (st.where(),
-                                    "" if os.path.exists(st.FILE) else "  （还没有，退出时会创建）"))
+                                    "" if os.path.exists(st.where()) else "  （还没有，退出时会创建）"))
+        self.log("日志文件: %s" % (applog.path(),))
         apk = apk_path()
         self.log("APK: %s%s" % (apk or "(缺失)", "" if apk else "  ← 先运行 build_apk.bat 构建"))
         if not apk:
@@ -167,7 +172,8 @@ class App(tk.Tk):
         bar = tk.Menu(self, tearoff=0)
 
         m_file = tk.Menu(bar, tearoff=0)
-        m_file.add_command(label="打开设置目录", command=self.on_open_config_dir)
+        m_file.add_command(label="打开数据目录（设置与日志）", command=self.on_open_config_dir)
+        m_file.add_command(label="更改数据目录…", command=self.on_change_data_dir)
         m_file.add_command(label="打开程序目录", command=self.on_open_root_dir)
         m_file.add_separator()
         m_file.add_command(label="退出", command=self._on_close)
@@ -509,7 +515,7 @@ class App(tk.Tk):
         bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Label(bar, text="%s v%s" % (APP_NAME, APP_VERSION), style="Dim.TLabel").pack(side="left")
         ttk.Label(bar, text=REPO_URL, style="Dim.TLabel").pack(side="left", padx=12)
-        self.file_var = tk.StringVar(value="设置: %s" % st.where())
+        self.file_var = tk.StringVar(value="数据目录: %s" % paths.data_dir())
         ttk.Label(bar, textvariable=self.file_var, style="Dim.TLabel").pack(side="right")
 
         # Any settings change is written straight out, so even a crash leaves
@@ -525,7 +531,12 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ utils
     def log(self, msg, tag=None):
-        self.logq.put((time.strftime("%H:%M:%S ") + str(msg), tag))
+        stamped = time.strftime("%H:%M:%S ") + str(msg)
+        self.logq.put((stamped, tag))
+        # The pane is not a record: it dies with the window, and the failures
+        # worth reading about (driver refused, adb failed, capture restarted)
+        # happen while nobody is looking at it.
+        applog.write(stamped)
 
     def _later(self, fn):
         """Schedule onto the UI thread from a worker.
@@ -860,11 +871,18 @@ class App(tk.Tk):
         self.btn_start.configure(state="normal")
 
     def _poll_perf(self):
-        if self.session and self.session.running and self.session.server:
-            s = self.session.stats
-            conn = "手机已连接" if self.session.server.connected else "等待手机连接…"
+        s = self.session
+        if s is not None and getattr(s, "fatal", None):
+            # The capture watchdog gave up (the virtual display is gone).
+            self.perf_var.set(s.fatal)
+        elif s is not None and s.server and not s.running:
+            # ffmpeg died and is being restarted -- usually one or two seconds.
+            self.perf_var.set("采集中断，正在自动重连…")
+        elif s is not None and s.running and s.server:
+            st = s.stats
+            conn = "手机已连接" if s.server.connected else "等待手机连接…"
             self.perf_var.set("%s   %.1f fps   编码 %.1f Mbps   送出 %d 帧   丢 %d" % (
-                conn, s["fps"], s["mbps"], s["sent"], s["dropped"]))
+                conn, st["fps"], st["mbps"], st["sent"], st["dropped"]))
         self.after(700, self._poll_perf)
 
     def _on_close(self):
@@ -920,12 +938,59 @@ class App(tk.Tk):
             messagebox.showerror("打开浏览器失败", "%s\n\n地址：%s" % (e, url), parent=self)
 
     def on_open_config_dir(self):
-        d = os.path.dirname(st.FILE)
+        d = paths.data_dir()
         try:
             os.makedirs(d, exist_ok=True)
             os.startfile(d)
         except Exception as e:
             messagebox.showerror("打开失败", "%s\n\n%s" % (e, d), parent=self)
+
+    def _refresh_paths_label(self):
+        """Status bar shows where settings and logs are being written."""
+        try:
+            self.file_var.set("数据目录: %s" % paths.data_dir())
+        except Exception:
+            pass
+
+    def on_change_data_dir(self):
+        """Move settings.json and DroidExtend.log somewhere else.
+
+        Kept to one folder on purpose: "send me your log" should not also need
+        "and find settings.json in your user profile".
+        """
+        old = paths.data_dir()
+        d = filedialog.askdirectory(
+            title="选择保存设置和日志的文件夹", parent=self, initialdir=old,
+            mustexist=False)
+        if not d:
+            return
+        d = os.path.abspath(d)
+        if os.path.normcase(d) == os.path.normcase(old):
+            return
+        moved = []
+        for name in ("settings.json", applog.NAME):
+            src = os.path.join(old, name)
+            if not os.path.exists(src):
+                continue
+            try:
+                shutil.copy2(src, os.path.join(d, name))
+                moved.append(name)
+            except Exception as e:
+                self.log("复制 %s 失败: %s" % (name, e), "err")
+        try:
+            paths.set_data_dir(d)
+        except Exception as e:
+            messagebox.showerror("切换失败", "%s\n\n%s" % (e, d), parent=self)
+            return
+        # Reopen the log at the new place so the rest of this run lands there.
+        applog.close()
+        applog.start("%s v%s" % (APP_NAME, APP_VERSION))
+        self.log("数据目录已改为: %s  (已搬移: %s)" % (d, "、".join(moved) or "无"))
+        self._refresh_paths_label()
+        messagebox.showinfo(
+            "数据目录已更改",
+            "设置和日志现在保存在：\n%s\n\n已搬移：%s\n以后所有设置和日志都写在这里。"
+            % (d, "、".join(moved) or "（没有旧文件）"), parent=self)
 
     def on_open_root_dir(self):
         try:
@@ -1016,8 +1081,8 @@ class App(tk.Tk):
                 "把界面上的参数恢复成默认值，并删掉已保存的设置文件。\n\n继续吗？", parent=self):
             return
         try:
-            if os.path.exists(st.FILE):
-                os.remove(st.FILE)
+            if os.path.exists(st.path()):
+                os.remove(st.path())
         except Exception as e:
             self.log("删除设置文件失败: %s" % e, "err")
         default = st.load()
@@ -1067,17 +1132,40 @@ class App(tk.Tk):
 
 
 def main():
+    # The log file is opened before anything can go wrong, so even a failure in
+    # the checks below leaves a record of what the process saw.
+    applog.start("%s v%s" % (APP_NAME, APP_VERSION))
+    applog.line("ROOT %s" % ROOT)
+    applog.line("数据目录 %s" % paths.data_dir())
+    st.migrate_legacy(log=applog.line)
     missing = []
     if not adb_exe():
         missing.append("adb")
     if not ffmpeg_exe():
         missing.append("ffmpeg")
     if missing:
+        applog.line("缺少组件: " + ", ".join(missing))
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror("缺少组件", "找不到: " + ", ".join(missing))
+        applog.close()
         return 1
-    App().mainloop()
+    app = App()
+    # Tk otherwise prints a background exception to a console that a --windowed
+    # build does not have, so the one traceback that mattered was invisible.
+    def _oops(exc, val, tb):
+        import traceback
+        applog.write("".join(traceback.format_exception(exc, val, tb)))
+        try:
+            app.log("界面回调出错（已写入日志）: %s" % val, "err")
+        except Exception:
+            pass
+    app.report_callback_exception = _oops
+    try:
+        app.mainloop()
+    finally:
+        applog.line("退出")
+        applog.close()
     return 0
 
 

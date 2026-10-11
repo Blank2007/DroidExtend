@@ -13,6 +13,11 @@
     <color name="hud_warn">#FFFFC45B</color>
     <color name="hud_bad">#FFFF7B72</color>
 
+    <!-- Read-out over live video: light text, hard shadow, no panel. -->
+    <color name="hud_light">#F2FFFFFF</color>
+    <color name="hud_light_dim">#B8FFFFFF</color>
+    <color name="hud_shadow">#A6000000</color>
+
     <!-- Settings sheet. -->
     <color name="sheet_bg">#F2101728</color>
     <color name="sheet_row">#14FFFFFF</color>
