@@ -46,6 +46,7 @@ DEFAULTS = {
     "install_apk": True,
     "auto_launch": True,
     "touch": True,           # phone touches -> real mouse input
+    "match_phone": True,     # size the virtual screen like the phone's own panel
 }
 
 DISP_CHANGE = {
@@ -100,6 +101,59 @@ class Session(object):
         if pos == "below":
             return primary["left"], primary["bottom"] + gap
         return primary["right"] + gap, primary["top"]
+
+    def _match_phone(self, name, w, h, hz):
+        """Prefer the phone's own panel size over whatever the UI asked for.
+
+        A 3200x2136 phone letterboxed into 1920x1080 throws away most of the
+        screen; matching the panel means the picture reaches all four edges.
+        The driver can only offer what is in its mode table, so when the exact
+        size is missing we take the closest aspect ratio and append the missing
+        size to vdd_settings.xml -- the driver reads that file while its device
+        node starts, so it goes live on the next reboot or driver reinstall.
+        """
+        try:
+            if self.adb is None:
+                self.find_device()
+            size = self.adb.physical_size(self.serial) if self.adb else None
+        except Exception as e:
+            self.log("  读手机分辨率失败: %s" % e)
+            size = None
+        if not size:
+            self.log("  读不到手机分辨率，按 %dx%d 处理" % (w, h))
+            return w, h, hz
+
+        # The app is locked to landscape, so the panel's long side is its width.
+        pw, ph = max(size), min(size)
+        self.log("  手机分辨率 %dx%d" % (pw, ph))
+
+        best = wd.best_mode(name, pw, ph, hz)
+        if not best:
+            self.log("  驱动模式表读不到，按 %dx%d 处理" % (w, h))
+            return w, h, hz
+        bw, bh, bhz, exact = best
+        if exact:
+            self.log("  虚拟屏按手机分辨率 %dx%d@%d 撑满" % (bw, bh, bhz))
+            return bw, bh, bhz
+
+        self.log("  驱动模式表里没有 %dx%d，先用最接近的 %dx%d@%d（会有黑边）"
+                 % (pw, ph, bw, bh, bhz))
+        try:
+            import vdd as vd
+            added = vd.add_resolution(pw, ph, hz)
+        except Exception:
+            added = None
+        if added:
+            self.log("  已把 %dx%d 写进驱动模式表：点「安装虚拟显示器驱动」重装一次"
+                     "（或重启电脑）就能完全撑满" % (pw, ph))
+        elif added is False:
+            # The file already lists it; the driver still does not offer it,
+            # because it only reads that file while its device node starts.
+            self.log("  驱动暂时给不出 %dx%d（文件里已有，但驱动要重装一次或重启"
+                     "电脑才会读到）" % (pw, ph))
+        else:
+            self.log("  想完全撑满：点「安装虚拟显示器驱动」重装一次驱动")
+        return bw, bh, bhz
 
     def apply_display(self):
         """Make sure a second screen exists at the requested size. Returns rect."""
@@ -166,6 +220,8 @@ class Session(object):
         w = int(self.cfg["width"])
         h = int(self.cfg["height"])
         hz = int(self.cfg["hz"])
+        if self.cfg.get("match_phone", True):
+            w, h, hz = self._match_phone(name, w, h, hz)
         x, y = self._position_for(primary, w, h)
 
         modes = wd.available_modes(name)
@@ -279,10 +335,33 @@ class Session(object):
         self._last = time.time()
         return backend
 
+    def _quality_note(self):
+        """One short line describing the picture, for the phone's overlay.
+
+        The phone can measure bitrate, fps and latency on its own, but it has
+        no way to know which encoder or quality the PC picked -- and "2400 kbps"
+        means very different things at Q18 versus Q30.
+        """
+        enc = str(self.cfg.get("encoder", ""))
+        name = {
+            "h264_nvenc": "NVENC", "hevc_nvenc": "NVENC HEVC",
+            "h264_amf": "AMF", "hevc_amf": "AMF HEVC",
+            "libx264": "x264", "libx265": "x265",
+        }.get(enc, enc or "?")
+        rc = str(self.cfg.get("rate_control", "vbr")).upper()
+        note = "%s %s" % (name, rc)
+        if rc == "VBR":
+            note += " Q%s" % self.cfg.get("quality", 20)
+        note += " · %sMbps" % self.cfg.get("bitrate_mbps", 40)
+        if self.capture is not None and getattr(self.capture, "backend_used", None):
+            note += " · " + str(self.capture.backend_used)
+        return note
+
     def _on_client(self, addr):
         self.log("客户端接入，发送握手")
         if self.server and self.rect:
-            self.server.send_header(self.rect["width"], self.rect["height"], self.cfg["fps"])
+            self.server.send_header(self.rect["width"], self.rect["height"],
+                                    self.cfg["fps"], self._quality_note())
 
     def _pump_loop(self):
         while not self._stop.is_set():
