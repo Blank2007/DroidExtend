@@ -34,7 +34,7 @@
 
 > **想直接拿现成的？**
 > * 安装程序 ⬇️ **[DroidExtend-Setup-1.3.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.3.0.exe)**（35 MB）
-> * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（21 KB）
+> * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（122 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
 > 本仓库只放源码 —— 二进制依赖（ffmpeg、adb、Android SDK、虚拟显示驱动）加起来 370 MB，没有进仓库。
