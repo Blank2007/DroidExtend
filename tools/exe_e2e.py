@@ -8,6 +8,8 @@ Steps: launch -> raise -> click 开始投屏 -> wait for the second screen -> ta
 the bundled touch server on :27184 -> click 停止 -> wait for the screen to go
 away again -> kill.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import socket
@@ -19,9 +21,9 @@ from ctypes import wintypes
 # DE_ROOT lets us drive a copy of the app that lives outside the session
 # workspace: the harness denies display-config changes to any exe whose image
 # sits under the workspace, which has nothing to do with the app itself.
-ROOT = os.environ.get("DE_ROOT", r"D:\dsh projects\droid-extend")
+ROOT = os.environ.get("DE_ROOT", REPO)
 EXE = os.path.join(ROOT, "DroidExtend.exe")
-sys.path.insert(0, r"D:\dsh projects\droid-extend\host")
+sys.path.insert(0, os.path.join(REPO, "host"))
 
 import win_display as wd
 import vdd
@@ -30,7 +32,7 @@ from touch import Injector, REC, DOWN, UP
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import winshot
 
-SHOTS = r"D:\dsh projects\droid-extend\tools\shots"
+SHOTS = os.path.join(REPO, "tools", "shots")
 
 u = ctypes.windll.user32
 u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))

@@ -6,13 +6,15 @@ the Windows cursor ended up and what the host's injector counted.
 
 Run with a phone attached.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import subprocess
 import sys
 import time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 import win_display as wd

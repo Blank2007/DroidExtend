@@ -84,10 +84,16 @@ def main():
         if os.path.isdir(target):
             print("already unpacked:", target, flush=True)
             continue
-        print("unpacking %s -> %s" % (os.path.basename(info["file"]), target), flush=True)
+        # The manifest stores the archive location relative to the repo root so
+        # that the file we write out is portable; older manifests may still hold
+        # an absolute path, so accept both.
+        archive = info["file"]
+        if not os.path.isabs(archive):
+            archive = os.path.join(ROOT, archive.replace("/", os.sep))
+        print("unpacking %s -> %s" % (os.path.basename(archive), target), flush=True)
         tmp = target + ".tmp"
         os.makedirs(tmp, exist_ok=True)
-        with zipfile.ZipFile(info["file"]) as z:
+        with zipfile.ZipFile(archive) as z:
             z.extractall(tmp)
         # android archives wrap everything in one top-level folder
         entries = os.listdir(tmp)
@@ -98,8 +104,13 @@ def main():
             os.replace(tmp, target)
         print("   ->", target, flush=True)
 
+    portable = {}
+    for label, info in manifest.items():
+        item = dict(info)
+        item["file"] = os.path.relpath(item["file"], ROOT).replace(os.sep, "/")
+        portable[label] = item
     with open(os.path.join(OUT, "sdk_manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
+        json.dump(portable, f, indent=2, ensure_ascii=False)
     print("\nALL DONE", flush=True)
 
 

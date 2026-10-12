@@ -3,12 +3,14 @@
 Walks the CCD path database before/after each recovery attempt so we can see
 what state the driver is actually in, instead of guessing from return codes.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import sys
 import time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 import win_display as wd

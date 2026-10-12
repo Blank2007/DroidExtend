@@ -7,12 +7,14 @@ case - a full-screen animated pattern on the virtual display - and read the
 
 Run with a phone attached.  Usage:  python tools\\latency.py [seconds]
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os
 import subprocess
 import sys
 import time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 import win_display as wd

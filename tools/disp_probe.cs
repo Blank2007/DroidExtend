@@ -45,7 +45,11 @@ public class DispProbe
 
     public static int Main(string[] args)
     {
-        string outPath = @"D:\dsh projects\droid-extend\tools\tmp\cs_probe.txt";
+        // Default next to the exe so the probe has no opinion about where the
+        // repo lives; pass a path as the second argument to override.
+        string outPath = args.Length > 1
+            ? args[1]
+            : Path.Combine(AppContext.BaseDirectory, "cs_probe.txt");
         log = new StreamWriter(outPath, false, System.Text.Encoding.UTF8);
         Say("exe = " + System.Reflection.Assembly.GetExecutingAssembly().Location);
         Say("sizeof DEVMODE = " + Marshal.SizeOf(typeof(DEVMODE)));

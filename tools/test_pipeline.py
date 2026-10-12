@@ -1,6 +1,8 @@
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os, sys, time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 

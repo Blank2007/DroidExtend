@@ -3,13 +3,15 @@
 Clicks 刷新 (which appends a log line) and prints the cursor before/after, so a
 silent coordinate error is distinguishable from a click that never lands.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import sys
 import time
 from ctypes import wintypes
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 u = ctypes.windll.user32

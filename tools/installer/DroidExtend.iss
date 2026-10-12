@@ -1,5 +1,6 @@
 ; DroidExtend 安装程序（Inno Setup 6）
-; 编译： "C:\Users\15530\AppData\Local\Programs\Inno Setup 6\ISCC.exe" DroidExtend.iss
+; 编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" DroidExtend.iss
+;       （或者 winget install JRSoftware.InnoSetup 装到 %LOCALAPPDATA%\Programs）
 ;
 ; 设计要点：
 ;   * 装到 %LOCALAPPDATA%\Programs\DroidExtend，PrivilegesRequired=lowest，
@@ -10,7 +11,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.4.0"
+#define AppVer "1.4.1"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}

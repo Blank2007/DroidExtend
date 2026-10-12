@@ -13,7 +13,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-11 的几次会话内从零写完并交付到可安装的 1.4.0。
+> 于 2026-10-11 的几次会话内从零写完，此后每个版本（当前 1.4.1）都由它在同一个仓库里继续维护。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -33,7 +33,7 @@
 | 📦 **开箱即用** | 34 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.4.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.4.0.exe)**（35 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.4.1.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.4.1.exe)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（186 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
@@ -48,7 +48,7 @@
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.4.0.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.4.1.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -93,14 +93,15 @@
 > 两个要放在一起）。`启动 DroidExtend.bat` 是同一程序的源码启动方式，保留备用：
 > 万一 exe 被杀软拦了，双击它效果完全一样。
 
-> ⚠️ **如果不用安装包，别在 `D:\dsh projects` 目录里直接运行 exe。**
-> 当前这个 AI 会话的沙箱会拦截「程序镜像位于工作区目录之下」的进程调用显示配置 API：
-> 同一个探针程序放进 `D:\dsh projects` 返回 `CDS_TEST rc=-1 / SDC_VALIDATE rc=5`，
-> 复制到 `D:\probe_test` 就返回 `rc=0 / rc=0`。表现是日志里反复刷
-> `激活显示器 attach rc=-1`、`attach 未生效，改用扩展拓扑 rc=5`，最后状态变 `出错`。
-> 安装包和 `D:\DroidExtend\` 都在工作区之外，**没有这个问题**；
+> ⚠️ **如果不用安装包，别把 exe 放在 AI 编码会话的工作区目录里运行。**
+> 这类会话的沙箱会拦截「程序镜像位于工作区目录之下」的进程调用显示配置 API：
+> 同一个探针程序放进工作区里返回 `CDS_TEST rc=-1 / SDC_VALIDATE rc=5`，
+> 复制到工作区外的任意目录（例如 `C:\Temp\probe`）就返回 `rc=0 / rc=0`。
+> 表现是日志里反复刷 `激活显示器 attach rc=-1`、
+> `attach 未生效，改用扩展拓扑 rc=5`，最后状态变 `出错`。
+> 安装包和手动复制的副本都在工作区之外，**没有这个问题**；
 > 关掉 AI 会话之后这个限制也不存在了，放哪儿都能跑。
-> （源码方式启动同样不受影响，因为解释器在 `C:\Python314`。）
+> （源码方式启动同样不受影响，因为解释器本身在工作区外。）
 
 ---
 
@@ -231,7 +232,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.4.0.exe ← Windows 安装程序（34 MB）
+│   └─ DroidExtend-Setup-1.4.1.exe ← Windows 安装程序（34 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）
@@ -309,6 +310,15 @@ droid-extend/
 
 ## 六、常见问题
 
+**Q：装了 **v1.4.0 或更早**的版本，点「安装虚拟显示器驱动（需要管理员）」没反应？**
+A：这是个已修复的 bug（[issue #1](https://github.com/Blank2007/DroidExtend/issues/1)，
+感谢 [@Bai-2008](https://github.com/Bai-2008) 报告）：v1.1.0–v1.4.0 的驱动安装脚本里
+写死了开发机的路径，对所有用户都失效，而且失败信息被提权子进程吞掉了，界面上看不出任何东西。
+**升到 v1.4.1 即可。** 验证方法：装完驱动后在「设备管理器 → 显示适配器」里
+应该能看到 `MttVDD`；日志文件（`文件 → 打开数据目录`）里也不该再出现
+`source missing`。手动兜底的办法是右键 `安装虚拟显示器驱动.bat` →「以管理员身份运行」，
+它和按钮走的是同一个脚本。
+
 **Q：手机画面上只有壁纸和任务栏，看着跟主屏一模一样？**
 A：这正是**扩展成功**的样子 —— 新接上的显示器默认就是一张同样的壁纸，
 Windows 还会在上面再画一条任务栏，所以空着的拓展屏一眼看去和主屏没区别。
@@ -366,27 +376,26 @@ A：不用。协议和分辨率都是运行时握手的，任何 Android 5.0+ �
 图标（`android/res/mipmap-*` 和 `DroidExtend.ico`）是画出来的，不是素材：
 
 ```powershell
-& 'C:\Users\15530\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\python\python.exe' android\make_icon.py
+# 需要 Pillow；下面用的是 DSH 自带的解释器，C:\Python314 里没有 PIL
+& "<带 Pillow 的 python.exe>" android\make_icon.py
 ```
-
-必须用**带 Pillow 的解释器**（上面这个是 DSH 自带的，Pillow 12.3.0）；`C:\Python314` 里没有 PIL。
 
 Windows 端的 exe 同理，改了 `host/**` 里的 Python 代码才需要重打（需要 `pyinstaller`）：
 
 ```powershell
-cd "D:\dsh projects\droid-extend"
+cd <仓库目录>
 python -m PyInstaller --noconfirm --clean --onedir --windowed `
-  --name DroidExtend --icon "D:\dsh projects\droid-extend\DroidExtend.ico" `
-  --paths "D:\dsh projects\droid-extend\host" `
-  --distpath "D:\dsh projects\droid-extend\tools\pybuild\out" `
-  --workpath "D:\dsh projects\droid-extend\tools\pybuild\work" `
-  --specpath "D:\dsh projects\droid-extend\tools\pybuild" `
-  "D:\dsh projects\droid-extend\host\app.py"
+  --name DroidExtend --icon ".\DroidExtend.ico" `
+  --paths ".\host" `
+  --distpath ".\tools\pybuild\out" `
+  --workpath ".\tools\pybuild\work" `
+  --specpath ".\tools\pybuild" `
+  ".\host\app.py"
 # 然后把 out\DroidExtend\DroidExtend.exe 和 out\DroidExtend\_internal\ 复制到项目根目录
 ```
 
 必须用 `--onedir` 而不是 `--onefile`：单文件版每次启动都要往 `%TEMP%` 自解压，
-在受限环境下会直接报 `Could not create temporary directory!`。`--icon` 也要给绝对路径。
+在受限环境下会直接报 `Could not create temporary directory!`。
 
 ---
 
@@ -396,11 +405,10 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 `winget install --id JRSoftware.InnoSetup`）之后：
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
-  "D:\dsh projects\droid-extend\tools\installer\DroidExtend.iss"
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" ".\tools\installer\DroidExtend.iss"
 ```
 
-产物直接覆盖 `dist\DroidExtend-Setup-1.4.0.exe`（约 20 秒，lzma2/max）。
+产物直接覆盖 `dist\DroidExtend-Setup-<版本>.exe`（约 20 秒，lzma2/max）。
 
 脚本在 `tools/installer/DroidExtend.iss`，要点：
 

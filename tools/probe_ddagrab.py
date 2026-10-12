@@ -1,7 +1,9 @@
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os, subprocess, hashlib
 
-FFMPEG = r"D:\dsh projects\droid-extend\tools\ffmpeg\bin\ffmpeg.exe"
-OUT = r"D:\dsh projects\droid-extend\tools\shots"
+FFMPEG = os.path.join(REPO, "tools", "ffmpeg", "bin", "ffmpeg.exe")
+OUT = os.path.join(REPO, "tools", "shots")
 W, H = 1920, 1080
 FS = W * H * 3
 

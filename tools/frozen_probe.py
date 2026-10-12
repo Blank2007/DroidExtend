@@ -6,12 +6,14 @@ Compares, in the same frozen binary:
   * a raw GetProcAddress pointer,
 so we can tell a wrong-module problem from a policy problem.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import sys
 import time
 
-OUT = r"D:\dsh projects\droid-extend\tools\tmp\probe_out.txt"
+OUT = os.path.join(REPO, "tools", "tmp", "probe_out.txt")
 lines = []
 
 
@@ -24,7 +26,7 @@ def say(msg):
 say("frozen=%s" % getattr(sys, "frozen", False))
 say("exe=%s" % sys.executable)
 
-sys.path.insert(0, r"D:\dsh projects\droid-extend\host")
+sys.path.insert(0, os.path.join(REPO, "host"))
 import win_display as wd
 import vdd
 

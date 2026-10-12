@@ -1,4 +1,6 @@
-﻿import ctypes, time
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+import ctypes, time
 from ctypes import wintypes
 u = ctypes.windll.user32
 g = ctypes.windll.gdi32
@@ -41,5 +43,5 @@ for y in range(h):
         raw += bytes((rows[i+2], rows[i+1], rows[i], 255))
 png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
        + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
-open(r"D:\dsh projects\droid-extend\tools\shots\exe2.png", "wb").write(png)
+open(os.path.join(REPO, "tools", "shots", "exe2.png"), "wb").write(png)
 print("wrote", w, h)

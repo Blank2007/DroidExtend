@@ -1,10 +1,13 @@
 """Build + sign DroidExtend.apk without Gradle.
 
-Everything here comes from the archives already in tools/ plus the JDK that
-Minecraft shipped on this machine, so the build is offline and reproducible.
+Everything here comes from the archives already in tools/, plus any JDK 17+ found
+on the machine, so the build is offline once tools/sdk is populated.
 
     python android/build.py            # full build
     python android/build.py --clean    # wipe build/ first
+
+Needs a JDK (javac + keytool).  Resolution order is JAVA_HOME, then javac on
+PATH, then a few well-known install locations.
 """
 import argparse
 import os
@@ -18,12 +21,21 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TOOLS = os.path.join(ROOT, "tools")
+HOME = os.path.expanduser("~")
 
+# Last-resort guesses only.  JAVA_HOME and PATH come first, so a normal developer
+# machine never reaches these; they exist so a fresh clone on Windows without a
+# configured JDK still has a chance.
 JDK_CANDIDATES = [
-    r"C:\Users\15530\AppData\Roaming\.minecraft\runtime\java-runtime-delta",
-    r"C:\Users\15530\AppData\Roaming\.minecraft\runtime\java-runtime-alpha",
-    r"C:\Program Files\Eclipse Adoptium\jdk-17",
     os.environ.get("JAVA_HOME") or "",
+    os.path.join(HOME, "AppData", "Roaming", ".minecraft", "runtime", "java-runtime-delta"),
+    os.path.join(HOME, "AppData", "Roaming", ".minecraft", "runtime", "java-runtime-alpha"),
+    r"C:\Program Files\Eclipse Adoptium\jdk-17",
+    r"C:\Program Files\Eclipse Adoptium\jdk-21",
+    r"C:\Program Files\Java\jdk-17",
+    r"C:\Program Files\Java\jdk-21",
+    r"C:\Program Files\Microsoft\jdk-17.0.13.11-hotspot",
+    r"C:\Program Files\Android\Android Studio\jbr",
 ]
 
 BUILD = os.path.join(HERE, "build")
@@ -47,7 +59,13 @@ def find_jdk():
     for c in JDK_CANDIDATES:
         if c and os.path.exists(os.path.join(c, "bin", "javac.exe")):
             return c
-    raise SystemExit("no JDK found; set JAVA_HOME")
+    # javac on PATH: derive the JDK home from it (…\bin\javac.exe -> …).
+    javac = shutil.which("javac")
+    if javac:
+        home = os.path.dirname(os.path.dirname(os.path.abspath(javac)))
+        if os.path.exists(os.path.join(home, "bin", "javac.exe")):
+            return home
+    raise SystemExit("no JDK found; set JAVA_HOME to a JDK 17+ install")
 
 
 def java_tool(jdk, name):

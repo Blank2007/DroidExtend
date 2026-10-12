@@ -4,13 +4,15 @@ Connects to the touch server exactly the way the app does and sends a few
 records, then confirms the Windows cursor moved and the events were counted.
 Isolates "is the injector broken" from "is the phone sending".
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import socket
 import sys
 import time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 import win_display as wd

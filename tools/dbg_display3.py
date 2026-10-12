@@ -1,6 +1,8 @@
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes, sys
 from ctypes import wintypes
-sys.path.insert(0, r"D:\dsh projects\droid-extend\host")
+sys.path.insert(0, os.path.join(REPO, "host"))
 import win_display as wd
 
 u = wd.user32

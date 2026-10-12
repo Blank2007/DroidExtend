@@ -1,7 +1,9 @@
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os, re, subprocess, sys, time
 
-FFMPEG = r"D:\dsh projects\droid-extend\tools\ffmpeg\bin\ffmpeg.exe"
-OUT = r"D:\dsh projects\droid-extend\tools\shots"
+FFMPEG = os.path.join(REPO, "tools", "ffmpeg", "bin", "ffmpeg.exe")
+OUT = os.path.join(REPO, "tools", "shots")
 os.makedirs(OUT, exist_ok=True)
 
 TAIL_ENC = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "cbr",

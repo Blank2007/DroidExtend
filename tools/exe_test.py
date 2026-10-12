@@ -5,6 +5,8 @@ it clicks the real 开始投屏 button with SendInput, waits for the phone to co
 talks to the bundled TouchServer on :27184, then clicks 停止 and checks that the
 virtual display is gone from the desktop again.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import ctypes
 import os
 import socket
@@ -13,7 +15,7 @@ import time
 import winreg
 from ctypes import wintypes
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 sys.path.insert(0, os.path.join(ROOT, "host"))
 
 import win_display as wd

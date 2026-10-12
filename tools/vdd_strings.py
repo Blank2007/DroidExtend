@@ -1,10 +1,12 @@
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 #!/usr/bin/env python3
 """Extract interesting UTF-16 strings (paths, config names) from the VDD driver DLL."""
 import re
 import sys
 
 path = sys.argv[1] if len(sys.argv) > 1 else \
-    r"D:\dsh projects\droid-extend\tools\vdd\vdd25\VirtualDisplayDriver\MttVDD.dll"
+    os.path.join(REPO, "tools", "vdd", "vdd25", "VirtualDisplayDriver", "MttVDD.dll")
 data = open(path, "rb").read()
 text = data.decode("utf-16-le", "ignore")
 

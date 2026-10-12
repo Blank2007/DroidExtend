@@ -3,9 +3,11 @@
 Run with a phone attached.  Leaves artifacts in tools\\shots\\ so the result can
 be inspected visually afterwards.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os, subprocess, sys, time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 SHOTS = os.path.join(ROOT, "tools", "shots")
 os.makedirs(SHOTS, exist_ok=True)
 sys.path.insert(0, os.path.join(ROOT, "host"))

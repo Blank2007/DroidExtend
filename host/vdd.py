@@ -14,9 +14,11 @@ import subprocess
 import sys
 import time
 
-from paths import ROOT, TOOLS, popen
+from paths import ROOT, TOOLS, data_dir, popen
 
 INSTALL_SCRIPT = os.path.join(TOOLS, "vdd_install.ps1")
+VDD_SRC = os.path.join(TOOLS, "vdd", "vdd25", "VirtualDisplayDriver")
+VDD_NEF = os.path.join(TOOLS, "vdd", "nefcon", "x64", "nefconw.exe")
 VDD_SETTINGS_DIR = r"C:\VirtualDisplayDriver"
 HWID = r"Root\MttVDD"
 CLASS_GUID = "4D36E968-E325-11CE-BFC1-08002BE10318"
@@ -38,8 +40,7 @@ def driver_files_present():
 
 
 def stage_present():
-    src = os.path.join(TOOLS, "vdd", "vdd25", "VirtualDisplayDriver")
-    return os.path.isfile(os.path.join(src, "MttVDD.inf"))
+    return os.path.isfile(os.path.join(VDD_SRC, "MttVDD.inf"))
 
 
 def find_vdd_adapter(adapters=None):
@@ -109,46 +110,83 @@ def status():
     }
 
 
+def _ps_single(s):
+    """A PowerShell single-quoted literal."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _ps_arg(s):
+    """A PowerShell array element that survives Start-Process -ArgumentList.
+
+    Start-Process joins the array with spaces and does NOT add quoting, so any
+    element that may contain a space has to carry its own double quotes.
+    """
+    return "'\"" + s.replace("'", "''") + "\"'"
+
+
+def _write_elevator(script, args):
+    """Write the spaceless launcher that re-runs the install script elevated.
+
+    Why a generated file instead of one big inline -Command string: the install
+    path can contain spaces (and does, on the machine this was developed on), and
+    nesting a quoted path through `powershell -Command "... Start-Process
+    -ArgumentList '...'"` is where quoting bugs breed.  Writing the paths as
+    PowerShell literals into a file makes the escaping trivial and inspectable.
+    """
+    import tempfile
+
+    argv = ", ".join(_ps_arg(a) for a in args)
+    body = (
+        "$ErrorActionPreference = 'Continue'\r\n"
+        "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
+        "-WorkingDirectory %s -ArgumentList @(%s)\r\n"
+        "exit $p.ExitCode\r\n" % (_ps_single(ROOT), argv)
+    )
+    path = os.path.join(tempfile.gettempdir(), "droidextend_vdd_elevate.ps1")
+    # UTF-8 with BOM: Windows PowerShell 5.1 would otherwise read it as ANSI.
+    with open(path, "w", encoding="utf-8-sig") as f:
+        f.write(body)
+    return path
+
+
 def install(elevate=True, log=None):
     """Run the installer.  With elevate=True this shows one UAC prompt and
     returns (ok, output).  The caller must be prepared for the user to cancel.
+
+    Every path is passed explicitly on the command line.  The script's own
+    defaults derive from $PSScriptRoot and are only a fallback for a hand-run, so
+    the installed copy no longer depends on where the project was developed.
     """
     log = log or (lambda m: None)
     if not stage_present():
         return False, "驱动文件缺失（tools\\vdd\\vdd25\\VirtualDisplayDriver）"
     if not os.path.isfile(INSTALL_SCRIPT):
         return False, "安装脚本缺失: %s" % INSTALL_SCRIPT
+    if not os.path.isfile(VDD_NEF):
+        return False, "nefcon 缺失: %s" % VDD_NEF
 
-    log_path = os.path.join(TOOLS, "vdd", "install.log")
+    # The log lives in the data directory, which is writable by definition and is
+    # where the user is told to look.  An elevated child gets its own console, so
+    # its stdout is lost - this file is the only channel back.
+    log_path = os.path.join(data_dir(), "vdd_install.log")
     try:
         if os.path.exists(log_path):
             os.remove(log_path)
     except OSError:
         pass
 
-    # The project lives under a path with a space in it, so the elevated child
-    # gets a copy of the script from %TEMP% (no spaces).  The script's own
-    # defaults still point back at the real driver folder, and those are parsed
-    # by PowerShell itself, so spaces there are harmless.
-    script = INSTALL_SCRIPT
-    if " " in INSTALL_SCRIPT:
-        import shutil
-        import tempfile
-        script = os.path.join(tempfile.gettempdir(), "droidextend_vdd_install.ps1")
-        try:
-            shutil.copyfile(INSTALL_SCRIPT, script)
-            log("已把安装脚本复制到无空格路径: %s" % script)
-        except OSError as e:
-            return False, "无法准备安装脚本: %s" % e
+    args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", INSTALL_SCRIPT,
+            "-Src", VDD_SRC, "-Nef", VDD_NEF,
+            "-Dest", VDD_SETTINGS_DIR, "-Log", log_path]
 
-    inner = "-NoProfile -ExecutionPolicy Bypass -File " + script
     if is_admin() or not elevate:
-        cmd = ["powershell.exe"] + inner.split()
+        cmd = ["powershell.exe"] + args
     else:
-        # Single UAC prompt; -PassThru + exit lets us recover the real code.
-        ps = ("$p = Start-Process -FilePath powershell.exe -Verb RunAs -Wait -PassThru "
-              "-WorkingDirectory '%s' -ArgumentList '%s'; exit $p.ExitCode" % (ROOT, inner))
-        cmd = ["powershell.exe", "-NoProfile", "-Command", ps]
+        try:
+            boot = _write_elevator(INSTALL_SCRIPT, args)
+        except OSError as e:
+            return False, "无法准备提权脚本: %s" % e
+        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", boot]
         log("正在请求管理员权限（请在弹窗中点击“是”）…")
 
     log("运行: " + " ".join(cmd))
@@ -174,6 +212,9 @@ def install(elevate=True, log=None):
         return False, "UAC 被取消 —— 需要点“是”才能安装虚拟显示器驱动。\n\n" + text
     if code == 2:
         return False, "安装脚本检测到没有管理员权限。\n\n" + text
+    if code == 3:
+        return False, ("安装脚本找不到驱动文件或 nefcon。\n"
+                       "这通常意味着安装不完整，重装一次 DroidExtend 即可。\n\n" + text)
     ok = code == 0 and "=== VDD install done ===" in text
     return ok, text
 

@@ -4,9 +4,11 @@ The phone runs `toybox nc` as a client that connects back to the host through
 the reverse tunnel and just swallows bytes, so this isolates USB/adbd throughput
 from MediaCodec, the filesystem and our own protocol.
 """
+import os as _os
+REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 import os, socket, subprocess, sys, threading, time
 
-ROOT = r"D:\dsh projects\droid-extend"
+ROOT = REPO
 ADB = os.path.join(ROOT, "tools", "platform-tools", "adb.exe")
 SERIAL = sys.argv[1] if len(sys.argv) > 1 else "d1de99c4"
 PORT = 27199

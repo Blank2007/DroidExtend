@@ -1,0 +1,31 @@
+DroidExtend
+Copyright (c) 2026 Void_Blank (Blank2007)
+
+本项目的源代码由 AI 编码代理（DeepSeek Harness 驱动的编码代理）编写，
+人类维护者负责提出需求、在真机上验证并发布。
+The source code of this project was written by an AI coding agent
+(a DeepSeek Harness coding agent). The human maintainer supplied the
+requirements, verified the result on real devices, and cut the releases.
+
+开发过程的完整记录（需求、实验、失败与结论）见 开发日志.md。
+See 开发日志.md for the full development record.
+
+---------------------------------------------------------------------------
+第三方组件 / Third-party components
+
+本仓库只包含本项目的源代码。构建与运行所需的二进制组件**不随仓库分发**，
+由用户按 README 的说明自行获取，各自遵循其原始许可：
+
+This repository contains this project's source code only. The binary
+components needed to build and run it are NOT distributed with the
+repository; obtain them as described in the README. Each keeps its own
+upstream licence:
+
+  FFmpeg          GPL-3.0-or-later   https://ffmpeg.org/          (gyan.dev build)
+  Android SDK     Apache-2.0         https://developer.android.com/
+    build-tools (aapt2, d8, zipalign, apksigner)
+    platform (android.jar)
+  platform-tools  Apache-2.0         https://developer.android.com/  (adb)
+  Virtual Display Driver (MTT VDD)
+                  MIT                https://github.com/itsmikethetech/Virtual-Display-Driver
+  nefcon          MIT                https://github.com/nefarius/nefcon
