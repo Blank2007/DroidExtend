@@ -1,5 +1,9 @@
 # DroidExtend — 用数据线把安卓手机变成 Windows 的拓展屏
 
+[![CI](https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml/badge.svg)](https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![最新版本](https://img.shields.io/github/v/release/Blank2007/DroidExtend)](https://github.com/Blank2007/DroidExtend/releases/latest)
+
 一根 USB 数据线，手机立刻变成电脑的第二块显示器：**不是投屏镜像，是真的扩展桌面**——
 你可以把窗口从笔记本屏幕拖到手机上，鼠标直接在上面操作。
 
