@@ -25,17 +25,18 @@ jobs:
         run: |
           $py = (Select-String -Path host/version.py -Pattern '^APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
           $iss = (Select-String -Path tools/installer/DroidExtend.iss -Pattern '#define AppVer\s+"([^"]+)"').Matches[0].Groups[1].Value
-          Write-Host "host/version.py  APP_VERSION = $py"
-          Write-Host "installer        AppVer      = $iss"
-          if ($py -ne $iss) {
-            throw "版本号不一致：host/version.py 是 $py，安装包是 $iss"
-          }
+          $mf = (Select-String -Path android/AndroidManifest.xml -Pattern 'android:versionName="([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "host/version.py  APP_VERSION  = $py"
+          Write-Host "installer        AppVer       = $iss"
+          Write-Host "AndroidManifest  versionName  = $mf"
+          if ($py -ne $iss) { throw "版本号不一致：host/version.py 是 $py，安装包是 $iss" }
+          if ($py -ne $mf)  { throw "版本号不一致：host/version.py 是 $py，AndroidManifest 是 $mf" }
 
       - name: 禁止写死开发机路径
         shell: pwsh
         run: |
           # 抓的是 "别把我这台机器的目录写进代码" 这一类问题。
-          # 只检查会被打包或会被别人跑的代码；docs 和 tools/tmp 排除在外。
+          # 只检查会被打包或会被别人跑的代码；tools/tmp 是丢弃型调试脚本，排除在外。
           $patterns = @('D:\dsh projects', 'D:\workbuddy', 'D:\DroidExtend', 'C:\Users\15530')
           $files = @()
           $files += Get-ChildItem host -Recurse -File -Include *.py
@@ -73,11 +74,59 @@ jobs:
           if ($failed) { throw "PowerShell 脚本有语法错误" }
           Write-Host "PowerShell 脚本语法正常。"
 
-      - name: 安卓端能编译
+  android:
+    name: 安卓端能编译
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 装 platform 34 + build-tools 34
+        shell: pwsh
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+      - name: 编译（aapt2 生成 R.java，再 javac 全部源码）
         shell: pwsh
         run: |
-          # build.py 不需要 Gradle，但需要 JDK + tools/sdk（不进仓库），
-          # 所以这里只做 javac 级别的语法检查：能过就说明源码没问题。
-          $src = Get-ChildItem android/src -Recurse -File -Include *.java
-          Write-Host "java 源文件 $($src.Count) 个"
+          # 这里刻意不跑 android/build.py：它会去拿仓库里没有的 tools/sdk，
+          # 以及一个不进仓库的 r8 jar。CI 要证明的只是 "源码能编译"，
+          # 所以只做 aapt2 + javac，d8 / 签名 / zipalign 留给发布流程。
+          # 参数与 android/build.py 的 [1/7]~[3/7] 保持一致，特别是
+          # -bootclasspath：平台类必须来自 android.jar，不是 JDK 自带的。
+          $root = $PWD
+          $sdk = $env:ANDROID_HOME
+          if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
+          $bt  = Join-Path $sdk 'build-tools\34.0.0'
+          $jar = Join-Path $sdk 'platforms\android-34\android.jar'
+          $work = Join-Path $root 'android\build'
+          $gen = Join-Path $work 'ci_gen'
+          $cls = Join-Path $work 'ci_classes'
+          $res = Join-Path $work 'ci_res.zip'
+          Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $gen, $cls | Out-Null
+
+          & (Join-Path $bt 'aapt2.exe') compile --dir (Join-Path $root 'android\res') -o $res
+          if ($LASTEXITCODE -ne 0) { throw "aapt2 compile 失败" }
+
+          & (Join-Path $bt 'aapt2.exe') link -o (Join-Path $work 'ci_base.apk') `
+              -I $jar --manifest (Join-Path $root 'android\AndroidManifest.xml') `
+              --min-sdk-version 21 --target-sdk-version 34 --java $gen --no-version-vectors $res
+          if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败" }
+
+          $src = @(Get-ChildItem android/src -Recurse -File -Include *.java | ForEach-Object { $_.FullName })
+          $rjava = @(Get-ChildItem $gen -Recurse -File -Include R.java | ForEach-Object { $_.FullName })
+          Write-Host "java 源文件 $($src.Count) 个，生成的 R.java $($rjava.Count) 个"
           if ($src.Count -eq 0) { throw "android/src 下没有 java 文件" }
+          if ($rjava.Count -eq 0) { throw "aapt2 没有生成 R.java" }
+
+          & javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath $jar `
+              -d $cls @($src + $rjava)
+          if ($LASTEXITCODE -ne 0) { throw "javac 编译失败" }
+          $n = @(Get-ChildItem $cls -Recurse -File -Include *.class).Count
+          Write-Host "安卓端 $($src.Count) 个 java 文件全部编译通过，产出 $n 个 .class。"
