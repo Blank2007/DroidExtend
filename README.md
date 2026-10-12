@@ -17,7 +17,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-11 的几次会话内从零写完，此后每个版本（当前 1.5.0）都由它在同一个仓库里继续维护。
+> 于 2026-10-11 的几次会话内从零写完，此后每个版本（当前 1.5.1）都由它在同一个仓库里继续维护。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -38,7 +38,7 @@
 | 🔄 **程序内更新** | 「检查更新」直接在程序里下载新版本，校验大小 / SHA256 / 文件格式，**校验不过就不装**，不用自己跑浏览器 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.5.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.5.1.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（186 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
@@ -54,7 +54,7 @@
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.5.0.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.5.1.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -238,7 +238,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.5.0.exe ← Windows 安装程序（35 MB）
+│   └─ DroidExtend-Setup-1.5.1.exe ← Windows 安装程序（35 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）
@@ -324,6 +324,19 @@ A：这是个已修复的 bug（[issue #1](https://github.com/Blank2007/DroidExt
 应该能看到 `MttVDD`；日志文件（`文件 → 打开数据目录`）里也不该再出现
 `source missing`。手动兜底的办法是右键 `安装虚拟显示器驱动.bat` →「以管理员身份运行」，
 它和按钮走的是同一个脚本。
+
+**Q：驱动装好了，设备管理器里 `MttVDD` 也在，但一点「开始投屏」就报
+「虚拟显示器无法激活（未上桌面）」？**
+A：这是 **v1.5.0 及更早版本**的 bug，已经修好了。原因是驱动**随包发出去的
+`vdd_settings.xml` 里模式组合太多**：驱动会把「每条分辨率 × 每档刷新率」乘成一张平表交给
+Windows，而这张表有固定大小的缓冲区；我们那份是 22 × 5 = 110 种组合，超出上限之后
+`IddCxMonitorArrival` 会被系统拒绝（`STATUS_NOT_SUPPORTED`），于是适配器起来了、监视器也创建了，
+**但桌面上就是没有这块屏**——所以任何设置分辨率、接屏幕的调用都注定失败。
+
+**升到 v1.5.1 即可。** 这一版把模式表压到 11 × 5 = 55 种，并给 `add_resolution` 加了硬上限，
+安装脚本也会在发现表太大时自动重置。已经中招的机器，点一次
+**「安装虚拟显示器驱动（需要管理员）」** 就会修好（设备重启后生效）。
+自检方法：`工具 → 检查更新` 下面的日志里，驱动就绪那一行会显示模式数量。
 
 **Q：怎么升级到新版本？**
 A：`工具 → 检查更新`。程序会去 GitHub 读最新版本号，有新版本时列出更新说明，

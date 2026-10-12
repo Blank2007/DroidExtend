@@ -26,6 +26,19 @@ CLASS_GUID = "4D36E968-E325-11CE-BFC1-08002BE10318"
 # adapter description / device id fragments that mean "this is our virtual display"
 HINTS = ("mttvdd", "virtual display driver", "parsec", "idd", "virtual display")
 
+# The driver hands Windows ONE flat list of target modes and builds it as
+# (every <resolution>) x (every <g_refresh_rate>).  That list lives in a fixed
+# buffer: once the product outgrows it the driver logs
+#     [WARNING] Input buffer is too small for target modes.
+# and IddCxMonitorArrival fails with STATUS_NOT_SUPPORTED (-1073741637).  The
+# adapter still comes up, but with an empty mode table -- so the screen never
+# reaches the desktop and no ChangeDisplaySettingsEx / SetDisplayConfig call can
+# put it there.  Upstream issue #254 (VirtualDrivers/Virtual-Display-Driver)
+# has 108 combinations failing and the same file with 96 working.
+# We stay well under that, because the failure mode is "the second screen is
+# gone and nothing says why".  vdd_install.ps1 enforces the same ceiling.
+MAX_TARGET_MODES = 90
+
 
 def is_admin():
     try:
@@ -223,17 +236,42 @@ def settings_path():
     return os.path.join(VDD_SETTINGS_DIR, "vdd_settings.xml")
 
 
+def target_mode_count(text):
+    """How many target modes the driver will build from this settings file.
+
+    Every <resolution> is crossed with every <g_refresh_rate>, so it multiplies.
+    Returns None when the file does not look like a settings file at all.
+    """
+    rows = re.findall(r"<resolution(?:\s[^>]*)?>.*?</resolution>", text, re.S)
+    if "</resolutions>" not in text:
+        return None
+    rates = re.findall(r"<g_refresh_rate>\s*(\d+)\s*</g_refresh_rate>", text)
+    return len(rows) * max(1, len(rates))
+
+
+def mode_room(text):
+    """(rows we may still add, modes per row)."""
+    rates = re.findall(r"<g_refresh_rate>\s*\d+\s*</g_refresh_rate>", text)
+    per = max(1, len(rates))
+    rows = len(re.findall(r"<resolution(?:\s[^>]*)?>.*?</resolution>", text, re.S))
+    return max(0, MAX_TARGET_MODES // per - rows), per
+
+
 def add_resolution(width, height, hz=60):
     """List a resolution in the driver's mode table if it is not there yet.
 
     Returns True when the file changed, False when the size was already listed,
-    and None when we could not touch it at all (no file, or read-only).
+    and None when we could not touch it (no file, read-only, or no room left).
 
     Why we can do this without elevating: the installer creates
     C:\\VirtualDisplayDriver for the user who ran it, so the settings file stays
     writable.  The driver only reads it while its device node is starting, so a
     new entry goes live after the next reboot - or immediately after
     「安装虚拟显示器驱动」, which rewrites the file and re-creates the node.
+
+    Room is finite and the failure is silent, so when the table is full we drop
+    an entry we added ourselves (marked `auto="1"`) rather than let it overflow.
+    Entries that came with the driver are never touched.
     """
     path = settings_path()
     if not os.path.isfile(path):
@@ -248,9 +286,22 @@ def add_resolution(width, height, hz=60):
         return False
     if "</resolutions>" not in text:
         return None
-    row = ("        <resolution><width>%d</width><height>%d</height>"
+
+    room, per = mode_room(text)
+    while room <= 0:
+        old = re.search(r'[ \t]*<resolution\s+auto="1"[^>]*>.*?</resolution>[ \t]*\n', text, re.S)
+        if not old:
+            # Nothing of ours to drop and no room: leave the file alone.  Better
+            # a missing size than a mode table the driver cannot hand to Windows.
+            return None
+        text = text[:old.start()] + text[old.end():]
+        room, per = mode_room(text)
+
+    row = ("        <resolution auto=\"1\"><width>%d</width><height>%d</height>"
            "<refresh_rate>%d</refresh_rate></resolution>\n" % (int(width), int(height), int(hz)))
     text = text.replace("</resolutions>", row + "    </resolutions>", 1)
+    if (target_mode_count(text) or 0) > MAX_TARGET_MODES:
+        return None
     try:
         tmp = path + ".new"
         with open(tmp, "w", encoding="utf-8") as f:

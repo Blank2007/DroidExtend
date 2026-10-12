@@ -7,7 +7,7 @@ bumping a release is a one-line change.
 
 APP_NAME = "DroidExtend"
 APP_TITLE = "安卓拓展屏"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 APP_DATE = "2026-10-12"
 
 REPO = "Blank2007/DroidExtend"

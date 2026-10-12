@@ -99,6 +99,29 @@ try {
     $hz  = @($cfg.vdd_settings.global.g_refresh_rate)
     Log ("vdd_settings.xml: " + $res.Count + " resolutions x " + $hz.Count + " refresh rates (" + ($hz -join '/') + " Hz)")
     foreach ($r in $res) { Log ("  mode " + $r.width + "x" + $r.height) }
+
+    # The driver builds (every resolution) x (every global refresh rate) into one
+    # fixed-size buffer.  Overflow it and IddCxMonitorArrival fails with
+    # STATUS_NOT_SUPPORTED: the adapter comes up with an EMPTY mode table, so the
+    # screen never reaches the desktop and nothing explains why.  See upstream
+    # issue #254 (108 combinations fail, 96 work).  If what is on disk is over
+    # our ceiling, put the shipped file back - the machine is already broken and
+    # a repair is the only useful move.
+    $modes = $res.Count * [Math]::Max(1, $hz.Count)
+    $shipped = Join-Path $Src 'vdd_settings.xml'
+    if ($modes -gt 90 -and (Test-Path -LiteralPath $shipped)) {
+        Log ('mode table is ' + $modes + ' combinations (ceiling 90) - resetting to the shipped list')
+        Copy-Item -LiteralPath $shipped -Destination $settings -Force
+        [xml]$cfg = Get-Content -LiteralPath $settings -Raw -ErrorAction Stop
+        $res = @($cfg.vdd_settings.resolutions.resolution)
+        $hz  = @($cfg.vdd_settings.global.g_refresh_rate)
+        $modes = $res.Count * [Math]::Max(1, $hz.Count)
+        Log ('  now ' + $res.Count + ' resolutions x ' + $hz.Count + ' refresh rates = ' + $modes + ' combinations')
+    } elseif ($modes -gt 90) {
+        Log ('WARNING: mode table is ' + $modes + ' combinations, over the ceiling of 90 -')
+        Log '         the driver may refuse to hand the display to Windows. Trim'
+        Log '         tools\vdd\vdd25\VirtualDisplayDriver\vdd_settings.xml.'
+    }
 } catch {
     Log ("WARNING: could not parse " + $settings + " : " + $_)
 }
