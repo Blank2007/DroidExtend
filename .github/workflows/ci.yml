@@ -85,11 +85,33 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: 装 platform 34 + build-tools 34
+      - name: 下载 Android SDK 的两个包
         shell: pwsh
-        run: sdkmanager "platforms;android-34" "build-tools;34.0.0"
+        run: |
+          # 不装 150 MB 的 cmdline-tools，也不用 sdkmanager：dl.google.com 直接提供
+          # 这两个 zip，解压出来就是一个正常的 ANDROID_HOME 子目录，还省掉许可证交互。
+          # 这两个 URL 与 tools/provision2.py 里用的完全一致。
+          $sdk = Join-Path $env:RUNNER_TEMP 'android-sdk'
+          $pkgs = @(
+            @{ url = 'https://dl.google.com/android/repository/build-tools_r34-windows.zip'
+               dest = Join-Path $sdk 'build-tools\34.0.0' },
+            @{ url = 'https://dl.google.com/android/repository/platform-34-ext7_r03.zip'
+               dest = Join-Path $sdk 'platforms\android-34' }
+          )
+          foreach ($p in $pkgs) {
+            $zip = Join-Path $env:RUNNER_TEMP (Split-Path $p.url -Leaf)
+            Write-Host "downloading $($p.url)"
+            Invoke-WebRequest -Uri $p.url -OutFile $zip -UseBasicParsing
+            $unz = Join-Path $env:RUNNER_TEMP 'unz'
+            Remove-Item $unz -Recurse -Force -ErrorAction SilentlyContinue
+            Expand-Archive -Path $zip -DestinationPath $unz -Force
+            $inner = @(Get-ChildItem $unz -Directory)[0]
+            New-Item -ItemType Directory -Force -Path (Split-Path $p.dest) | Out-Null
+            Move-Item $inner.FullName $p.dest
+            Write-Host "  $($inner.Name) -> $($p.dest)"
+          }
+          "ANDROID_HOME=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: 编译（aapt2 生成 R.java，再 javac 全部源码）
         shell: pwsh
