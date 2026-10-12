@@ -231,9 +231,16 @@ def set_version(ver):
         write_text(ISS, iss2)
         say("  tools/installer/DroidExtend.iss -> %s" % ver)
     # The APK carries its own version, and Android refuses an update whose
-    # versionCode did not increase, so bump both.
+    # versionCode did not increase -- so bump it, but ONLY when the version is
+    # actually moving.  Re-running the release on an already-bumped tree used to
+    # inflate versionCode once per run, which left the repo out of step with the
+    # APK that had already been built and uploaded.
     man = read_text(MANIFEST)
     m = re.search(r'android:versionCode="(\d+)"', man)
+    old_name = re.search(r'android:versionName="([^"]+)"', man)
+    if old_name and old_name.group(1) == ver:
+        say("  android/AndroidManifest.xml 已是 %s，versionCode 不动" % ver)
+        return
     code = (int(m.group(1)) + 1) if m else 1
     man2 = re.sub(r'(android:versionCode=")\d+(")', r"\g<1>%d\g<2>" % code, man, count=1)
     man2 = re.sub(r'(android:versionName=")[^"]+(")', r"\g<1>%s\g<2>" % ver, man2, count=1)
@@ -370,13 +377,31 @@ def main():
     else:
         git("tag", "-a", tag, "-m", "DroidExtend " + ver)
 
-    # 4. push (one-shot authenticated URL; the remote stays clean)
+    # 4. push commits (one-shot authenticated URL; the remote stays clean)
     auth = "https://%s:%s@github.com/%s.git" % (REPO.split("/")[0], token, REPO)
     say("pushing main ...")
     _, out = git("push", auth, "main")
     say("  " + (out.splitlines()[-1] if out else "ok"))
-    say("pushing %s ..." % tag)
-    git("push", auth, tag)
+
+    # The tag goes through the API rather than `git push <tag>`: pushing a brand
+    # new tag object hangs forever here (the smart-HTTP advertisement comes back
+    # fine, then git never sends the pack -- reproducible with a 60 s timeout,
+    # while `git push main` in the same run succeeds).  The API does not.
+    head = git("rev-parse", "HEAD")[1].strip()
+    st, _ = api("GET", API + "/git/ref/tags/" + urllib.parse.quote(tag), token)
+    if st == 200:
+        say("remote tag %s already exists - leaving it alone" % tag)
+    else:
+        st, tobj = api("POST", API + "/git/tags", token, {
+            "tag": tag, "message": "DroidExtend " + ver,
+            "object": head, "type": "commit"})
+        if st not in (200, 201):
+            die("创建 tag 对象失败 (%s): %s" % (st, tobj))
+        st, robj = api("POST", API + "/git/refs", token, {
+            "ref": "refs/tags/" + tag, "sha": tobj["sha"]})
+        if st not in (200, 201):
+            die("创建 tag ref 失败 (%s): %s" % (st, robj))
+        say("tag %s -> %s (api)" % (tag, head[:7]))
 
     # 5. release (create, or patch the body of an existing one)
     body = notes.rstrip()
@@ -397,7 +422,7 @@ def main():
     else:
         st, rel = api("POST", API + "/releases", token, {
             "tag_name": tag,
-            "target_commitish": "main",
+            "target_commitish": head,
             "name": "DroidExtend " + ver,
             "body": body,
             "draft": False,
