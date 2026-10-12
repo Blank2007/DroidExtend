@@ -119,6 +119,13 @@ def read_token():
 
 # ----------------------------------------------------------------------- github
 
+# urllib picks up the Windows *registry* proxy (a local Clash at 127.0.0.1:7897)
+# even though HTTP_PROXY / HTTPS_PROXY are empty, and the registry proxy resets
+# the 36 MB asset upload with "[Errno 10054] 远程主机强迫关闭了一个现有的连接".
+# api.github.com and uploads.github.com both work fine direct, so say so here.
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def api(method, url, token, payload=None, timeout=120):
     data = None
     headers = {
@@ -131,7 +138,7 @@ def api(method, url, token, payload=None, timeout=120):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with DIRECT.open(req, timeout=timeout) as r:
             body = r.read().decode("utf-8", "replace")
             return r.status, (json.loads(body) if body.strip() else {})
     except urllib.error.HTTPError as e:
@@ -158,7 +165,7 @@ def upload_asset(release_id, token, path, name=None):
     with open(path, "rb") as f:
         req = urllib.request.Request(url, data=f, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=1800) as r:
+            with DIRECT.open(req, timeout=1800) as r:
                 return r.status, json.loads(r.read().decode("utf-8", "replace"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")
