@@ -13,7 +13,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-11 的几次会话内从零写完，此后每个版本（当前 1.4.1）都由它在同一个仓库里继续维护。
+> 于 2026-10-11 的几次会话内从零写完，此后每个版本（当前 1.5.0）都由它在同一个仓库里继续维护。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -31,12 +31,14 @@
 | 🧹 **拔线即消失** | 点停止或拔掉数据线，虚拟屏立刻从系统里摘掉，不留幽灵显示器 |
 | 🎛️ **全硬件链路** | `ddagrab`(桌面复制) → `h264_nvenc`(GPU 编码) → `MediaCodec`(手机硬解)，采集编码几乎不吃 CPU |
 | 📦 **开箱即用** | 34 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
+| 🔄 **程序内更新** | 「检查更新」直接在程序里下载新版本，校验大小 / SHA256 / 文件格式，**校验不过就不装**，不用自己跑浏览器 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.4.1.exe](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend-Setup-1.4.1.exe)**（35 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.5.0.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（186 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
+> 注意安装包的**文件名带版本号**，所以这里给的是 releases 页面链接而不是直链。
 > 本仓库只放源码 —— 二进制依赖（ffmpeg、adb、Android SDK、虚拟显示驱动）加起来 370 MB，没有进仓库。
 
 ### 各版本改了什么
@@ -48,7 +50,7 @@
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.4.1.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.5.0.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -232,7 +234,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.4.1.exe ← Windows 安装程序（34 MB）
+│   └─ DroidExtend-Setup-1.5.0.exe ← Windows 安装程序（35 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）
@@ -318,6 +320,22 @@ A：这是个已修复的 bug（[issue #1](https://github.com/Blank2007/DroidExt
 应该能看到 `MttVDD`；日志文件（`文件 → 打开数据目录`）里也不该再出现
 `source missing`。手动兜底的办法是右键 `安装虚拟显示器驱动.bat` →「以管理员身份运行」，
 它和按钮走的是同一个脚本。
+
+**Q：怎么升级到新版本？**
+A：`工具 → 检查更新`。程序会去 GitHub 读最新版本号，有新版本时列出更新说明，
+点「下载并安装」就**在程序里下载、校验、安装、重启**，不用自己去浏览器找安装包。
+下载前会依次检查：地址必须是 GitHub 官方域名（https）、官方必须给出 SHA256、
+字节数要和官方一致、SHA256 要匹配、文件开头必须是 `MZ`——**任何一条不过就不安装**，
+并且当场告诉你哪一条没过。
+
+**Q：更新时提示“本程序没有代码签名证书”，是不是不安全？**
+A：这是实情，得说清楚：这个项目没有买（也不打算买）代码签名证书，所以 Windows
+不会给安装包盖“已签名”的章，程序也**不会假装**它是签过名的——更新确认框里直接写明。
+实际的完整性依靠**校验和**：SHA256 同时来自 GitHub API 的 `digest` 字段和 release
+正文里的校验表，两处必须对得上才会安装。这能挡住下载被篡改、被中间人换包、
+以及代理返回半截文件，但挡不住「GitHub 仓库本身被人控制」这种前提性攻击。
+介意的话可以只从 [Releases](https://github.com/Blank2007/DroidExtend/releases)
+页面手动下载，并自己核对那里的 SHA256。
 
 **Q：手机画面上只有壁纸和任务栏，看着跟主屏一模一样？**
 A：这正是**扩展成功**的样子 —— 新接上的显示器默认就是一张同样的壁纸，

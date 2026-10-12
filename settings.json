@@ -1,0 +1,20 @@
+{
+  "backend": "auto",
+  "bitrate_mbps": 40,
+  "check_updates": true,
+  "custom_res": "",
+  "draw_mouse": false,
+  "encoder": "h264_nvenc",
+  "fps": 60,
+  "height": 1080,
+  "hz": 60,
+  "install_apk": true,
+  "match_phone": true,
+  "mode": "extend",
+  "position": "right",
+  "preset": "p4",
+  "quality": 20,
+  "rate_control": "vbr",
+  "width": 1920,
+  "window": "980x760+160+160"
+}

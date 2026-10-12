@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -303,6 +304,9 @@ class App(tk.Tk):
         style.configure("Mono.TLabel", font=("Consolas", 9), foreground="#9aa4b2")
         style.configure("Big.TLabel", font=("Segoe UI", 13, "bold"))
         style.configure("TButton", padding=(10, 5))
+        style.configure("TProgressbar", background=ACCENT, troughcolor=PANEL,
+                        bordercolor="#2c313a", lightcolor=ACCENT, darkcolor=ACCENT,
+                        thickness=14)
         style.configure("Go.TButton", font=("Segoe UI", 10, "bold"))
         style.configure("TCheckbutton", background=BG, foreground=FG)
         style.configure("TLabelframe", background=BG, foreground=ACCENT)
@@ -1120,15 +1124,227 @@ class App(tk.Tk):
             return
         if r["newer"]:
             self.log("发现新版本 v%s（当前 v%s）：%s" % (r["latest"], APP_VERSION, r["url"]), "ok")
-            if messagebox.askyesno(
-                    "发现新版本",
-                    "有新版本 v%s，当前是 v%s。\n\n要打开下载页面吗？\n%s"
-                    % (r["latest"], APP_VERSION, r["url"]), parent=self):
-                self.open_url(r["url"])
+            self._offer_update(r)
         else:
             self.log("已是最新版本 v%s。" % APP_VERSION, "ok")
             if manual:
                 messagebox.showinfo("检查更新", "已经是最新版本 v%s。" % APP_VERSION, parent=self)
+
+    # ---------------------------------------------------------- in-app update
+    def _offer_update(self, r):
+        """Show what is new, then download and install it without a browser.
+
+        The download is verified before anything is run (see update.download),
+        so the wording here says exactly what is checked rather than claiming
+        the build is signed -- it is not.
+        """
+        s = r.get("setup") or {}
+        if not s.get("url"):
+            # An older release with no installer attached: the browser is the
+            # only honest option left.
+            if messagebox.askyesno(
+                    "发现新版本",
+                    "有新版本 v%s，当前是 v%s。\n\n这一版没有附带安装包，"
+                    "要打开发布页面吗？\n%s" % (r["latest"], APP_VERSION, r["url"]),
+                    parent=self):
+                self.open_url(r["url"])
+            return
+
+        win = tk.Toplevel(self)
+        win.title("发现新版本 v%s" % r["latest"])
+        win.configure(bg=BG)
+        win.transient(self)
+        win.minsize(560, 420)
+        win.rowconfigure(2, weight=1)
+        win.columnconfigure(0, weight=1)
+
+        head = ttk.Frame(win, padding=(16, 14, 16, 6))
+        head.grid(row=0, column=0, sticky="ew")
+        ttk.Label(head, text="DroidExtend v%s 可以用了" % r["latest"],
+                  style="Head.TLabel").pack(anchor="w")
+        mb = (s.get("size") or 0) / 1048576.0
+        when = ("  ·  %s" % r["published"]) if r.get("published") else ""
+        ttk.Label(head, text="你现在是 v%s%s  ·  安装包 %.1f MB"
+                  % (APP_VERSION, when, mb), style="Dim.TLabel").pack(anchor="w", pady=(4, 0))
+
+        box = ttk.Frame(win, padding=(16, 0, 16, 0))
+        box.grid(row=2, column=0, sticky="nsew")
+        box.rowconfigure(0, weight=1)
+        box.columnconfigure(0, weight=1)
+        txt = tk.Text(box, bg="#0f1115", fg="#c8d0da", font=("Microsoft YaHei UI", 9),
+                      wrap="word", relief="flat", padx=12, pady=10, height=12)
+        txt.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(box, command=txt.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        txt.configure(yscrollcommand=sb.set)
+        self._insert_notes(txt, r.get("notes"))
+        txt.configure(state="disabled")
+
+        foot = ttk.Frame(win, padding=(16, 12, 16, 14))
+        foot.grid(row=3, column=0, sticky="ew")
+        ttk.Label(foot, text="安装包从 GitHub 官方地址下载，安装前会校验大小、SHA256 和文件格式。\n"
+                             "本程序没有代码签名证书，所以完整性靠这个校验和保证，不靠签名。",
+                  style="Dim.TLabel", justify="left").pack(anchor="w", pady=(0, 10))
+        row = ttk.Frame(foot)
+        row.pack(fill="x")
+        ttk.Button(row, text="以后再说", command=win.destroy).pack(side="left")
+        ttk.Button(row, text="打开发布页",
+                   command=lambda: self.open_url(r["url"])).pack(side="left", padx=8)
+        ttk.Button(row, text="下载并安装", style="Go.TButton",
+                   command=lambda: (win.destroy(), self._start_download(r))).pack(side="right")
+
+    def _insert_notes(self, txt, notes):
+        """Show the release notes as readable text rather than raw Markdown.
+
+        A full renderer would be a dependency and a liability; this only drops
+        the syntax that would otherwise be noise in a 12-line box -- heading
+        hashes, ``**`` markers, ``[text](url)`` and backticks -- and keeps the
+        rest, including the checksum table, exactly as written.
+        """
+        txt.tag_configure("h", font=("Microsoft YaHei UI", 10, "bold"),
+                          foreground=ACCENT, spacing1=10, spacing3=2)
+        txt.tag_configure("b", font=("Microsoft YaHei UI", 9, "bold"))
+        txt.tag_configure("bullet", lmargin1=8, lmargin2=20)
+        src = notes or "（这一版没有写说明）"
+        bold = False
+        for raw in src.splitlines():
+            line = raw.rstrip()
+            tag = ()
+            if line.startswith("#"):
+                line = line.lstrip("#").strip()
+                tag = ("h",)
+            elif line.lstrip()[:2] in ("* ", "- "):
+                line = "  • " + line.lstrip()[2:]
+                tag = ("bullet",)
+            line = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", line).replace("`", "")
+            if not line:
+                txt.insert("end", "\n")
+                continue
+            # ** toggles emphasis and often straddles a line break, so the state
+            # is carried; the marker itself never reaches the box.
+            for part in line.split("**"):
+                if part:
+                    txt.insert("end", part, tuple(tag) + (("b",) if bold else ()))
+                bold = not bold
+            txt.insert("end", "\n", tag)
+
+    def _start_download(self, r):
+        s = r["setup"]
+        name = s["name"] or ("DroidExtend-Setup-%s.exe" % r["latest"])
+        dest = os.path.join(upd.update_dir(), name)
+        self._dl_cancel = False
+
+        win = tk.Toplevel(self)
+        win.title("正在下载 DroidExtend %s" % r["latest"])
+        win.configure(bg=BG)
+        win.transient(self)
+        win.resizable(False, False)
+        body = ttk.Frame(win, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="正在下载 v%s 的安装包…" % r["latest"],
+                  style="Head.TLabel").pack(anchor="w")
+        ttk.Label(body, text=name, style="Dim.TLabel").pack(anchor="w", pady=(3, 12))
+        bar = ttk.Progressbar(body, mode="determinate", length=420, maximum=1000)
+        bar.pack(fill="x")
+        note = ttk.Label(body, text="正在连接…", style="Dim.TLabel")
+        note.pack(anchor="w", pady=(8, 12))
+
+        def do_cancel():
+            self._dl_cancel = True
+            cancel.configure(state="disabled")
+            note.configure(text="正在取消…")
+
+        cancel = ttk.Button(body, text="取消", command=do_cancel)
+        cancel.pack(anchor="e")
+        win.protocol("WM_DELETE_WINDOW", do_cancel)
+
+        total = int(s.get("size") or 0)
+        state = {"t": time.time()}
+
+        def prog(done, tot):
+            def paint():
+                if not win.winfo_exists():
+                    return
+                # Not `tot = tot or total`: assigning to the name would make it
+                # local to paint() and blow up on the closure read.
+                full = tot or total
+                if full:
+                    bar.configure(value=max(1, int(done * 1000 / full)))
+                    pct = done * 100.0 / full
+                else:
+                    pct = 0.0
+                dt = max(time.time() - state["t"], 0.001)
+                note.configure(text="%.1f / %.1f MB  ·  %.0f%%  ·  %.1f MB/s"
+                                    % (done / 1048576.0, full / 1048576.0, pct,
+                                       done / 1048576.0 / dt))
+            self._later(paint)
+
+        def work():
+            res = upd.download(s["url"], dest, sha256=s.get("sha256", ""),
+                               size=total, on_progress=prog,
+                               cancel=lambda: self._dl_cancel)
+            self._later(lambda: self._dl_done(res, r, win))
+
+        self.log("开始下载 %s（%d 字节）…" % (name, total))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _dl_done(self, res, r, win):
+        if win.winfo_exists():
+            win.destroy()
+        if not res["ok"]:
+            self.log("更新下载未完成：%s" % res["error"].replace("\n", " "), "err")
+            messagebox.showwarning("下载更新", "没有拿到可用的安装包：\n\n%s\n\n"
+                                   "也可以手动下载：\n%s" % (res["error"], r["url"]),
+                                   parent=self)
+            return
+        self.log("下载完成并通过校验：%s（sha256 %s）"
+                 % (res["path"], res["sha256"]), "ok")
+        st, signer = upd.signature_status(res["path"])
+        if st:
+            applog.line("更新安装包签名状态: %s %s" % (st, signer))
+        if not messagebox.askyesno(
+                "安装更新",
+                "安装包已下载并通过校验：\n\n"
+                "SHA256  %s\n"
+                "大小    %d 字节\n"
+                "签名    %s\n\n"
+                "现在关闭本程序、安装 v%s 并重新打开吗？"
+                % (res["sha256"], os.path.getsize(res["path"]),
+                   (st or "未检查") + ("（本项目未购买代码签名证书）" if st and st != "Valid" else ""),
+                   r["latest"]), parent=self):
+            self.log("用户选择稍后自己安装：%s" % res["path"])
+            self.open_path_dir(res["path"])
+            return
+        ok, err, script = upd.run_installer(
+            res["path"], install_dir=(ROOT if getattr(sys, "frozen", False) else ""))
+        if not ok:
+            self.log("无法启动安装程序：%s" % err, "err")
+            messagebox.showerror("安装更新", "无法启动安装程序：\n%s" % err, parent=self)
+            return
+        self.log("即将退出，由 %s 安装新版本并重新启动。" % script, "ok")
+        applog.line("更新: 交给 %s 应用 %s" % (script, res["path"]))
+        self._quit_now()
+
+    def open_path_dir(self, path):
+        try:
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        except Exception as e:
+            self.log("打不开目录：%s" % e, "err")
+
+    def _quit_now(self):
+        """Leave the process so the installer can replace DroidExtend.exe.
+
+        Goes through the ordinary close path, so an in-app update still saves
+        the settings, stops the stream and detaches the virtual display -- an
+        update must not be a special case that leaks a phantom monitor.
+        """
+        try:
+            self._on_close()
+        except Exception:
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
 
 def main():
