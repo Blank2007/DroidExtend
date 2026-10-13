@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: 使用说明 / Manual
     url: https://github.com/Blank2007/DroidExtend#readme
-    about: 装不上、连不上、画面卡，先看 README 和程序里的「帮助 → 使用说明」。
+    about: 装不上、连不上、画面卡，先看 README 和程序里的「帮助 → 使用说明」。 / If it will not install, will not connect, or the picture stutters, read the README and the "帮助 → 使用说明" (Help → Manual) item in the program first.

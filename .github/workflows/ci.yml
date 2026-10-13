@@ -8,7 +8,7 @@ on:
 
 jobs:
   guards:
-    name: 静态检查
+    name: 静态检查 / Static checks
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +17,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 语法检查（host + tools）
+      - name: 语法检查（host + tools） / Syntax check (host + tools)
         run: python -m compileall -q host tools
 
-      - name: 版本号一致性
+      - name: 版本号一致性 / Version consistency
         shell: pwsh
         run: |
           $py = (Select-String -Path host/version.py -Pattern '^APP_VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
@@ -29,14 +29,14 @@ jobs:
           Write-Host "host/version.py  APP_VERSION  = $py"
           Write-Host "installer        AppVer       = $iss"
           Write-Host "AndroidManifest  versionName  = $mf"
-          if ($py -ne $iss) { throw "版本号不一致：host/version.py 是 $py，安装包是 $iss" }
-          if ($py -ne $mf)  { throw "版本号不一致：host/version.py 是 $py，AndroidManifest 是 $mf" }
+          if ($py -ne $iss) { throw "版本号不一致 (version mismatch)：host/version.py 是 $py，安装包是 $iss" }
+          if ($py -ne $mf)  { throw "版本号不一致 (version mismatch)：host/version.py 是 $py，AndroidManifest 是 $mf" }
 
-      - name: 禁止写死开发机路径
+      - name: 禁止写死开发机路径 / No hard-coded dev machine paths
         shell: pwsh
         run: |
-          # 抓的是 "别把我这台机器的目录写进代码" 这一类问题。
-          # 只检查会被打包或会被别人跑的代码；tools/tmp 是丢弃型调试脚本，排除在外。
+          # 抓的是 "别把我这台机器的目录写进代码" 这一类问题。 / Catches this class of problem: "don't bake this machine's directories into the code".
+          # 只检查会被打包或会被别人跑的代码；tools/tmp 是丢弃型调试脚本，排除在外。 / Only checks code that gets packaged or that other people run; tools/tmp holds throwaway debug scripts and is excluded.
           $patterns = @('D:\dsh projects', 'D:\workbuddy', 'D:\DroidExtend', 'C:\Users\15530')
           $files = @()
           $files += Get-ChildItem host -Recurse -File -Include *.py
@@ -52,11 +52,13 @@ jobs:
             }
           }
           if ($bad -gt 0) {
+            # English: hard-coded development-machine paths found, $bad occurrences in total.
+            # Use $PSScriptRoot, derive the path from __file__, or read it from an environment variable.
             throw "发现写死的开发机路径，共 $bad 处。用 `$PSScriptRoot 或基于 __file__ 推导，或从环境变量读。"
           }
-          Write-Host "没有写死的开发机路径。"
+          Write-Host "没有写死的开发机路径 (no hard-coded development-machine paths found)。"
 
-      - name: PowerShell 语法检查
+      - name: PowerShell 语法检查 / PowerShell syntax check
         shell: pwsh
         run: |
           $failed = $false
@@ -71,11 +73,11 @@ jobs:
               }
             }
           }
-          if ($failed) { throw "PowerShell 脚本有语法错误" }
-          Write-Host "PowerShell 脚本语法正常。"
+          if ($failed) { throw "PowerShell 脚本有语法错误 (PowerShell script has syntax errors)" }
+          Write-Host "PowerShell 脚本语法正常 (PowerShell script syntax is OK)。"
 
   android:
-    name: 安卓端能编译
+    name: 安卓端能编译 / Android side compiles
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,12 +87,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: 下载 Android SDK 的两个包
+      - name: 下载 Android SDK 的两个包 / Download the two Android SDK packages
         shell: pwsh
         run: |
-          # 不装 150 MB 的 cmdline-tools，也不用 sdkmanager：dl.google.com 直接提供
-          # 这两个 zip，解压出来就是一个正常的 ANDROID_HOME 子目录，还省掉许可证交互。
-          # 这两个 URL 与 tools/provision2.py 里用的完全一致。
+          # 不装 150 MB 的 cmdline-tools，也不用 sdkmanager：dl.google.com 直接提供 / No 150 MB cmdline-tools and no sdkmanager: dl.google.com serves
+          # 这两个 zip，解压出来就是一个正常的 ANDROID_HOME 子目录，还省掉许可证交互。 / these two zips directly; unzipped they are ordinary ANDROID_HOME subdirectories, and the licence prompts are skipped too.
+          # 这两个 URL 与 tools/provision2.py 里用的完全一致。 / These two URLs are identical to the ones used in tools/provision2.py.
           $sdk = Join-Path $env:RUNNER_TEMP 'android-sdk'
           $pkgs = @(
             @{ url = 'https://dl.google.com/android/repository/build-tools_r34-windows.zip'
@@ -113,14 +115,14 @@ jobs:
           "ANDROID_HOME=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: 编译（aapt2 生成 R.java，再 javac 全部源码）
+      - name: 编译（aapt2 生成 R.java，再 javac 全部源码） / Compile (aapt2 generates R.java, then javac on every source file)
         shell: pwsh
         run: |
-          # 这里刻意不跑 android/build.py：它会去拿仓库里没有的 tools/sdk，
-          # 以及一个不进仓库的 r8 jar。CI 要证明的只是 "源码能编译"，
-          # 所以只做 aapt2 + javac，d8 / 签名 / zipalign 留给发布流程。
-          # 参数与 android/build.py 的 [1/7]~[3/7] 保持一致，特别是
-          # -bootclasspath：平台类必须来自 android.jar，不是 JDK 自带的。
+          # 这里刻意不跑 android/build.py：它会去拿仓库里没有的 tools/sdk， / android/build.py is deliberately not run here: it wants tools/sdk, which is not in the repo,
+          # 以及一个不进仓库的 r8 jar。CI 要证明的只是 "源码能编译"， / plus an r8 jar that is not committed. All CI has to prove is that "the sources compile",
+          # 所以只做 aapt2 + javac，d8 / 签名 / zipalign 留给发布流程。 / so only aapt2 + javac run here; d8 / signing / zipalign are left to the release flow.
+          # 参数与 android/build.py 的 [1/7]~[3/7] 保持一致，特别是 / The flags match steps [1/7]~[3/7] of android/build.py, in particular
+          # -bootclasspath：平台类必须来自 android.jar，不是 JDK 自带的。 / -bootclasspath: platform classes must come from android.jar, not from the JDK's own.
           $root = $PWD
           $sdk = $env:ANDROID_HOME
           if (-not $sdk) { $sdk = $env:ANDROID_SDK_ROOT }
@@ -134,21 +136,23 @@ jobs:
           New-Item -ItemType Directory -Force -Path $gen, $cls | Out-Null
 
           & (Join-Path $bt 'aapt2.exe') compile --dir (Join-Path $root 'android\res') -o $res
-          if ($LASTEXITCODE -ne 0) { throw "aapt2 compile 失败" }
+          if ($LASTEXITCODE -ne 0) { throw "aapt2 compile 失败 (aapt2 compile failed)" }
 
           & (Join-Path $bt 'aapt2.exe') link -o (Join-Path $work 'ci_base.apk') `
               -I $jar --manifest (Join-Path $root 'android\AndroidManifest.xml') `
               --min-sdk-version 21 --target-sdk-version 34 --java $gen --no-version-vectors $res
-          if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败" }
+          if ($LASTEXITCODE -ne 0) { throw "aapt2 link 失败 (aapt2 link failed)" }
 
           $src = @(Get-ChildItem android/src -Recurse -File -Include *.java | ForEach-Object { $_.FullName })
           $rjava = @(Get-ChildItem $gen -Recurse -File -Include R.java | ForEach-Object { $_.FullName })
+          # English: the line below reports the number of java source files, then the number of generated R.java files.
           Write-Host "java 源文件 $($src.Count) 个，生成的 R.java $($rjava.Count) 个"
-          if ($src.Count -eq 0) { throw "android/src 下没有 java 文件" }
-          if ($rjava.Count -eq 0) { throw "aapt2 没有生成 R.java" }
+          if ($src.Count -eq 0) { throw "android/src 下没有 java 文件 (no java files under android/src)" }
+          if ($rjava.Count -eq 0) { throw "aapt2 没有生成 R.java (aapt2 did not generate R.java)" }
 
           & javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath $jar `
               -d $cls @($src + $rjava)
-          if ($LASTEXITCODE -ne 0) { throw "javac 编译失败" }
+          if ($LASTEXITCODE -ne 0) { throw "javac 编译失败 (javac compilation failed)" }
           $n = @(Get-ChildItem $cls -Recurse -File -Include *.class).Count
+          # English: the line below reports that every java file on the Android side compiled, and how many .class files were produced.
           Write-Host "安卓端 $($src.Count) 个 java 文件全部编译通过，产出 $n 个 .class。"

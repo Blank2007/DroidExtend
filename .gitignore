@@ -1,12 +1,12 @@
-# ───────── 二进制运行时依赖（体积大，不进仓库）─────────
-# 这些是随包分发的第三方二进制：ffmpeg / adb / Android SDK / 虚拟显示驱动。
-# 安装包（DroidExtend-Setup-*.exe）里已经带齐，源码仓库不重复存一份。
+# ───────── 二进制运行时依赖（体积大，不进仓库） / Binary runtime dependencies (large; kept out of the repository) ─────────
+# 这些是随包分发的第三方二进制：ffmpeg / adb / Android SDK / 虚拟显示驱动。 / These are the third-party binaries shipped with the installer: ffmpeg / adb / Android SDK / virtual display driver.
+# 安装包（DroidExtend-Setup-*.exe）里已经带齐，源码仓库不重复存一份。 / The installer (DroidExtend-Setup-*.exe) already carries them all, so the source repository does not keep a second copy.
 tools/ffmpeg/
 tools/platform-tools/
 tools/sdk/
 tools/vdd/
 
-# ───────── 构建产物 ─────────
+# ───────── 构建产物 / Build artifacts ─────────
 _internal/
 DroidExtend.exe
 dist/
@@ -20,7 +20,7 @@ android/droidextend.keystore
 *.keystore
 *.jks
 
-# ───────── 调试与临时文件 ─────────
+# ───────── 调试与临时文件 / Debugging and temporary files ─────────
 tools/tmp/
 tools/shots/
 __pycache__/
@@ -28,7 +28,7 @@ __pycache__/
 *.log
 *.h264
 
-# ───────── 编辑器 / 系统 ─────────
+# ───────── 编辑器 / 系统 / Editors and system files ─────────
 .vscode/
 .idea/
 Thumbs.db

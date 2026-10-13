@@ -57,8 +57,8 @@
 
 ### 各版本改了什么
 
-放在 **[开发日志.md](开发日志.md)** 里，一版一节，附带当时的实测数据和踩过的坑。
-这里只讲怎么用。
+放在 **[开发日志.md](开发日志.md)** 里（英文版：**[CHANGELOG.en.md](CHANGELOG.en.md)**），
+一版一节，附带当时的实测数据和踩过的坑。这里只讲怎么用。
 
 ---
 
@@ -286,7 +286,11 @@ droid-extend/
 │   └─ vdd_install.ps1           驱动安装脚本（管理员）
 ├─ assets/                        ← 介绍图（中英各一版：SVG 源 + PNG 位图）
 ├─ README.md                      ← 这份（中文）
-└─ README.en.md                   ← 英文版 README
+├─ README.en.md                   ← 英文版 README
+├─ 开发日志.md                    ← 开发过程与踩坑记录（中文）
+├─ CHANGELOG.en.md                ← 上面那份的英文版
+├─ AGENTS.md                      ← 给下一个改这个仓库的人／AI 的须知
+└─ 第三方组件许可.txt             ← 随安装包一起分发的许可声明
 ```
 
 ---
@@ -498,7 +502,9 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 
 本项目自己的代码（`host/` 的 Python、`android/src/` 的 Java、`tools/` 的脚本、
 图标和文档）以 **MIT** 许可发布，见 [LICENSE](LICENSE)。
-图标是 `tools/make_icon.py` 用代码画像素生成的，没有使用任何现成素材或字体。
+图标是 `android/make_icon.py` 用代码画像素生成的（手机端五档 mipmap 与根目录的 `DroidExtend.ico`），
+没有使用任何现成素材或字体。`tools/make_icon.py` 是另一份只写 `DroidExtend.ico` 的极简版本，
+只用标准库、不依赖 Pillow，留着当兜底。
 
 > ⚠️ **如果你发现这里用了你的作品却漏了署名，或者署名／许可写错了，
 > 请联系我，我会在下一个版本里补上。有侵权也请直接联系，我会立刻处理。**
@@ -518,4 +524,5 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 这个软件——从第一行 Python 到 APK、从图标到安装包、包括这份 README——
 **全部由 AI 编码代理（DeepSeek Harness / deepseek-flash）在 2026-10-10 的一次会话里写完**。
 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、给方向、插上真机测试和验收。
-整个过程、踩过的每一个坑和所有实测数据都在 **[开发日志.md](开发日志.md)** 里。
+整个过程、踩过的每一个坑和所有实测数据都在 **[开发日志.md](开发日志.md)** 里
+（英文版 **[CHANGELOG.en.md](CHANGELOG.en.md)**）。

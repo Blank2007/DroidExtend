@@ -33,7 +33,8 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 > "Yes" when admin rights are needed, and signs off on the result.
 >
 > The whole story — including every pitfall we hit and all the measured numbers — is in
-> **[开发日志.md](开发日志.md)** (Chinese). Two of the bugs in there are, I think, worth a read:
+> **[CHANGELOG.en.md](CHANGELOG.en.md)** (English; the Chinese original is **[开发日志.md](开发日志.md)**).
+> Two of the bugs in there are, I think, worth a read:
 > **a 100 ms delay caused by a single `p.stdout.read()`**, and **a display-configuration problem that only
 > reproduced if you changed directories and turned out to be the AI session sandbox blocking it**.
 
@@ -61,7 +62,8 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 
 ### What changed in each release
 
-That lives in **[开发日志.md](开发日志.md)** (Chinese) — one section per version, with the measurements taken at the
+That lives in **[CHANGELOG.en.md](CHANGELOG.en.md)** (English) and its Chinese original
+**[开发日志.md](开发日志.md)** — one section per version, with the measurements taken at the
 time and the pitfalls hit along the way.
 This document only covers how to use it.
 
@@ -321,7 +323,11 @@ droid-extend/
 │   └─ vdd_install.ps1           driver install script (administrator)
 ├─ assets/                        ← the intro artwork (one per language: SVG source + PNG exports)
 ├─ README.md                      ← the Chinese README
-└─ README.en.md                   ← this file (English)
+├─ README.en.md                   ← this file (English)
+├─ 开发日志.md                    ← the development log (Chinese)
+├─ CHANGELOG.en.md                ← the English version of the above
+├─ AGENTS.md                      ← notes for the next person or AI touching this repo
+└─ 第三方组件许可.txt             ← the licence notice shipped with the installer
 ```
 
 ---
@@ -562,7 +568,9 @@ when distributing binaries", so that file travels with the installer — it isn'
 
 This project's own code (the Python in `host/`, the Java in `android/src/`, the scripts in `tools/`, the icons and
 the documentation) is released under the **MIT** license; see [LICENSE](LICENSE).
-The icons are generated pixel by pixel in code by `tools/make_icon.py`; no off-the-shelf assets or fonts were used.
+The icons are generated pixel by pixel in code by `android/make_icon.py` (the five `mipmap-*` densities on the phone
+side and the root `DroidExtend.ico`); no off-the-shelf assets or fonts were used. `tools/make_icon.py` is a separate,
+minimal version that writes only `DroidExtend.ico` with the standard library and no Pillow, kept as a fallback.
 
 > ⚠️ **If you find your work used here without attribution, or an attribution/license written incorrectly, please
 > contact me and I'll add it in the next release. If there's any infringement, contact me directly as well and I'll
@@ -584,4 +592,4 @@ This software — from the first line of Python to the APK, from the icon to the
 was **written entirely by an AI coding agent (DeepSeek Harness / deepseek-flash) in a single session on 2026-10-10**.
 The human ([@Blank2007](https://github.com/Blank2007)) supplied the requirements, set the direction, plugged in a real
 device to test, and signed off. The whole process, every pitfall along the way and all the measurements are in
-**[开发日志.md](开发日志.md)** (Chinese).
+**[CHANGELOG.en.md](CHANGELOG.en.md)** (English) and **[开发日志.md](开发日志.md)** (the Chinese original).

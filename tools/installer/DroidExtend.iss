@@ -1,13 +1,13 @@
-; DroidExtend 安装程序（Inno Setup 6）
-; 编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" DroidExtend.iss
-;       （或者 winget install JRSoftware.InnoSetup 装到 %LOCALAPPDATA%\Programs）
+; DroidExtend 安装程序（Inno Setup 6） / DroidExtend installer (Inno Setup 6)
+; 编译： "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" DroidExtend.iss / Compile: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" DroidExtend.iss
+;       （或者 winget install JRSoftware.InnoSetup 装到 %LOCALAPPDATA%\Programs） /       (or install it with `winget install JRSoftware.InnoSetup`, which puts it under %LOCALAPPDATA%\Programs)
 ;
-; 设计要点：
+; 设计要点： / Design notes:
 ;   * 装到 %LOCALAPPDATA%\Programs\DroidExtend，PrivilegesRequired=lowest，
 ;     全程不弹 UAC。这是刻意的 —— 程序运行时会往 tools\tmp 写 adb 的临时文件，
-;     装在 Program Files 里普通权限反而写不进去。
+;     装在 Program Files 里普通权限反而写不进去。 / Installs into %LOCALAPPDATA%\Programs\DroidExtend with PrivilegesRequired=lowest and never shows a UAC prompt. This is deliberate -- at runtime the program writes adb's temporary files under tools\tmp, and with ordinary rights an install under Program Files could not write there.
 ;   * 虚拟显示驱动需要管理员，安装包不代劳；装完启动程序，点界面上的
-;     “安装虚拟显示器驱动（需要管理员）” 按钮即可（那一步会自己提权）。
+;     “安装虚拟显示器驱动（需要管理员）” 按钮即可（那一步会自己提权）。 / The virtual display driver needs administrator rights and the installer does not do it for you; after installing, start the program and click the "安装虚拟显示器驱动（需要管理员）" (Install virtual display driver (requires administrator)) button in the UI (that step elevates itself).
 
 #define P "..\.."
 #define AppName "DroidExtend"
@@ -48,7 +48,7 @@ SetupAppTitle=安装程序
 SetupWindowTitle=安装 - %1
 WelcomeLabel1=欢迎使用 [name] 安装向导
 WelcomeLabel2=即将把 [name/ver] 安装到你的电脑上。%n%n这套程序用数据线把安卓手机变成 Windows 的第二块屏幕：延迟约 10 毫秒、支持手机触摸控制、拔线或点“停止”后虚拟屏自动消失。%n%n继续前请准备：一部开了 USB 调试的安卓手机、一根数据线。
-; 每一页的大标题是 Wizard*，标题下面那行说明才是 SelectDirDesc / ReadyLabel*
+; 每一页的大标题是 Wizard*，标题下面那行说明才是 SelectDirDesc / ReadyLabel* / The big heading on each page comes from Wizard*, while the explanation line under it comes from SelectDirDesc / ReadyLabel*.
 WizardSelectDir=选择安装位置
 SelectDirDesc=要把 [name] 装到哪里？
 SelectDirLabel3=安装程序会把 [name] 装到下面的文件夹。
@@ -91,7 +91,7 @@ Source: "{#P}\DroidExtend.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 ; MIT (VDD, nefcon) / Apache-2.0 (adb) / BSD-3 (R8) all require the notice to
 ; travel with the binary copy, so the licence file ships next to the exe and
-; 帮助 -> 第三方组件许可 opens it.
+; 帮助 -> 第三方组件许可 opens it. / "帮助 -> 第三方组件许可" is the Help -> Third-party component licences menu item.
 Source: "{#P}\第三方组件许可.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs

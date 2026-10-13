@@ -1,24 +1,41 @@
 DroidExtend 第三方组件与许可说明
+DroidExtend third-party components and licence notices
 ================================================================
 
 DroidExtend 本身（host/ 下的 Python 代码、android/src/ 下的 Java 代码、
 tools/ 下的脚本、图标与文档）由 AI 编码代理编写，以 MIT 许可发布，
 见同目录的 LICENSE。
+DroidExtend itself (the Python code under host/, the Java code under android/src/,
+the scripts under tools/, the icons and the documentation) was written by an AI
+coding agent and is released under the MIT licence; see the LICENSE file in the
+same directory.
 
 下面列出这个软件“用到的别人的东西”。其中 MIT / BSD 许可要求在分发时
 附带版权声明和许可全文，因此本文把原文一并列出。如果你是本项目的作者
 之一而你的作品出现在这里却没有被正确署名，请联系文末邮箱，我会在
 下一版补上。
+The following lists the "other people's things" this software uses. The MIT / BSD
+licences require the copyright notice and the full licence text to be included
+when distributing, so those original texts are reproduced here as well. If you are
+one of the authors of this project and your work appears here without proper
+attribution, please write to the address at the end of this file and I will add it
+in the next release.
 
 ----------------------------------------------------------------
 1. Virtual Display Driver (VDD) —— 虚拟显示器驱动
+1. Virtual Display Driver (VDD) — virtual display driver
 ----------------------------------------------------------------
 出处： https://github.com/VirtualDrivers/Virtual-Display-Driver
+Source: https://github.com/VirtualDrivers/Virtual-Display-Driver
 许可： MIT License
+Licence: MIT License
    Copyright (c) 2024 Virtual Display
 分发内容： tools/vdd/vdd25/VirtualDisplayDriver/ 下的
    MttVDD.inf、MttVDD.dll、mttvdd.cat、vdd_settings.xml
+Distributed content: under tools/vdd/vdd25/VirtualDisplayDriver/ —
+   MttVDD.inf, MttVDD.dll, mttvdd.cat, vdd_settings.xml
 用途： 让 Windows 真的多出一块虚拟显示器，这是“真扩展桌面”的基础。
+Purpose: makes Windows actually gain an extra virtual monitor; this is the basis of "true desktop extension".
 
 MIT License
 
@@ -44,12 +61,17 @@ SOFTWARE.
 
 ----------------------------------------------------------------
 2. nefcon —— 安装/卸载设备驱动的命令行工具
+2. nefcon — command-line tool for installing/uninstalling device drivers
 ----------------------------------------------------------------
 出处： https://github.com/nefarius/nefcon
+Source: https://github.com/nefarius/nefcon
 许可： MIT License
+Licence: MIT License
    Copyright (c) 2022-2026 Nefarius Software Solutions e.U.
 分发内容： tools/vdd/nefcon/x64/nefconw.exe
+Distributed content: tools/vdd/nefcon/x64/nefconw.exe
 用途： 以静默方式安装上面的虚拟显示器驱动（代替手工点设备管理器）。
+Purpose: installs the virtual display driver above silently (instead of clicking through Device Manager by hand).
 
 MIT License
 
@@ -75,30 +97,49 @@ SOFTWARE.
 
 ----------------------------------------------------------------
 3. FFmpeg —— 屏幕采集与硬件编码
+3. FFmpeg — screen capture and hardware encoding
 ----------------------------------------------------------------
 出处： https://ffmpeg.org/
+Source: https://ffmpeg.org/
 分发内容： tools/ffmpeg/bin/ffmpeg.exe
+Distributed content: tools/ffmpeg/bin/ffmpeg.exe
    本机使用的是 gyan.dev 的 6.0-essentials_build 构建
    （configure 含 --enable-gpl --enable-version3）
+   The build used here is gyan.dev's 6.0-essentials_build
+   (its configure includes --enable-gpl --enable-version3)
 许可： GPL v3（GNU General Public License version 3）
+Licence: GPL v3 (GNU General Public License version 3)
 用途： 用 ddagrab 抓屏、用 h264_nvenc 编码成 H.264 码流。
+Purpose: capture the screen with ddagrab and encode it into an H.264 stream with h264_nvenc.
 调用方式： DroidExtend 把 ffmpeg 当作**独立进程**启动，通过管道读取
    它输出的裸 H.264 字节流。本项目自己的代码没有链接 FFmpeg 的库。
+How it is invoked: DroidExtend starts ffmpeg as a **separate process** and reads
+   the raw H.264 byte stream it writes out, through a pipe. This project's own
+   code does not link against FFmpeg's libraries.
 
 GNU General Public License v3 全文见：
+The full text of the GNU General Public License v3 is at:
    https://www.gnu.org/licenses/gpl-3.0.txt
    https://ffmpeg.org/legal.html
 该构建对应的源代码可以从 https://ffmpeg.org/download.html 与
 https://www.gyan.dev/ffmpeg/builds/ 获取（FFmpeg 是自由软件，你可以
 按 GPL 的条款重新分发和/或修改它；它不提供任何担保）。
+The corresponding source code for that build can be obtained from
+https://ffmpeg.org/download.html and https://www.gyan.dev/ffmpeg/builds/
+(FFmpeg is free software; you can redistribute and/or modify it under the terms of
+the GPL; it comes with no warranty).
 
 ----------------------------------------------------------------
 4. Android SDK Platform-Tools (adb)
 ----------------------------------------------------------------
 出处： https://developer.android.com/tools/releases/platform-tools
+Source: https://developer.android.com/tools/releases/platform-tools
 分发内容： tools/platform-tools/adb.exe、AdbWinApi.dll、AdbWinUsbApi.dll
+Distributed content: tools/platform-tools/adb.exe, AdbWinApi.dll, AdbWinUsbApi.dll
 许可： Apache License 2.0
+Licence: Apache License 2.0
 用途： 安装手机端 APK、建立 adb reverse 端口转发（画面与触摸两条隧道）。
+Purpose: install the phone-side APK and set up adb reverse port forwarding (two tunnels: video and touch).
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not
 use these files except in compliance with the License. You may obtain a copy
@@ -116,9 +157,13 @@ the License.
 5. R8 / D8（Android SDK build-tools）
 ----------------------------------------------------------------
 出处： https://r8.googlesource.com/r8
+Source: https://r8.googlesource.com/r8
 许可： BSD 3-Clause License
+Licence: BSD 3-Clause License
 用途： 只在“构建手机端 APK”时使用，把 Java 编译成 dex。运行期不需要，
    也不随安装包分发（tools/sdk 已被 .gitignore 排除）。
+Purpose: used only when "building the phone-side APK", to compile Java into dex. It is
+   not needed at runtime and is not distributed with the installer (tools/sdk is excluded by .gitignore).
 
 Copyright (c) 2016, the R8 project authors.
 All rights reserved.
@@ -150,43 +195,71 @@ POSSIBILITY OF SUCH DAMAGE.
 6. Python
 ----------------------------------------------------------------
 出处： https://www.python.org/
+Source: https://www.python.org/
 许可： PSF License Agreement（Python Software Foundation License）
+Licence: PSF License Agreement (Python Software Foundation License)
 用途： DroidExtend 的 Windows 端就是这个程序的 Python 代码，
    打包时用的是 python.org 的官方 3.14 运行时（python314.dll 等）。
+Purpose: DroidExtend's Windows side is exactly this program's Python code, and it
+   is packaged with python.org's official 3.14 runtime (python314.dll and so on).
 
 ----------------------------------------------------------------
 7. Tcl/Tk（tkinter）
 ----------------------------------------------------------------
 出处： https://www.tcl.tk/
+Source: https://www.tcl.tk/
 许可： BSD-style license（见 https://www.tcl.tk/software/tcltk/license.html）
+Licence: BSD-style license (see https://www.tcl.tk/software/tcltk/license.html)
 用途： 程序的图形界面（窗口、按钮、菜单、下拉框）。
+Purpose: the program's graphical interface (windows, buttons, menus, drop-down boxes).
 
 ----------------------------------------------------------------
 8. PyInstaller
 ----------------------------------------------------------------
 出处： https://pyinstaller.org/
+Source: https://pyinstaller.org/
 许可： GPL 2.0 with a special exception（bootloader exception），
    用它打包出来的程序不受 GPL 传染，可以按你自己的许可分发。
+Licence: GPL 2.0 with a special exception (the bootloader exception);
+   programs packaged with it are not infected by the GPL and may be distributed under your own licence.
 用途： 把 host/ 下的 Python 代码打包成单目录的 DroidExtend.exe。
+Purpose: packages the Python code under host/ into a single-directory DroidExtend.exe.
 
 ----------------------------------------------------------------
 9. Inno Setup
 ----------------------------------------------------------------
 出处： https://jrsoftware.org/isinfo.php
+Source: https://jrsoftware.org/isinfo.php
 许可： Inno Setup License（允许自由分发用它做出的安装包）
+Licence: Inno Setup License (permits free distribution of installers made with it)
 用途： 生成 DroidExtend-Setup-*.exe 安装程序。编译脚本在
    tools/installer/DroidExtend.iss。
+Purpose: generates the DroidExtend-Setup-*.exe installer. The compile script is
+   tools/installer/DroidExtend.iss.
 
 ----------------------------------------------------------------
 10. 没有用到的
+10. Not used
 ----------------------------------------------------------------
-· 图标 DroidExtend.ico 是 tools/make_icon.py 用 struct 手工写
-  BITMAPINFOHEADER + BGRA 像素生成的，没有用任何现成素材或字体。
+· 图标由 android/make_icon.py 用 Pillow 现画（手机端五档 mipmap 与根目录的
+  DroidExtend.ico）；tools/make_icon.py 是另一份只用标准库 struct 手工写
+  BITMAPINFOHEADER + BGRA 像素、只生成 DroidExtend.ico 的极简版本。
+  两者都没有用任何现成素材或字体。
+· The icons are drawn on the spot by android/make_icon.py with Pillow (the five
+  mipmap densities plus the root DroidExtend.ico); tools/make_icon.py is a
+  separate minimal version that writes BITMAPINFOHEADER + BGRA pixels by hand
+  with struct and produces nothing but DroidExtend.ico. Neither uses any
+  ready-made assets or fonts.
 · parsec-vdd（Parsec Virtual Display Driver）只是当初调研时的候选，
   并未分发，也没有在运行时使用。
+· parsec-vdd (Parsec Virtual Display Driver) was only a candidate during the initial research;
+  it is not distributed and is not used at runtime.
 
 ----------------------------------------------------------------
 联系
+Contact
 ----------------------------------------------------------------
 邮箱： 1553008865@qq.com / lsw1553008865@gmail.com（备用）
+Email: 1553008865@qq.com / lsw1553008865@gmail.com (backup)
 如果这里遗漏了你的作品，或者署名/许可有误，请来信，我会在下一版修正。
+If your work is missing here, or the attribution/licence is wrong, please write to me and I will fix it in the next release.
