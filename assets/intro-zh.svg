@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" font-family="'Segoe UI','Microsoft YaHei','PingFang SC',system-ui,sans-serif">
+  <title>DroidExtend — 用一根 USB 数据线把安卓手机变成 Windows 的扩展屏</title>
+  <desc>左侧是标题与核心特性，右侧是笔记本与手机通过 USB 数据线相连、桌面延伸到手机上的示意图。</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1020"/>
+      <stop offset="0.55" stop-color="#101A38"/>
+      <stop offset="1" stop-color="#0A1526"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#60A5FA"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="glowG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="vign" cx="0.78" cy="0.42" r="0.62">
+      <stop offset="0" stop-color="#3B82F6" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#3B82F6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.4" cy="1.4" r="1.4" fill="#7DA2D8" opacity="0.13"/>
+    </pattern>
+    <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="7" stroke="#000000" stroke-opacity="0.16" stroke-width="1.6"/>
+    </pattern>
+
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <filter id="soft2" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" rx="0" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#dots)"/>
+  <rect width="1200" height="630" fill="url(#vign)"/>
+
+  <rect x="0" y="0" width="1200" height="5" fill="url(#accent)"/>
+
+  <g transform="translate(1128,74)">
+    <rect x="-6" y="-6" width="20" height="20" rx="4" fill="none" stroke="#34D399" stroke-opacity="0.5" stroke-width="1.4"/>
+    <path d="M6 2 v8 M2 6 h8" stroke="#34D399" stroke-width="1.6" stroke-linecap="round"/>
+  </g>
+
+  <g transform="translate(1128,600)">
+    <rect x="-6" y="-6" width="20" height="20" rx="4" fill="none" stroke="#60A5FA" stroke-opacity="0.4" stroke-width="1.4"/>
+    <path d="M2 10 h8" stroke="#60A5FA" stroke-width="1.6" stroke-linecap="round"/>
+  </g>
+
+  <g transform="translate(72,96)">
+    <rect x="0" y="0" width="180" height="34" rx="17" fill="#12213F" stroke="#2C4B7E" stroke-width="1"/>
+    <rect x="12" y="13" width="8" height="8" rx="2" fill="#34D399"/>
+    <text x="30" y="23" fill="#8FD8BC" font-size="15" letter-spacing="0.5">ADB · USB 直连</text>
+  </g>
+
+  <text x="72" y="216" fill="#FFFFFF" font-size="66" font-weight="800" letter-spacing="-1">DroidExtend</text>
+
+  <rect x="72" y="248" width="560" height="3" rx="1.5" fill="url(#accent)" opacity="0.85"/>
+
+  <text x="72" y="304" fill="#D6E4FF" font-size="25" font-weight="600">用一根 USB 数据线，把安卓手机</text>
+  <text x="72" y="340" fill="#D6E4FF" font-size="25" font-weight="600">变成 Windows 的第二块显示器</text>
+
+  <text x="74" y="378" fill="#8FA9CF" font-size="17">真扩展桌面，不是投屏镜像 —— 窗口拖过去、鼠标直接点</text>
+
+  <g>
+    <rect x="72" y="424" width="188" height="40" rx="20" fill="#0E2138" stroke="#256E5C" stroke-width="1"/>
+    <text x="90" y="450" fill="#5EEAD4" font-size="19" font-weight="700">5–11 ms</text>
+    <text x="182" y="450" fill="#7FB8AE" font-size="13">端到端延迟</text>
+
+    <rect x="272" y="424" width="192" height="40" rx="20" fill="#0E2138" stroke="#256E5C" stroke-width="1"/>
+    <text x="290" y="450" fill="#5EEAD4" font-size="19" font-weight="700">0</text>
+    <text x="306" y="450" fill="#7FB8AE" font-size="13">装第三方 App</text>
+
+    <rect x="476" y="424" width="184" height="40" rx="20" fill="#0E2138" stroke="#256E5C" stroke-width="1"/>
+    <text x="494" y="450" fill="#5EEAD4" font-size="19" font-weight="700">1080p60</text>
+    <text x="576" y="450" fill="#7FB8AE" font-size="13">画质可调</text>
+  </g>
+
+  <g>
+    <rect x="72" y="482" width="222" height="36" rx="8" fill="#101B33" stroke="#22345C" stroke-width="1"/>
+    <circle cx="92" cy="500" r="4" fill="#60A5FA"/>
+    <text x="106" y="506" fill="#A9BEE0" font-size="14">硬件编码 · NVENC</text>
+
+    <rect x="308" y="482" width="252" height="36" rx="8" fill="#101B33" stroke="#22345C" stroke-width="1"/>
+    <circle cx="328" cy="500" r="4" fill="#60A5FA"/>
+    <text x="342" y="506" fill="#A9BEE0" font-size="14">触摸反控 · 拔线即摘屏</text>
+  </g>
+
+  <text x="72" y="574" fill="#5B7099" font-size="14">Python + FFmpeg 主机端 · 纯 Java 手机端 · MIT 开源 · 代码由 AI 编写</text>
+
+  <circle cx="806" cy="300" r="184" fill="url(#glowG)" filter="url(#soft)"/>
+
+  <g transform="translate(556,158)">
+    <rect x="0" y="0" width="312" height="196" rx="12" fill="#0C1730" stroke="#31527F" stroke-width="1.6"/>
+    <rect x="-30" y="10" width="292" height="172" rx="7" fill="#0E1E3E"/>
+
+    <rect x="-30" y="10" width="292" height="26" rx="7" fill="#132449"/>
+    <circle cx="-14" cy="23" r="4.2" fill="#3B5480"/>
+    <circle cx="1" cy="23" r="4.2" fill="#3B5480"/>
+    <circle cx="16" cy="23" r="4.2" fill="#3B5480"/>
+    <rect x="36" y="17" width="120" height="12" rx="6" fill="#1B2E55"/>
+
+    <rect x="-16" y="48" width="146" height="118" rx="6" fill="#12224A" stroke="#2E4B7C" stroke-width="1"/>
+    <rect x="-4" y="62" width="70" height="9" rx="4.5" fill="#2C4A80"/>
+    <rect x="-4" y="82" width="112" height="7" rx="3.5" fill="#22375F"/>
+    <rect x="-4" y="98" width="94" height="7" rx="3.5" fill="#22375F"/>
+    <rect x="-4" y="114" width="108" height="7" rx="3.5" fill="#22375F"/>
+    <rect x="-4" y="130" width="70" height="7" rx="3.5" fill="#22375F"/>
+    <rect x="-4" y="146" width="100" height="7" rx="3.5" fill="#22375F"/>
+
+    <rect x="142" y="48" width="114" height="118" rx="6" fill="#0A1730" stroke="#3A6FA8" stroke-width="1.4" stroke-dasharray="6 4"/>
+    <text x="199" y="100" text-anchor="middle" fill="#5B86BE" font-size="13">虚拟屏</text>
+    <text x="199" y="122" text-anchor="middle" fill="#4E77AE" font-size="13">拖到这里</text>
+    <path d="M130 107 h14" stroke="#60A5FA" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 4"/>
+
+    <rect x="100" y="196" width="28" height="10" fill="#1B3059"/>
+    <rect x="60" y="206" width="108" height="8" rx="4" fill="#24395F"/>
+
+    <text x="112" y="236" text-anchor="middle" fill="#7C93B8" font-size="14">Windows 主机</text>
+  </g>
+
+  <g>
+    <path d="M862 382 C 892 382, 902 392, 918 392" fill="none" stroke="#22D3EE" stroke-width="2.4" stroke-dasharray="7 6" opacity="0.9"/>
+    <path d="M862 382 C 892 382, 902 392, 918 392" fill="none" stroke="#22D3EE" stroke-width="6" opacity="0.28" filter="url(#soft2)"/>
+    <path d="M792 400 C 818 400, 828 416, 850 420" fill="none" stroke="#A78BFA" stroke-width="2" stroke-dasharray="5 6" opacity="0.75"/>
+    <circle cx="890" cy="386" r="3" fill="#22D3EE"/>
+    <circle cx="826" cy="412" r="3" fill="#A78BFA"/>
+  </g>
+
+  <g transform="translate(858,376)">
+    <rect x="0" y="0" width="30" height="60" fill="#1D3355" stroke="#3A5A88" stroke-width="1"/>
+    <rect x="2" y="5" width="26" height="4" rx="2" fill="#7FA6D6"/>
+  </g>
+
+  <g transform="translate(866,196)">
+    <rect x="0" y="0" width="160" height="322" rx="24" fill="#0D1A33" stroke="#3C63A0" stroke-width="2"/>
+    <rect x="0" y="0" width="160" height="322" rx="24" fill="none" stroke="#1D3459" stroke-width="6"/>
+    <rect x="8" y="12" width="144" height="298" rx="17" fill="#0A1528" stroke="#2A4779" stroke-width="1"/>
+    <rect x="66" y="18" width="28" height="6" rx="3" fill="#2B4670"/>
+
+    <rect x="16" y="32" width="128" height="256" rx="8" fill="#0F2247"/>
+    <rect x="16" y="32" width="128" height="256" rx="8" fill="url(#hatch)" opacity="0.4"/>
+
+    <rect x="26" y="42" width="76" height="8" rx="4" fill="#2E4E86"/>
+    <rect x="26" y="58" width="108" height="6" rx="3" fill="#233A64"/>
+    <rect x="26" y="70" width="94" height="6" rx="3" fill="#233A64"/>
+    <rect x="26" y="82" width="104" height="6" rx="3" fill="#233A64"/>
+
+    <rect x="26" y="100" width="108" height="68" rx="6" fill="#12294F" stroke="#2F5590" stroke-width="1"/>
+    <rect x="38" y="113" width="56" height="8" rx="4" fill="#3A6098"/>
+    <rect x="38" y="129" width="84" height="6" rx="3" fill="#28405F"/>
+    <rect x="38" y="141" width="68" height="6" rx="3" fill="#28405F"/>
+    <rect x="38" y="153" width="78" height="6" rx="3" fill="#28405F"/>
+
+    <rect x="26" y="178" width="108" height="48" rx="6" fill="#12294F" stroke="#2F5590" stroke-width="1"/>
+    <rect x="38" y="190" width="44" height="7" rx="3.5" fill="#3A6098"/>
+    <rect x="38" y="204" width="82" height="6" rx="3" fill="#28405F"/>
+    <rect x="38" y="215" width="62" height="6" rx="3" fill="#28405F"/>
+
+    <rect x="26" y="236" width="108" height="20" rx="6" fill="#0B1B36" stroke="#24507F" stroke-width="1"/>
+    <circle cx="40" cy="246" r="4" fill="#34D399"/>
+    <text x="52" y="251" fill="#5FB6A0" font-size="12">58.2 fps · 5 ms</text>
+
+    <rect x="26" y="264" width="108" height="24" rx="6" fill="#0C1C38" stroke="#223C66" stroke-width="1"/>
+    <circle cx="44" cy="276" r="6.5" fill="#14294C" stroke="#356099" stroke-width="1.4"/>
+    <circle cx="72" cy="276" r="6.5" fill="#14294C" stroke="#356099" stroke-width="1.4"/>
+    <circle cx="100" cy="276" r="6.5" fill="#14294C" stroke="#356099" stroke-width="1.4"/>
+
+    <path d="M98 276 l-8 10 h5 l-2 9" fill="none" stroke="#60A5FA" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="72" cy="276" r="4.6" fill="none" stroke="#60A5FA" stroke-width="1.6" opacity="0.7"/>
+  </g>
+
+  <g transform="translate(894,168)">
+    <rect x="0" y="0" width="108" height="26" rx="13" fill="#101F3C" stroke="#2C4B7E" stroke-width="1"/>
+    <text x="14" y="18" fill="#7DD3C0" font-size="13">Android 5.0+</text>
+  </g>
+
+  <g transform="translate(596,478)">
+    <rect x="0" y="0" width="540" height="58" rx="10" fill="#0B1730" stroke="#25406E" stroke-width="1"/>
+    <text x="20" y="23" fill="#6E88B0" font-size="12" letter-spacing="1">数据流 · USB</text>
+    <text x="20" y="44" fill="#BFD5F5" font-size="13.5">ddagrab → h264_nvenc → adb reverse → MediaCodec</text>
+    <text x="520" y="43" text-anchor="end" fill="#5FE3C0" font-size="13" font-weight="600">全硬件链路</text>
+  </g>
+
+  <text x="1150" y="588" text-anchor="end" fill="#3D5480" font-size="12.5">github.com/Blank2007/DroidExtend</text>
+</svg>

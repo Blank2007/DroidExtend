@@ -1,8 +1,18 @@
-# DroidExtend — 用数据线把安卓手机变成 Windows 的拓展屏
+<p align="center">
+  <a href="assets/intro-zh.svg"><img src="assets/intro-zh@2x.png" alt="DroidExtend —— 用一根 USB 数据线，把安卓手机变成 Windows 的第二块显示器" width="100%"></a>
+</p>
 
-[![CI](https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml/badge.svg)](https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![最新版本](https://img.shields.io/github/v/release/Blank2007/DroidExtend)](https://github.com/Blank2007/DroidExtend/releases/latest)
+<p align="center">
+  <b>简体中文</b> · <a href="README.en.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml"><img src="https://github.com/Blank2007/DroidExtend/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/Blank2007/DroidExtend/releases/latest"><img src="https://img.shields.io/github/v/release/Blank2007/DroidExtend" alt="最新版本"></a>
+</p>
+
+# DroidExtend — 用数据线把安卓手机变成 Windows 的拓展屏
 
 一根 USB 数据线，手机立刻变成电脑的第二块显示器：**不是投屏镜像，是真的扩展桌面**——
 你可以把窗口从笔记本屏幕拖到手机上，鼠标直接在上面操作。
@@ -274,7 +284,9 @@ droid-extend/
 │   ├─ sdk/                      Android build-tools 34.0.0 + platform 34
 │   ├─ vdd/                      Virtual Display Driver 驱动文件 + nefcon
 │   └─ vdd_install.ps1           驱动安装脚本（管理员）
-└─ README.md
+├─ assets/                        ← 介绍图（中英各一版：SVG 源 + PNG 位图）
+├─ README.md                      ← 这份（中文）
+└─ README.en.md                   ← 英文版 README
 ```
 
 ---
