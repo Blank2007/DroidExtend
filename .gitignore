@@ -33,3 +33,10 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# 程序运行时写在本地的配置 / Settings the program writes locally at runtime
+settings.json
+settings.json.tmp*
+DroidExtend.log*
+vdd_install.log*
+data_dir.txt
