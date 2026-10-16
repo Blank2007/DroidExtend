@@ -2,10 +2,11 @@
 
 > **Let me be clear first: the code in this project was written by AI.**
 >
-> All of the source code (4480 lines of Python on the Windows side, 1701 lines of Java on the
-> Android side, 3261 lines of Python in tools and test scripts) was written from scratch by an
-> **AI coding agent** inside **DeepSeek Harness**, using the **deepseek-flash** model, and
-> delivered as an installable 1.5.1 within a few sessions on **2026-10-11**.
+> All of the source code (8444 lines of Python in 21 files on the Windows side, 2985 lines of Java
+> in 12 files on the Android side, 10371 lines of Python in 96 tool and probe scripts) was written
+> from scratch by an **AI coding agent** inside **DeepSeek Harness**, using the **deepseek-flash**
+> model, and delivered as an installable 1.6.2 within a few sessions between **2026-10-10** and
+> **2026-10-16**.
 >
 > What the human ([@Blank2007](https://github.com/Blank2007)) did: state the requirements, plug in
 > a real device, click UAC wherever administrator rights were needed, and accept each finished step
@@ -41,7 +42,11 @@
 | [16](#16-140-stall-self-recovery--data-directory--phone-ui-redraw) | 1.4.0: stall self-recovery / data directory / phone redraw | recovery 8.1 s → 4.1 s |
 | [17](#17-141-the-issue-1-path-that-broke-four-releases) | 1.4.1: issue #1 / path cleanup / CI | driver install broken in all 4 releases |
 | [18](#18-150-update-in-app-instead-of-jumping-to-a-browser) | 1.5.0: in-app update | four checks, any one failing means no install |
-| [19](#19-151-the-virtual-screen-vanishes--the-driver-mode-table-blew-the-buffer) | 1.5.1: virtual screen vanishing / mode table cap | 110 combinations → 55, the driver finally does its job after being installed |
+| [19](#19-151-the-virtual-screen-vanishes-out-of-thin-air--the-driver-mode-table-blew-the-buffer) | 1.5.1: virtual screen vanishing / mode table cap | 110 combinations → 55, the driver finally does its job after being installed |
+| [20](#20-160-fourteen-things-that-were-promised) | 1.6.0: the fourteen promises / eight real bugs | 11 encoders advertised, **7 actually work** |
+| [21](#21-161-touch--measure-the-numbers-first) | 1.6.1: touch dead zone / long-press right click / frame-rate pacing | the phone went from 91 writes a second to 45 |
+| [22](#22-162-a-double-click-that-windows-refused-to-call-one) | 1.6.2: install folder / agree button / double click | Windows' double-click box is 4 × 4 pixels |
+| [23](#23-163-two-menus-that-both-asked-the-wrong-question) | 1.6.3: resolution menu / encoder menu | eleven of twenty-two sizes had no mode behind them |
 
 ---
 
@@ -1136,5 +1141,834 @@ Casting fully recovered, 60 fps, average latency 10 ms.
 
 ---
 
-*This log was written by an AI coding agent. All of the project's code was written by it as well.*
+## 20. 1.6.0: fourteen things that were promised
 
+### 20.1 The request
+
+> **User said**: "当前其他编码选项根本不可用" ("none of the other encoding options work at all")
+
+This release did not add features so much as **finish the things I had already said yes to**.
+The user listed fourteen items in one go, and **eight of them were real bugs** (the last one was
+only found after the installer was built, during a smoke test of the packaged exe).
+They are worth writing down because they share one property: **the feature was "there",
+but it had never once been verified.**
+
+### 20.2 Item by item
+
+| # | Request | Outcome |
+| --- | --- | --- |
+| ① | Privacy terms on both ends, agreed on first run | new `host/privacy.py` / `android/…/Terms.java`; the stored value is a version string, so editing the terms asks again |
+| ② | Native animation on both ends | new `host/anim.py` / `android/…/Anim.java`; respects the system "turn animations off" setting |
+| ③ | Tray + autostart + a real exit | new `host/tray.py` (pure ctypes) / `host/autostart.py` |
+| ④ | Android background-survival guidance | new `android/…/KeepAlive.java`; 13 vendor autostart pages |
+| ⑤ | Publish all the source | already satisfied |
+| ⑥ | Finish the updater | changelog shipped with the app, download folder is yours, installer deleted after install |
+| ⑦ | Touch offset, and touch dying after a window closes | **real bugs, two of them** (see 20.3) |
+| ⑧ | Tell Windows when the phone sleeps or is killed | new `NOTICE` record in the input protocol |
+| ⑨ | Emoji in the README and the logs | already satisfied (measured 76 / 79 / 87 / 90 characters) |
+| ⑩ | Virtual screen active at boot without the app, and custom positions | **real bug** (see 20.3) |
+| ⑪ | More codecs, with detection and fallback | **real bugs, three of them** (see 20.3) |
+| ⑫ | Stutter diagnosis, a note about GPU usage, and resolution not switching | **real bug** (see 20.3) |
+| ⑬ | English/Chinese in the installer and in the app itself | three places: installer, Windows app, Android app |
+| ⑭ | adb port usage check and driver install | new "Diagnose connection problems…" in the Tools menu |
+
+### 20.3 The real bugs
+
+**1. Every codec other than H.264 produced garbage.**
+The end of `command()` in `capture.py` **hard-coded** `-f h264`. Pick any other encoder and
+the stream was still unpacked as H.264. The fix picks the muxer by codec:
+`{avc:"h264", hevc:"hevc", av01:"obu"}`.
+**AV1 must be `obu`, not `av1`** — `-f av1` fails outright with `pipe:: Invalid argument`,
+because that muxer does not accept a pipe.
+
+**2. HEVC NAL headers are two bytes; the splitter only knew about one.**
+`split_access_units()` read the NAL type as `buf[pos+3] & 0x1F` (the H.264 layout), so it
+never found a VCL unit in HEVC. `_NAL_SPECS` now states the header length per codec.
+
+**3. AV1's `-profile:v main` made NVENC refuse to initialise.**
+The error was `Error initializing output stream: ... maybe incorrect parameters such as
+bit_rate, rate, width or height` — **a message that mentions neither the profile nor the codec.**
+AV1 has no `main` profile, so the only fix is not to pass `-profile:v` at all.
+
+**4. Vertical scrolling had never worked.**
+`z` in the input protocol was a `uint16` while the phone packed `dx | (dy << 16)` into it,
+and the host read dy with `z >> 16` — **shifting a 16-bit value right by 16 is always zero.**
+The record went from `<BHHH>` (7 bytes) to `<BHHI>` (9 bytes). Both ends ship together,
+so there is no compatibility problem.
+
+**5. Touch died after closing the foreground window: the left button stayed down.**
+When the window is destroyed or the phone disconnects while a finger is down, the UP event
+never arrives, Windows is left inside a modal drag loop with the left button held, and every
+later injection is swallowed — **the stream keeps running, the screen simply does not respond.**
+Three belts: `Injector.release()`, a 30-second watchdog, and a release on disconnect and exit.
+
+**6. Detach was not persisted, so the virtual screen came back at every boot.**
+Windows keeps display configuration under
+`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Connectivity`,
+and **`Recent` is what the topology is rebuilt from at boot**. Attach went through
+`ChangeDisplaySettingsEx` + `CDS_UPDATEREGISTRY` (persistent); detach went through
+`SetDisplayConfig` **without `SDC_SAVE_TO_DATABASE`** — **asymmetric, so attach survived the
+reboot and detach did not.** Measured `Recent` round trip:
+`BOE0D550_26_07E8_EC` → `…+MTT1337518463207_1C_07E8_C2` → back to the original value.
+
+**7. Changing the resolution did nothing.**
+`apply_display()` **was only ever called once, when you pressed "Start"**; nothing called
+`wd.set_mode()` afterwards — the setting was saved, but nobody told Windows to switch.
+There is now a `retarget()` with a 600 ms debounce, four attempts, and success judged by
+**the mode that actually took effect**.
+
+**8. A `settings.json` with a byte-order mark threw every setting away, silently.**
+This one was not on the request list — it turned up in the **smoke test of the packaged
+installer**, after everything else was green. The test wrote a settings file containing
+`"language": "en"`; the app came up with a Chinese title bar. `settings.load()` opened the
+file with `encoding="utf-8"`, and both PowerShell's `Set-Content -Encoding UTF8` and
+**Notepad's "UTF-8" option** start the file with `EF BB BF`. `json.load` raises on a BOM,
+the blanket `except Exception` reads that as "corrupt file", and so **the whole settings
+file is dropped and every value falls back to its default, without one word in the log.**
+A user can absolutely hit this: that file lives in the folder we invite people to look at.
+The fix is two characters — `encoding="utf-8-sig"`, which eats the BOM and behaves
+identically on files that do not have one. The "remembered data folder" pointer read in
+`paths.py` got the same treatment, because a stray leading `\ufeff` turns the remembered
+path into one that does not exist. `tools\tmp\settings_bom_test.py` (23 checks) guards it.
+
+### 20.4 Two near-misses
+
+* **NetEase UU Remote.** Ten of the 21 display outputs on this machine belong to
+  `Root\GameViewerIddDriver`. The old `find_virtual_display()` sorted by "attached and has a
+  monitor", so **as soon as UU was running its adapter outranked ours** and was treated as
+  "our virtual screen". It is now decided by driver identity (`OUR_IDD` / `FOREIGN_IDD`),
+  and only `MttVDD` counts.
+* **What `probe_encoder()` is actually for.** Before this I "knew" that all 11 encoders
+  ffmpeg listed would work. Running one real frame showed every `*_qsv` failing
+  (`Error creating a MFX session: -9`; there is no Intel GPU here) and `av1_amf` unsupported
+  (the Radeon 610M iGPU cannot encode AV1). **`ffmpeg -encoders` tells you what was compiled
+  into the build, not what this machine can run.**
+
+### 20.5 Verification
+
+Seventeen regression scripts under `tools/tmp/`, roughly 620 assertions, all green.
+A few worth calling out:
+
+```
+encoder_matrix.py       7 usable encoders, all PASS (encode a real frame, then split it and count units)
+notice_test.py          37/37  including direct proof that dy was always 0 under the old layout
+db_roundtrip_test.py     4/4   attach → detach leaves Recent back at the clean value
+retarget_test.py        32/32  including the "nothing changed, so do not touch Windows" idempotence check
+log_keep_test.py        23/23  log colours survive the window rebuild on a language switch
+settings_bom_test.py    23/23  a BOM in settings.json no longer discards every setting
+```
+
+After packaging I read the PYZ archive inside `DroidExtend.exe` directly and confirmed that
+`i18n`/`anim`/`tray`/`privacy`/`autostart`/`changelog` and the other 14 modules really are
+frozen in there — **"the build succeeded" and "the thing is inside" are two different claims.**
+
+And then I **actually launched the packaged exe**: wrote an English settings file *with* a
+BOM, started it, and the title bar read `DroidExtend — Android Extended Screen   v1.6.0`
+with the log landing in the data folder as expected. That is how bug 8 was found — **skip
+that step and it ships**, because not one of the seventeen scripts ever writes a file with
+a BOM.
+
+### 20.6 Lessons
+
+* **"The option exists" is not "the option works".** The encoder dropdown lists 11 names and
+  7 of them run. Any capability that *looks* supported needs a path that **actually exercises it**.
+* **Hard-coded assumptions live a long time.** That `-f h264` was probably correct when it was
+  written — H.264 was the only choice then. It survived until the day a second encoder appeared,
+  and it failed **with no hint at all** (a green screen).
+* **The width of a protocol field is part of the interface.** Moving `z` from 16 to 32 bits
+  required both ends at once; and `z >> 16` on a uint16 was **an assumption that was never true**.
+* **Check symmetry in pairs.** Persisting on attach and not on detach — each function looks
+  fine alone, and only together do they read as "one direction works, the other does not".
+  When hunting this class of bug, ask: **does this operation have an inverse, and does the
+  inverse do the same set of things?**
+* **A wrong test is more common than wrong code.** In this release I wrote more bad assertions
+  (assuming a startup log line count, comparing captions instead of values, treating
+  `[x for x in after] == [x for x in after]` as a check) than I found product bugs.
+  **Suspect the test before you suspect the code** — but once you have suspected it, make the
+  assertion correct and stronger, do not delete it.
+* **All tests green does not mean it runs.** Seventeen scripts passed without a single failure
+  and bug 8 was still sitting there — because **not one of them writes a file with a BOM**,
+  which is exactly what an ordinary user does. The packaged thing has to be **actually started
+  once**. That step was worth more than writing three more test scripts.
+
+## 21. 1.6.1: touch — measure the numbers first
+
+### 21.1 The request
+
+> **User said** (m03654): "I have the device plugged in right now, you can connect directly.
+> One thing: the touch logic on the Android side is still wrong. Can you look at how other
+> remote-desktop apps handle touch? And why is the touch latency *larger* than the video
+> latency?"
+
+Two asks: make the **gestures** behave like everyone else's remote-desktop client, and
+**explain why touch lags more than video**. The second one is answerable on the spot
+(21.2); the first is the actual work.
+
+The device was genuinely attached this time: a Xiaomi 24091RPADC (muyu), Android 16,
+`adb shell wm size` reporting `2136x3200`, density 440 / override 352, `adb devices`
+name `d1de99c4`. **If you have real hardware, measure on it** — every number in this
+section came off that phone rather than out of an argument.
+
+### 21.2 Why touch latency must exceed video latency
+
+This one needs no measurement, because it is an identity. The path from finger to eye
+has two segments:
+
+```
+finger ──①touch link──> PC injection ──②capture→encode→transport→decode→display──> eye
+```
+
+The `latency_avg_ms` figure on the HUD measures **only segment ②** (it times a frame
+from capture to display). Segment ① is added in front of it the moment you press, so
+
+**touch latency = ① + ② > ② = video latency.**
+
+That inequality **always holds** — it is not a bug. The only way to bring the two
+together is to push ① down towards zero. So the real question is not "why is it bigger",
+it is "how big is ①, and can it be smaller".
+
+And ① has a nasty property: **the link is a queue, so producing faster than you can send
+means a backlog**. Once a backlog starts, the latency does not merely stay high, it
+**grows with time** — the longer you drag the further behind it falls, and it keeps
+catching up after you let go. 21.3 shows the old version sitting exactly on that.
+
+### 21.3 Measure first, then change
+
+Three numbers, taken before touching anything, because "what is slow" has to be
+settled first — otherwise you change a feeling, not a problem.
+
+**① The tunnel: the bottleneck is "one write", not bandwidth.**
+`tools/tmp/tunnel_bench.py` pushed 600 nine-byte records into 27184:
+
+| How it was sent | Arrived | Gap |
+|---|---|---|
+| one `write` per record | **22 / 600** | 31.4 ms (≈32 a second) |
+| all 600 in **one** `write` (5400 B) | **600 / 600** | 0.000 s (1 batch) |
+
+5400 bytes in one go is nothing; one record at a time is thirty times slower.
+**What is limited is the number of calls, not the throughput.**
+
+**② PC-side injection: not remotely the bottleneck.**
+`Injector.move()` two thousand times: median **0.457 ms** / p90 0.687 / p99 1.069 →
+about **2187 a second**. The old phone sent 91 a second. **Twenty times of headroom.**
+
+**③ The phone: three times over budget — and that is where the backlog came from.**
+Listening on 27184 while `adb shell input swipe` played three identical drags:
+
+```
+before   122 records / 95 write batches / median batch 1 record / gaps ~11 ms  ≈ 91 a second
+```
+
+**91 a second against a capacity of ~32 a second — roughly three times over.**
+①②③ all point the same way: **the thing to change is the phone's sending rhythm**,
+not the bandwidth and not the injection.
+
+One correction to a judgement of my own: `MOVE_INTERVAL_MS` used to be 28, justified by
+"a tunnel write costs about 30 ms, so only 30 a second". That 30 came from a
+`toybox nc` plus shell-loop benchmark — **polluted by mksh's own loop overhead**. The
+real app sustains 91 writes a second; the tunnel was never capped at 30. The comment has
+been rewritten from scratch.
+
+### 21.4 Four changes
+
+**① A dead zone on the phone (most likely the answer to "the touch logic is wrong").**
+The old code sent an `ACTION_MOVE` the instant one arrived after `ACTION_DOWN`, and a real
+finger **always** wobbles a few pixels as it lands — so **every "click" reached the PC as a
+tiny drag**. The symptom is exactly: taps that miss, a tap that turns into a drag, a window
+nudged slightly out of place. Now the touch has to clear
+`ViewConfiguration.get(this).getScaledTouchSlop()` first: inside the dead zone **not one
+MOVE is sent**; past it, it is promoted to a drag and the long-press timer is cancelled.
+Measured with `swipe 700 1400 702 1403 80` (a 2–3 px wobble) → only `DOWN` and `UP`,
+**zero MOVEs**.
+
+**② Hold for half a second on the phone = right click.** Every other remote-desktop client
+has it; this one did not. After 500 ms without moving it sends an `UP` (letting go of the
+left button) and then an `RCLICK`. Measured: it fires **503 ms** after the `DOWN`. Moving
+past the dead zone cancels it, so a drag never fires a right click by accident.
+
+**③ Dragging on the phone is paced to the frame rate.** `MOVE_INTERVAL_MS = 16` — **16 ms
+is exactly one frame at 60 fps**, which is the rate the capture side actually runs at. A
+move faster than the next frame is one the person holding the phone cannot see, yet it
+spends a whole write of the budget. Positions are idempotent, so intermediate ones are
+dropped; **events (down / up / right click / scroll) are not paced at all.**
+
+**④ Both ends keep only the newest position.** On the phone `pendingMove` holds a single
+position (a newer one overwrites it); on the PC, `touch.py` grew `_apply_all()`, which
+**injects only the last MOVE in a run**. MOVEs separated by a scroll are not merged and the
+order is untouched.
+
+### 21.5 The numbers afterwards
+
+Same three `adb shell input swipe` drags:
+
+| | records | write batches | gap | rate |
+|---|---|---|---|---|
+| before | 122 | **95** | ~11 ms | ≈91 a second |
+| paced at 28 ms | 64 | 38 | ~33 ms | ≈30 a second |
+| paced at **16 ms** (final) | — | — | **~21–24 ms** | **≈45 a second** |
+
+**From 91 down to 45 a second (about half)**, and position updates went from one every
+11 ms to one every 21–24 ms — **still denser than a frame**, so tracking did not get worse.
+The budget the pacing freed up was spent on denser positions rather than saved.
+
+Real-device gesture re-test (`tools/tmp/gesture_test.py`, run twice, both clean):
+
+```
+tap          600 1200                -> ['DOWN', 'UP']
+long press   900 1500 held 900 ms    -> ['DOWN', 'UP', 'RCLICK']   (fired at 503 ms)
+drag         500 1000 -> 1200 1800   -> ['DOWN'] + 27 MOVEs + ['UP']
+jitter tap   700 1400 -> 702 1403    -> ['DOWN', 'UP']             (zero MOVEs)
+```
+
+**`input write slow` never appeared once** in the log — the socket write was never slow,
+so what this release saves is **calls**, which lines up exactly with 21.3①.
+
+### 21.6 Found along the way: filling the screen eats both edges
+
+Stumbled on while checking coordinates. It may not be the same complaint, but it really
+does make things unclickable.
+
+"**Fill the screen (crop the extra edges)**" **defaults to on**. When it is on, the picture
+is scaled up to fill the screen and the excess is cropped:
+
+```
+landscape window 3200 x 2136 (ratio 1.498)
+desktop is 16:9 — filling computes 2136 * 16/9 = 3797
+3797 - 3200 = 597, so 298.5 px is cropped from each side
+```
+
+The cropped part **never receives touch**: the reachable horizontal range is only
+**0.079 to 0.921**, meaning **about 7.9% is unreachable at the far left and far right of the
+desktop**. On a 1920-wide desktop that is about 151 px on each side — the far left of the
+Start menu, and the close button in the top-right of a maximised window, both live there.
+
+**This is not a bug; it is what that option means** (its own name says "crop the extra
+edges"). So the default was left alone — it is written up in `dist/notes-1.6.1.md`
+instead: if you would rather click the edges than keep black bars, turn it off.
+
+### 21.7 Verification
+
+**18 regression scripts and about 650 assertions green under `tools/tmp/`, zero non-zero
+exits.** Two are new:
+
+```
+touch_batch_test.py   23/23  20 MOVEs collapse to the newest, MOVEs split by a SCROLL are
+                             not merged, signed scroll deltas, six event kinds in order,
+                             a 9-byte record split 4/5/2 across recv() is glued back,
+                             a disconnect releases, long press is strictly down/up/right_click
+gesture_test.py              plays four gestures on real hardware and decodes the actual
+                             byte stream (not a guess from reading the code)
+```
+
+`touch_batch_test.py` failed 22/23 on its first run, and the one failure was because
+`_read()` **always** finishes by calling `release()` — which is what the *next* test
+asserts. The assertion now strips the trailing `release`. **A wrong test again, not wrong
+code.**
+
+Bumping the version then broke two assertions in `update_extras_test.py`, and **both of
+them had the newest version number hard-coded**: `vs[0] == "1.6.0"` and a search for
+`v1.5.1` inside `all_text(limit=2)`. That kind of assertion fails once per release, so
+rather than change 1.6.0 to 1.6.1 (which only postpones the mine) they were made
+version-agnostic:
+
+```python
+check("the newest entry's version is the program's own version",
+      vs[0] == ver.APP_VERSION, "%s vs %s" % (vs[0], ver.APP_VERSION))
+top2 = cl.all_text("zh", limit=2)
+check("all_text(limit=2) takes only the newest two (%s, %s, not %s)" % (vs[0], vs[1], vs[2]),
+      ("v" + vs[0]) in top2 and ("v" + vs[1]) in top2 and ("v" + vs[2]) not in top2)
+```
+
+The first one is now **stronger** than what it replaced: it asserts that the changelog's
+newest entry must equal the program's version, so **bumping the version without writing a
+changelog entry** is caught immediately — the old one only said "1.6.0 is at the front".
+
+Packaging was checked too: `classes.dex` was grepped directly for `pendingMove` /
+`drainLocked` / `input write slow` / `getScaledTouchSlop`. The APK went from
+`versionCode 10` to **11**, `versionName 1.6.1`.
+
+### 21.8 Lessons
+
+* **"Why is A bigger than B" is sometimes an identity, not a bug.** Touch latency exceeding
+  video latency is structural; the way to answer it is to **split the path in two**, not to
+  measure. The real work is "how big is ①".
+* **Find the bottleneck before changing anything.** Three numbers (tunnel 32 a second,
+  injection 2187 a second, phone 91 a second) leave no doubt about where to cut. Without
+  them the tempting target is whatever you know best (PC injection) — and it had twenty
+  times the headroom.
+* **Benchmark scripts lie.** "The tunnel can only do 30 a second" was wrong for two
+  releases because it was measured with `toybox nc` and a shell loop, so it was **measuring
+  the shell**. Before writing a benchmark, ask what else is moving inside the measurement.
+* **A queue's limit is not latency, it is that latency grows.** 91 against 32 is not "three
+  times slower", it is "59 more piled up every second", so it **gets worse as you drag**.
+  When production outruns the sender, think in backlog, not in multiples.
+* **Idempotent things can be dropped; events cannot.** A position is "where it is now" and
+  its intermediate values are disposable; a down or an up is "something happened" and not
+  one may be lost. Pacing and merging apply only to the former.
+* **When a user says "the logic is wrong", look for the thing that happens a little extra
+  every single time.** Here it was: every click carried a tiny drag along with it. Not
+  rare, not a corner case — **every operation slightly off**, which is exactly what "the
+  logic is still wrong" describes.
+* **"The option exists" and "the option is good" are two things.** Filling the screen does
+  what it says, at the price of 7.9% unreachable on the left and right. Leave that out of
+  the notes and the user just concludes the touch is inaccurate.
+* **Never hard-code "the current version" in a test.** Bumping to 1.6.1 immediately broke two
+  assertions in `update_extras_test.py`, both written as `== "1.6.0"`. **That kind of
+  assertion fails once per release, and changing it to the new number only postpones the
+  mine.** Compare against `version.APP_VERSION` instead — and the rewritten assertion is
+  **stronger** than the old one: it now catches "bumped the version without writing a
+  changelog entry".
+
+---
+
+## 22. 1.6.2: a double click that Windows refused to call one
+
+### 22.1 The request
+
+> **User said** (m04395): "更新的时候要可以直接安装在老目录 Windows端的隐私协议按钮直接放在协议最下面的了不然没拉伸窗口容易找不到同意按钮在哪 安卓端操作逻辑还是有点小问题 操作逻辑在安卓端设置里写明一下"
+
+"安卓端操作逻辑还是有点小问题" was an open multiple-choice, so I listed the candidates and
+he picked exactly one:
+
+> **User said** (m04446): "单击/双击不准，双击打不开文件"
+
+### 22.2 The four, side by side
+
+| # | What was asked | Root cause | The change |
+| --- | --- | --- | --- |
+| ① | An update should go back into the old folder | `DisableDirPage=no` in `DroidExtend.iss`: an upgrade still forced the destination page, and its default was `{localappdata}\Programs\DroidExtend`, not where the program actually lives | `DisableDirPage=auto` plus `UsePreviousAppDir=yes` |
+| ② | Put the agree button at the bottom of the terms | The two buttons sat in a `pack(side="bottom")` footer, and **a footer cannot be scrolled to** — a window that was never stretched simply cut them off | Buttons are `window_create`d *inside* the Text, so they scroll; the height is computed from the screen |
+| ③ | A double click does not open a file | Windows' `SM_CXDOUBLECLK` is 4 × 4 pixels by default, and we released the tap wherever the finger had drifted to | The phone releases a tap where it went down; the host snaps the second press onto the first |
+| ④ | Write the touch logic into the phone's settings | The settings panel never mentioned any gesture | A new "触摸操作" section: six gestures and three notes |
+
+### 22.3 ③, which deserves its own section
+
+**Windows decides whether two clicks are one double click using a set of constants that date
+from the mouse era:** `SM_CXDOUBLECLK` / `SM_CYDOUBLECLK`. Both clicks have to land inside the
+same rectangle, and **the default is 4 × 4 pixels**.
+
+Pressing a mouse button twice on the same icon puts the two points 0–2 pixels apart, comfortably
+inside the box. A fingertip cannot do that: tapping the same icon twice through glass, tens of
+desktop pixels apart is normal. So Windows saw two unrelated single clicks and the file never
+opened.
+
+Our own code was making it worse: the release was sent as `nx(e.getX())`, the position *after*
+the finger had drifted. The dead zone tolerates a wobble of `touchSlop` pixels without calling it
+a drag, and that wobble was exactly enough to push the second click out of the four-pixel box.
+
+So both ends were fixed:
+
+* **The phone** (`android\src\com\droidextend\MainActivity.java`):
+
+  ```java
+  private float tapUpX(MotionEvent e) { return nx(dragging ? e.getX() : downX); }
+  private float tapUpY(MotionEvent e) { return ny(dragging ? e.getY() : downY); }
+  ```
+
+  A tap releases where it went down; only a drag follows the finger. All three release sites
+  (`ACTION_POINTER_DOWN`, `ACTION_UP`, `ACTION_CANCEL`) now use these.
+
+* **The host** (`host\touch.py`):
+
+  ```python
+  DOUBLE_CLICK_SLOP = 0.03          # normalised; about 58 px on a 1920-wide desktop
+  DOUBLE_CLICK_FALLBACK = 0.5       # when GetDoubleClickTime() cannot be read
+  def double_click_time(): ...      # the system's window, clamped to 0.1..1.0 s
+  ```
+
+  `_down()` notices when the previous complete click is inside the time window and within the
+  slop on both axes, records `_snap`, and **both the press and the release go out at the first
+  click's coordinates**. A single click and a double click therefore land on exactly the same
+  pixel, and the four-pixel box stops mattering.
+
+  The rules that keep it from snapping things it should not: a `MOVE` after the press means this
+  was a drag, so `_snap` is dropped; the wheel, a right click and a disconnect all clear the
+  pairing.
+
+### 22.4 I fell into the same pit twice while writing the tests
+
+The first `double_click_test.py` had three failures, all of the form "a drag must not count as a
+double click". The cause was **my own code**: `stats["double"] += 1` was in `_down()`, and **at
+the moment of the press you do not yet know whether it will become a drag**. Moving the count to
+`_up()` (where a surviving `_snap` proves the press stayed clean all the way) turned all three
+green.
+
+The other one was in `privacy_layout_test.py`: I looked for the agree button with
+`"同意" in b.cget("text")`, but **「不同意，退出」 also contains 「同意」**, so `[0]` handed me the
+*decline* button and "pressing agree returns True" failed. Matching on the absence of
+「不同意」 fixed it.
+
+### 22.5 Verification
+
+**Twenty-two scripts, 672 assertions, all green, zero non-zero exits** (four of them new):
+
+```
+privacy_test                 32      privacy_layout_test (new)    23
+notice_test                  37      double_click_test (new)      27
+retarget_test                32      install_dir_test (new)       23
+diagnose_test                21      log_toc_test (new)           19
+touch_test                   25      tray_test / tray_app / gui   22 / 47 / 16
+touch_batch_test             23      terms_test                   34
+anim_test                    51      keepalive_test               46
+i18n_app_test                83      update_extras_test           61
+log_keep_test                23      db_roundtrip_test             4
+settings_bom_test            23      orphan_cleanup_test           no leftover virtual displays
+```
+
+How each of the four new ones works is worth recording:
+
+* `privacy_layout_test.py` opens a **real Tk window** and measures the layout, then **squeezes
+  the window to 300 px on purpose** and confirms the buttons can still be scrolled into view
+  with `txt.see()` — which is precisely the situation the user was in.
+* `double_click_test.py` swaps `time.monotonic` for a clock of its own, so "half a second later"
+  is a number instead of half a second of sleeping.
+* `install_dir_test.py` replaces `subprocess.Popen` and **reads the batch file that would have
+  run**, never launching an installer.
+* `log_toc_test.py` recomputes the anchor every table-of-contents entry ought to have, using
+  GitHub's own rules, and then goes looking for it in the body. It immediately caught two
+  links that **had never worked at all** (sections 7 and 19). A broken anchor like that simply
+  does nothing when you click it; nothing but running a check will ever find it.
+
+**On the real device, `tools\tmp\gesture_test.py` → ALL OK** (with a new double-tap case):
+
+```
+tap        ['DOWN', 'UP']                                   OK
+longpress  ['DOWN', 'UP', 'RCLICK']                         OK
+drag       ['DOWN', 27×MOVE, 'UP']  (~22 ms apart)          OK
+jitter     ['DOWN', 'UP']                                   OK
+doubletap  ['DOWN', 'UP', 'DOWN', 'UP']                     OK
+  tap 1    down=(18261,39886) up=(18261,39886)              OK
+  tap 2    down=(18313,39978) up=(18313,39978)              OK
+  pair gap the two presses are 125.6 ms apart, (52,92) < 1966 apart   OK
+```
+
+Those two "the release is where the press was" lines are the direct evidence of the phone half of
+the fix: before it, that `up` landed wherever the finger had drifted to.
+
+**Packaged smoke test**: `DroidExtend.exe` came up with the title
+`DroidExtend — 安卓拓展屏   v1.6.2`. The PYZ inside the exe holds 167 modules with all 20 of ours
+present; `touch` contains `DOUBLE_CLICK_SLOP` / `double_click_time` / `GetDoubleClickTime` /
+`_snap`, `privacy` contains `_height` / `window_create`, and `update` contains `/DIR=`.
+
+**End to end, over the real phone and a real virtual display** (`tools\touch_test.py`, which
+needed a fix of its own: the virtual display only comes up after `extend_topology()`, and the
+script assumed it was already attached, so capture died with
+`Capture failed to start: 'NoneType' object is not subscriptable`). Once attached:
+
+```
+capture backend: ddagrab 1920x1080@60
+tap   phone(1600,700)        -> cursor (3519,353)   display starts at x=2560, 1920 wide => nx=0.4995
+swipe (320,900)->(1500,400)  -> 20 events, cursor (3469,202)
+app log  action=0 at 1898.0,700.0   / action=1 at 1898.0,700.0   <- the release sat on the press
+         action=0 at  618.0,900.0   / action=1 at 1798.0,400.0   <- a drag follows the finger
+```
+
+The last two lines are the phone half of the fix, seen from the far end of the whole chain. The
+script read logcat with `text=True`, so Python decoded UTF-8 Chinese log lines with the console's
+GBK code page, the first byte it could not map turned `stdout` into `None`, and `.splitlines()`
+threw `AttributeError` — now `capture_output=True` plus `.decode("utf8", "replace")`.
+
+### 22.6 Lessons
+
+* **"This bug must be in our code" is an assumption that needs checking.** The double click that
+  would not open a file came down to a four-pixel constant in Windows. The first question about a
+  bug should be "who defined the rule".
+* **I fell into the same pit twice: a tool reporting False does not mean the artefact lacks it.**
+  Last time it was a constant walker that would not recurse into tuples; this time **function and
+  global names live in `co_names`, not in `co_consts`**, so `DOUBLE_CLICK_SLOP` briefly read as
+  False. Inspect both.
+* **Watch for containment when matching strings in a test.** 「不同意」 contains 「同意」.
+* **The console code page is not the right decoder for somebody else's UTF-8.** On a Chinese
+  Windows, `subprocess.run(..., text=True)` decodes the phone's log as GBK; the first byte it
+  cannot map turns `stdout` into `None`. Pass `encoding=` explicitly, or `decode(..., "replace")`.
+* **Put a counter where the information is complete.** `stats["double"]` in the press handler was
+  wrong, because at that moment you cannot know whether the press becomes a drag.
+
+---
+
+## 23. 1.6.3: two menus that both asked the wrong question
+
+Shortly after 1.6.2 went out the owner raised two things, both bluntly, and both correctly:
+
+> 为什么分辨率更改后还是没变化 你其他分辨率白做的吗
+> (why does nothing change after I change the resolution — was all that other resolution work for nothing)
+
+> 还是有部分视频编码不可用
+> (some video encoders are still unavailable)
+
+Both had been "fixed" in 1.6.0. The real problem is that **both times the program asked the wrong
+question**: the resolution menu asked "what should the driver support?" (in fact, a hard-coded list),
+and the encoder menu asked "what was this ffmpeg compiled with?". What the owner cares about is
+**"does it work on this machine?"**.
+
+### 23.1 Resolution: the driver only accepts its own table
+
+The symptom: pick a size from the menu, click it, and nothing happens — no flicker, no size change, no
+message.
+
+Measure it first (`tools\tmp\res_change_probe.py`, with the virtual display really attached):
+
+```
+set_mode \\.\DISPLAY10 1920x1080@60  -> rc =  0  SUCCESSFUL   1920x1080@60
+set_mode \\.\DISPLAY10 2280x1080@60  -> rc = -2  BADMODE      1920x1080@60   (unchanged)
+set_mode \\.\DISPLAY10 1920x1080@75  -> rc = -2  BADMODE      1920x1080@60   (unchanged)
+set_mode \\.\DISPLAY10 3200x2136@120 -> rc =  0  SUCCESSFUL   3200x2136@120
+```
+
+`-2` is `DISP_CHANGE_BADMODE`. Then look at what the driver actually has
+(`tools\tmp\vdd_modes_probe.py` plus `wd.available_modes()`):
+
+```
+C:\VirtualDisplayDriver\vdd_settings.xml   11 <resolution> rows × 5 <g_refresh_rate> values
+                                     ->    55 modes (MAX_TARGET_MODES = 90; room for 7 more rows)
+sizes:  1280x720 1600x900 1920x1080 1920x1200 2160x1080 2400x1080
+        2560x1440 2560x1600 3200x1440 3200x2136 3840x2160
+rates:  30 60 90 120 144
+```
+
+Meanwhile `RESOLUTIONS` in `host\app.py` is **twenty-two hard-coded sizes**, **eleven** of which the
+driver does not have at all:
+
+```
+1600x720   1920x864   2000x1200  2280x1080  2340x1080  2412x1080
+2700x1224  2712x1220  2800x1260  3040x1440  3120x1440
+```
+
+`75` / `165` / `240` in `HZ_CHOICES` do not exist either. **Half the menu was dead**, and clicking it
+only ever produced `-2`.
+
+**Worse than the mismatch is the silence**, and this layer explains every symptom the owner saw:
+
+1. the "the driver has no such mode" branch in `retarget()` **logged nothing at all**;
+2. `_set_mode_retry()` retried a mode that could never work four times, `sleep(1.0)` + `sleep(0.5)`
+   each — **about nine seconds of nothing**;
+3. and it then called `_recover_capture("display mode changed")` anyway — **restarting ffmpeg**. The
+   picture blinked and came back the same size, so it *looked* like something had been attempted.
+
+**Four changes**:
+
+* `vdd.declared_modes()` (`host\vdd.py`) reads the driver's own settings file and returns the
+  `(sizes, rates)` it will build, or `(None, None)` when there is nothing to read.
+* `app._load_resolutions()` (`host\app.py`) builds **both dropdowns** from that table, falling back to
+  the static list only when there is no driver to ask (that list is now documented as a fallback and
+  nothing more). A saved size the driver cannot produce is replaced with the nearest one it can, and
+  the log says so. It runs in two places: `_build()`, right after the events are bound, and
+  `_bg_done()` — because starting or retargeting may just have written a row into the driver's table.
+* `session._resolve_mode(name, w, h, hz)` settles a request once and for all, returning
+  `(w, h, hz, note, usable)`: an exact hit passes straight through; the same size at another rate takes
+  the nearest rate and says so; a size that is not in the table at all is reported — "The driver cannot
+  offer 2280x1080 (not in its mode table, and it could not be added). Available now: …" — and marked
+  unusable.
+* Unusable now means each caller does its own right thing: `retarget()` logs "显示模式未更改" (display
+  mode unchanged) and returns `False`, **without touching the capture**; `apply_display()` (the
+  Start-casting path) falls back to `wd.best_mode()` and gets a picture up — a picture at a nearby size
+  beats insisting on an exact one. `_set_mode_retry()` also returns immediately on `-2`, so those nine
+  seconds are gone.
+
+The boundaries of `add_resolution()` are pinned down as well: when the driver's table still has room the
+missing size is written into `vdd_settings.xml` marked `auto="1"`, and you are told to **reinstall the
+driver (or reboot)** before it can be used. When the table is full, a row we added ourselves is
+reclaimed — **rows that came with the driver are never touched**.
+
+Measured on real hardware (`tools\tmp\mode_live_test.py`, 19 PASS / 0 FAIL):
+
+```
+apply_display 2280x1080  -> The driver cannot offer 2280x1080 (not in its mode table, and it could not
+                            be added). Available now: 1280x720, 1600x900, 1920x1080, 1920x1200, 2160x1080, …
+                            using 2160x1080@60                 -> SUCCESSFUL
+retarget 2280x1080       -> Display mode unchanged             -> False, capture not restarted, size same
+retarget 3200x2136@120   -> ChangeDisplaySettingsEx SUCCESSFUL -> True, capture restarted
+retarget same mode again -> Mode unchanged, nothing to switch
+retarget 3840x2160@75    -> 3840x2160 does not offer 75 Hz; using 60 Hz -> SUCCESSFUL
+```
+
+### 23.2 Encoders: the menu was asking "was it compiled in?"
+
+The symptom: pick `h264_qsv` or `av1_amf` from the menu and it fails to connect, or quietly falls back to
+a different encoder.
+
+The numbers (`capture.probe_encoder()`, actually encoding a frame with each):
+
+```
+compiled into this ffmpeg: 11
+  av1_amf  av1_nvenc  av1_qsv  h264_amf  h264_nvenc
+  h264_qsv  hevc_amf  hevc_nvenc  hevc_qsv  libx264  libx265
+
+survived a real frame: 7
+  h264_nvenc  hevc_nvenc  av1_nvenc  h264_amf  hevc_amf  libx264  libx265
+
+the four that died:
+  h264_qsv  hevc_qsv  av1_qsv  -> Error creating a MFX session: -9   (no Intel GPU here)
+  av1_amf                      -> the Radeon 610M has no AV1 encoder block
+  libsvtav1                    -> not in this build at all
+```
+
+Root cause: `app._load_encoders()` used `list_hardware_encoders()`, which answers **"what was this
+ffmpeg build compiled with?"**; `available_encoders()`, added in 1.6.0, answers **"what actually runs on
+this machine?"**. The second one arrived and the first was never swapped out, so the menu kept listing
+all eleven. The docstring in `host\capture.py` had already spelled out the difference and even said
+"Use available_encoders() when the answer has to be trustworthy" — written down correctly, just never
+wired up.
+
+The fix: the menu is filled in two passes. The first is instant (the compiled list, so there is something
+to choose the moment the window opens); the second **test-encodes a frame with each one in the
+background** and rebuilds the menu from the survivors, naming the casualties in the log: "Not offered:
+these cannot encode on this machine: h264_qsv, hevc_qsv, av1_qsv, av1_amf". If the current selection is
+one of them it moves to a working encoder by itself, and a probe that fails entirely does not empty the
+menu.
+
+### 23.3 Found on the way: a test that had not passed since 1.6.0
+
+Running the full suite is what revealed that `tools/tmp` holds **31** `*_test.py` files (33 by the time
+this release was wrapped up), not the 22 that had been quoted for three releases. And of those 31, `tools\tmp\update_test.py` was dying on:
+
+```
+File "tools\tmp\update_test.py", line 111, in main
+  body = u.WAIT_CMD.format(pid=4321, installer=..., flags=..., restart=...)
+KeyError: 'cleanup'
+```
+
+`WAIT_CMD` in `host\update.py` gained a `{cleanup}` placeholder in 1.6.0 (the "delete the installer once
+it is installed" requirement) and the test was never updated. So **that test failed every single run
+since 1.6.0**, and the "twenty-two scripts, all green" quoted until now never included it — **nobody
+counted with a tool**.
+
+It is fixed, and it gained three assertions it should always have had: the installer delete must come
+after `start "" /wait` (deleting it early is exactly how a half-applied update happens), the script's
+own `del "%~f0"` must come last, and `delete_installer=False` must keep the download.
+
+That script's section 6 really does download the 34.8 MB v1.5.1 installer (35–65 seconds), which is why
+the suite looks stuck. It is not stuck; it is testing a real download and a real checksum.
+
+### 23.4 And another test that could never have passed, from the day it was written
+
+`tools\tmp\drag_test.py` came up red in every full run, while `gesture_test` — the same phone, doing a
+real double tap / long press / drag / jitter — was green. The test itself was wrong, in two places:
+
+* It hard-coded a 3200x2136 screen and a 60 px margin. The screen size happens to be right (that is the
+  landscape `logicalFrame`), but the app centres the button with `m = dp(9) + dp(21)`, which at density
+  352 is **66 px**, not 60 — a 7 px miss. Survivable, because the button's hit radius is
+  `gearR * 1.35` ≈ 62 px, so the press still landed on it.
+* The fatal one: it dragged **13 px**. `HudView.onTouchEvent` contains a deliberate anti-slip rule:
+
+  ```java
+  if (Math.abs(e.getX() - gearCx) + Math.abs(e.getY() - gearCy) > dp(9)) {
+      moved = true;
+  }
+  ```
+
+  A finger has to travel 9dp (19.8 px at density 352) before the gesture counts as a drag; anything
+  shorter is routed to `onGear()`, which **opens the settings sheet**. 13 px never reaches 19.8 px, so
+  that `input swipe` became a tap: the `drag_moved` screenshot jumped from 69650 bytes to 305951 bytes
+  (the sheet was open) while the button did not move at all.
+
+  And even if it had been classified as a drag it would not have helped: 13/3068 ≈ **0.004**, against
+  an assertion asking for **> 0.1**.
+
+So that assertion was **unreachable by construction** — it could only hold if the button snapped
+somewhere on release, and this button does not snap. `tools\tmp\drag_probe.py` measured it directly on
+the same button:
+
+| swipe | fraction afterwards | movement |
+| --- | --- | --- |
+| 13 px | (0.14596808, 0.74855125) | **0.0000** |
+| 700 px | (0.37389198, 0.74855125) | **0.2279** (expected 700/3068 = 0.2282) |
+
+There was a third trap, the sneakiest one: the position was read with `gear=([-\d.]+),([-\d.]+)`, and
+**Java prints small floats in scientific notation**. With the button parked against the top edge the log
+reads:
+
+```
+10-16 23:52:07.437 I DroidExtend: main  启动 v1.6.3  fill=true hud=true log=false gear=0.99984306,2.8117592E-4
+```
+
+So the button is really at **(0.99984306, 0.00028117592)** — the top-right corner, which is exactly the
+default `Prefs` hands back for `gearX`/`gearY` (1 and 0). That pattern captured `2.8117592`, so the test
+computed `sy = 66 + 2.8117592 × 2004 ≈ 5701` — **a press 3565 px below the bottom of the screen** — and the
+swipe touched nothing, after which the test reported "the button did not move".
+
+The pattern now accepts an exponent, the parsed value is clamped into `[0, 1]`, and the drag direction is
+chosen from whichever side the button has room on (it used to always drag up and to the right, which from
+the top-right corner is nowhere). Same phone, same button:
+
+```
+gear at boot: (0.99984306, 0.00028117592)
+drag (3134,67) -> (2434,417)
+moved x 0.2291 (asked 0.2282), y 0.1754 (asked 0.1747)
+gear restored to: (1.0, 0.0)
+RESULT: PASS
+```
+
+**The product was right; the test was wrong.** The fix: read the screen size out of the `screencap` PNG
+header, compute the margin from `wm density`, drag 700 px, assert the x and y fractions separately, and
+put the button back afterwards. `drag_test.py` now reports `RESULT: PASS`.
+
+### 23.5 The frozen-build check tripped over a third version of the same trap
+
+The build is `--onedir`: the program's own modules sit zlib-compressed inside the PYZ embedded in the
+exe, so **a raw byte scan of `DroidExtend.exe` finds nothing at all**. The first `frozen_check_test.py`
+did exactly that and reported all seven names MISSING, including the version string `1.6.3`.
+
+Switching to `PyInstaller.archive.readers.CArchiveReader` tripped a second one: the embedded archive is
+named **`PYZ.pyz`**, not the older `PYZ-00.pyz`; and the **entry module `app` is not in the PYZ at all** —
+it is a separate CArchive record (`marshal.loads(car.extract("app"))`). Looking only in the PYZ reports
+`No entry named 'app' found`, which reads as "the UI code was not packaged" when it is right there.
+
+This is the third time the same shape of mistake has appeared in this project: **a tool reporting False
+does not mean the artefact lacks it**. Constants live in `co_consts`, function and global names live in
+`co_names`, and modules live in both the PYZ and the CArchive.
+
+### 23.6 Verification
+
+| Script | Covers | Result |
+| --- | --- | --- |
+| `tools\tmp\mode_menu_test.py` | mode-table parsing / real Tk menu / fallback / `_resolve_mode` / BADMODE short-circuit / encoder menu / real `add_resolution` into a temp XML / source guards | **76 PASS** |
+| `tools\tmp\mode_live_test.py` | real virtual display, real `ChangeDisplaySettingsEx` | **19 PASS** |
+| `tools\tmp\frozen_check_test.py` | opens the PYZ and CArchive inside the exe, looks for the new code | **0 MISSING** |
+
+Full regression: **33 scripts, all green, zero non-zero exits**. The ones that run against a real phone
+or a real artefact:
+
+| Script | What it runs | Result |
+| --- | --- | --- |
+| `tools\tmp\gesture_test.py` | real phone: double tap / long press / drag / jitter | ALL OK |
+| `tools\tmp\drag_test.py` | real phone: drag the settings button away, restart, see if it stayed | RESULT: PASS |
+| `tools\tmp\touch_test.py` | real phone: touch coordinates, point by point | 25 PASS / 0 FAIL |
+| `tools\tmp\double_click_test.py` | real phone: double tap | 27 PASS / 0 FAIL |
+| `tools\tmp\touch_batch_test.py` | real phone: batched touches | 23 passed, 0 failed |
+| `tools\tmp\update_test.py` | a real 34.8 MB v1.5.1 installer download and a real checksum | RESULT: PASS |
+
+Assertion counts for the rest: `i18n_app_test` 83, `mode_menu_test` 76, `update_extras_test` 62,
+`anim_test` 51, `tray_app_test` 47, `keepalive_test` 46, `notice_test` 37, `terms_test` 34,
+`privacy_test` 32, `install_dir_test` 23, `log_keep_test` 23, `privacy_layout_test` 23,
+`settings_bom_test` 23, `tray_test` 22, `log_toc_test` 19 (table-of-contents anchors),
+`mode_live_test` 19, `tray_gui_test` 16, `frozen_check_test` 0 MISSING; and `datadir_test`,
+`db_roundtrip_test`, `diagnose_test`, `mode_budget_test`, `orphan_cleanup_test`, `retarget_test`,
+`toast_test`, `upd_ui_test`, `vdd_path_test` each PASS.
+
+### 23.7 Lessons
+
+* **"I already fixed that" and "it works for the user" are two different claims.** 1.6.0 added
+  `available_encoders()` and never changed the call site, so nothing was fixed; and the acceptance test
+  called `available_encoders()` directly — **the test exercised the new function, not the function the
+  UI actually used**. For this class of bug, walk the *call sites*, do not just admire the new function.
+* **Count with a tool before quoting a number.** "Twenty-two scripts, all green" was repeated for three
+  releases; there are 31 (33 once this release's new ones are added), and one of them was red. The 22 was
+  presumably counted by hand once.
+* **Silent failure costs more than failure.** A failed mode change needed one log line. Because it was
+  silent the owner saw "nothing happened" and reasonably concluded the whole feature was fake. A failure
+  path owes three things: **what happened, why, and what still works**.
+* **Doing *something* after a failure makes it look like a different bug.** The mode never changed, yet
+  ffmpeg was restarted; the picture blinked, so the symptom went from "no reaction" to "flickers and
+  stays the same", which is harder to trace. Now `retarget()` returns without touching the capture.
+* **A tool reporting False does not mean the artefact lacks it** (third time). Confirming with a second
+  reading is cheaper than concluding.
+* **When a test has been red for a long time, suspect the test first.** `drag_test` asserted that a
+  13 px drag moves the button by more than 0.1 — but the app deliberately requires 9dp (19.8 px) before
+  it calls a gesture a drag, and the button does not snap, so **no input could ever satisfy that
+  assertion**. A permanently red case desensitises everyone to the whole regression report, which is
+  worse than not having it; either make it pass or delete it and say why.
+
+---
+
+*This log was written by an AI coding agent. All of the project's code was written by it as well.*

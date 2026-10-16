@@ -27,8 +27,9 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 > ### 🤖 The code in this repo was written by AI
 >
 > **Every line of source was written by an AI coding agent** — inside **DeepSeek Harness**, using the
-> **deepseek-flash** model, written from scratch in a handful of sessions on 2026-10-11; every release since
-> (currently 1.5.1) has been maintained by it in this same repository.
+> **deepseek-flash** model, written from scratch in a handful of sessions between 2026-10-10 and
+> 2026-10-16; every release since
+> (currently 1.6.3) has been maintained by it in this same repository.
 > The human ([@Blank2007](https://github.com/Blank2007)) supplies the requirements, plugs in a real device, clicks
 > "Yes" when admin rights are needed, and signs off on the result.
 >
@@ -45,22 +46,22 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 | 🖥️ **A real extended desktop** | Not mirroring. A new display shows up under `Win+P`, windows can be dragged onto it, and the mouse can click right on it |
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
 | ⚡ **Low latency** | Measured end to end at **5–11 ms** (from the host grabbing a frame to the phone decoding it); it was 31–42 ms before the fix |
-| 👆 **Reverse control** | Taps / drags / two-finger scrolling / two-finger tap = right click on the phone are injected straight into Windows |
+| 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
 | 🧹 **Unplug the cable and it's gone** | Hit stop or pull the cable and the virtual display is removed from the system immediately — no ghost monitor left behind |
 | 🎛️ **Fully hardware-accelerated pipeline** | `ddagrab` (desktop capture) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU |
 | 📦 **Works out of the box** | A 34 MB installer with ffmpeg / adb / the driver / the APK all inside — nothing else to prepare after installing |
 | 🔄 **In-app updates** | "Check for updates" downloads the new version right there in the app and verifies size / SHA256 / file format — **if verification fails, it doesn't install**; no browser required |
 
 > **Just want the ready-made binaries?**
-> * Installer ⬇️ **[DroidExtend-Setup-1.5.1.exe](https://github.com/Blank2007/DroidExtend/releases/latest)** (35 MB)
-> * Phone app ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)** (186 KB)
+> * Installer ⬇️ **[DroidExtend-Setup-1.6.3.exe](https://github.com/Blank2007/DroidExtend/releases/latest)** (35 MB)
+> * Phone app ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)** (206 KB)
 >
 > You can also grab them from the [Releases](https://github.com/Blank2007/DroidExtend/releases) page.
 > Note that the installer's **filename carries the version number**, so the link above points at the releases page
 > rather than a direct download. This repository holds source only — the binary dependencies (ffmpeg, adb, the
 > Android SDK, the virtual display driver) add up to 370 MB and are not checked in.
 
-### What changed in each release
+## What changed in each release
 
 That lives in **[CHANGELOG.en.md](CHANGELOG.en.md)** (English) and its Chinese original
 **[开发日志.md](开发日志.md)** — one section per version, with the measurements taken at the
@@ -71,7 +72,7 @@ This document only covers how to use it.
 
 ## 0. Install (recommended — just keep clicking Next)
 
-Double-click **`DroidExtend-Setup-1.5.1.exe`** → keep clicking "Next" all the way through.
+Double-click **`DroidExtend-Setup-1.6.3.exe`** → keep clicking "Next" all the way through.
 **The very first page is "Select install location"**; it defaults to the directory below — click "Browse…" next to it
 to put it somewhere else.
 
@@ -145,12 +146,12 @@ frame rate.
 | Item | Description |
 | --- | --- |
 | **Mode** | `拓展屏` (extend): create a new virtual display and grow the desktop; `镜像` (mirror): duplicate an existing display as-is |
-| **Resolution / refresh rate** | The virtual display's real mode. The driver supports 1280×720 ~ 3840×2160, 8 presets × 30/60/90/120/144 Hz, plus custom width and height |
+| **Resolution / refresh rate** | The virtual display's real mode. **The menu lists exactly the modes the virtual display driver has** — the driver builds its mode table from every `<resolution>` row in `vdd_settings.xml` (11 of them here, × 30/60/90/120/144 Hz), and Windows rejects anything outside that table with `DISP_CHANGE_BADMODE`. Custom width and height still work |
 | **Frame rate fps** | Encoding frame rate, 24 ~ 144 |
 | **Bitrate cap Mbps** | Upper bound on the encoding bitrate; under VBR it's a ceiling, not a constant |
 | **Rate control** | `VBR` (quality first — a static desktop uses almost no bandwidth) / `CBR` (constant bitrate, steadier on fast-moving content) |
 | **Quality Q** | Lower is better quality and higher bitrate. `18~20` is essentially visually lossless; from `24` up you can see blocking |
-| **Encoder** | Auto-detected; available on this machine: `h264_nvenc` (recommended), `hevc_nvenc`, `h264_amf`, `libx264` |
+| **Encoder** | Every entry is **actually test-encoded** before it is offered. Available here: `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` (NVIDIA), `h264_amf` / `hevc_amf` (AMD), `libx264` / `libx265` (pure CPU fallback). Ones that are compiled in but cannot run on this machine (`*_qsv` and `av1_amf` here) are removed from the menu, and the log says so |
 | **Capture** | `auto` picks ddagrab (Desktop Duplication API, zero-copy into NVENC); switch to gdigrab on older GPUs or if something misbehaves |
 | **Screen position** | Place the virtual display to the right / left / above / below the primary screen |
 | **Test the USB cable speed** | Measures how many Mbps this cable can actually do and clamps the bitrate cap to a safe value (stop the stream first for a more accurate reading) |
@@ -166,12 +167,31 @@ as real mouse events:
 
 | Gesture | Effect |
 | --- | --- |
-| One-finger tap / drag | Left click / left-button drag |
+| One-finger tap | Left click |
+| Two taps in a row | Left double click |
+| One-finger drag | Left-button drag (must clear the dead zone first, see below) |
+| One-finger hold for half a second | Right click |
 | Two-finger vertical swipe | Scroll wheel |
 | Two-finger quick tap | Right click |
 
+**Double click**: Windows only calls two clicks a double click when both land inside the same
+4 × 4 pixel box — a number sized for a mouse, which a fingertip can never hit. So the host
+**snaps the second press onto the first** (using the system's double-click time, half a second by
+default, with a tolerance of about 58 px), and the phone releases a tap at the point it went down
+rather than wherever the finger had drifted to. Three taps in a row work too.
+
+**Touch dead zone**: a finger always wobbles a few pixels as it lands, and ignoring that makes
+**every click arrive as a tiny drag**. So a one-finger move has to clear the system's own touch
+threshold before it counts as a drag — until then not a single move event is sent. If the finger
+moves during the half-second hold, the long press is cancelled and becomes a drag instead.
+
+**Drags are paced to the frame rate**: position updates go out at most once every 16 ms (one frame
+at 60 fps) — a move faster than the next frame is one nobody can see, so the stale intermediate
+positions are dropped and **only the newest one is sent** (the host likewise injects only the newest
+one). But **not one event is ever dropped** — down, up, right click and scroll all get through.
+
 It runs over a **second adb reverse tunnel** (`tcp:27184`), so it never interferes with the video. The phone
-normalizes touch points against the image's aspect ratio and sends 7-byte records; the host injects them with
+normalizes touch points against the image's aspect ratio and sends 9-byte records; the host injects them with
 `SendInput` in **absolute coordinates across the whole virtual desktop** — so when a touch lands on the virtual
 display, Windows treats it as a real mouse on that display.
 
@@ -272,6 +292,63 @@ side it showed up as "accumulate a batch, then render it all at once" (the `Rend
 in logcat is exactly that).
 It now uses `os.read(p.stdout.fileno(), 65536)`, which takes data the moment it's available.
 
+### Diagnosing stutter, and why GPU usage looks high
+
+**First work out which stage is struggling.** Turn on the status overlay on the phone; it shows
+`fps` and `latency` live:
+
+* `fps` low, `latency` normal → the **USB cable** is out of bandwidth. Run "Measure the cable speed"
+  on the PC; below 40 Mbps, replace the cable (on the same phone we measured a 40× spread:
+  13.7 Mbps ↔ 597 Mbps).
+* `fps` normal, `latency` high (sustained > 80 ms) → the encoder or decoder is queueing. Pick a
+  lighter encoder (`h264_nvenc` is the fastest on our machine), or drop to 30 fps.
+* Both numbers fine but the image still stutters → the phone is thermal-throttling; see "Phone side".
+* Even the PC's own mouse starts to lag → the GPU is saturated by something else; see below.
+
+**High GPU usage is expected, and it follows directly from the virtual screen.** The virtual screen
+is not a real panel, but the Windows desktop compositor (DWM) dutifully composites it like one —
+the more pixels and the higher the refresh rate, the more it has to composite every frame. On top of
+that, `ddagrab` (desktop duplication) pulls frames out of the GPU and the encoder reads them back
+from it again. All of that lands on the graphics card, so a few percent to a low-teens percent of
+steady GPU usage in Task Manager is by design, not a bug.
+**Because of the virtual screen, GPU usage may be higher than you are used to.**
+
+* To bring it down: **drop the resolution first, then the refresh rate** — the two multiply.
+* Once the GPU really is saturated the virtual screen will start dropping frames. A different encoder
+  will not help then; only fewer pixels will.
+* `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` use the dedicated encoder block on the card (NVENC) and do
+  not compete with 3D rendering for compute. If you are worried about gaming, choose these three and
+  not `libx264` (that one is pure CPU encoding).
+* For what it's worth, the virtual screen's refresh rate does not have to match the primary display's.
+  A 300 Hz primary with a 60 Hz virtual screen is fine, and cheaper.
+* Do not move the virtual screen with third-party display tools. This program remembers the position
+  itself, and an outside change is simply overwritten on the next launch.
+
+**Phone side**: if the phone starts dropping frames as soon as it gets warm, the system is almost
+certainly throttling. Charging over the cable makes it warmer, faster. You can:
+
+* drop to 30 fps (in most content you will not see the difference);
+* drop the resolution to 720p;
+* exempt this app from battery optimisation in the phone's own settings (the app's settings panel has
+  a button that jumps straight there).
+
+**On "I changed the resolution and nothing happened"**: changing resolution / refresh rate / position
+now applies **immediately** to a running virtual screen — no need to stop and restart. The program
+retries up to four times and **judges success by the mode that actually took effect**, because Windows
+briefly locks the display configuration while a mode change is in flight; the first attempt or two
+failing is normal. If it never takes effect, check that "Follow the phone's resolution" is not ticked —
+that option overrides your own choice.
+
+**Why picking a size used to do nothing at all**: the virtual display driver does not accept arbitrary
+sizes — it multiplies every `<resolution>` row in `vdd_settings.xml` by every refresh rate into one flat
+mode table. A size outside that table comes back from `ChangeDisplaySettingsEx` as
+`DISP_CHANGE_BADMODE` (-2) and the picture does not move. The old menu listed twenty-two hard-coded
+sizes, eleven of which had no mode row behind them. The menu is now built from the driver's own table,
+so a size it cannot produce is not offered; and if a request still misses, the log says the driver does
+not have it — and the program no longer **waits nine seconds retrying, or restarts the picture for a
+mode that never existed**. When the driver's table still has room, the missing size is written into
+`vdd_settings.xml` and you are told to reinstall the driver (or reboot) to use it.
+
 ---
 
 ## 4. Directory layout
@@ -285,7 +362,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← only needed if you changed the phone-side Java code
 ├─ dist/
 │   ├─ DroidExtend.apk           ← phone-side package
-│   └─ DroidExtend-Setup-1.5.1.exe ← Windows installer (35 MB)
+│   └─ DroidExtend-Setup-1.6.3.exe ← Windows installer (35 MB)
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← Inno Setup script for the installer
 ├─ host/                          ← Windows side (Python)
