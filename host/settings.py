@@ -49,19 +49,50 @@ KEYS = (
     "width", "height", "hz", "fps", "bitrate_mbps", "rate_control", "quality",
     "encoder", "preset", "backend", "position", "mode", "draw_mouse",
     "install_apk", "match_phone",
+    # 1.6.0 -- position="custom" needs somewhere to keep the coordinates.
+    "pos_x", "pos_y",
 )
 # Extra, non-cfg keys.
-EXTRA = ("window", "check_updates", "custom_res")
+EXTRA = (
+    "window", "check_updates", "custom_res",
+    # 1.6.0 -- choices that belong to the shell rather than to one stream.
+    "language",          # "auto" / "zh" / "en", see i18n.resolve
+    "privacy_accepted",  # version string of the notice the user agreed to
+    "tray_on_close",     # closing the window hides to the tray instead of exiting
+    "autostart",         # start with Windows
+    "update_dir",        # where to keep the downloaded installer ("" = %TEMP%)
+    "delete_installer",  # remove the installer once it has been applied
+    "animations",        # fade windows and flicker controls; see anim.py
+)
+
+_EXTRA_DEFAULTS = {
+    "window": "",
+    "check_updates": True,
+    "custom_res": "",
+    "language": "auto",
+    "privacy_accepted": "",
+    "tray_on_close": True,
+    "autostart": False,
+    "update_dir": "",
+    "delete_installer": True,
+    "animations": True,
+}
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}
+_TYPES.update({k: type(v) for k, v in _EXTRA_DEFAULTS.items()})
 
 
 def load():
     """Return the full settings dict: defaults, overlaid with whatever is on disk."""
     out = {k: DEFAULTS[k] for k in KEYS if k in DEFAULTS}
-    out.update({"window": "", "check_updates": True, "custom_res": ""})
+    out.update(_EXTRA_DEFAULTS)
     try:
-        with open(path(), "r", encoding="utf-8") as f:
+        # utf-8-sig, not utf-8: settings.json is a file people are invited to
+        # look at, and Notepad (and plenty of other editors) save UTF-8 *with* a
+        # BOM.  A BOM makes json.load raise, which used to mean "corrupt" and
+        # silently threw every setting away.  utf-8-sig reads the BOM-less case
+        # exactly the same way.
+        with open(path(), "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         return out

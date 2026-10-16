@@ -14,8 +14,9 @@ import subprocess
 import sys
 import time
 
-from paths import ROOT, TOOLS, data_dir, popen
+import i18n
 
+from paths import ROOT, TOOLS, data_dir, popen
 INSTALL_SCRIPT = os.path.join(TOOLS, "vdd_install.ps1")
 VDD_SRC = os.path.join(TOOLS, "vdd", "vdd25", "VirtualDisplayDriver")
 VDD_NEF = os.path.join(TOOLS, "vdd", "nefcon", "x64", "nefconw.exe")
@@ -172,11 +173,13 @@ def install(elevate=True, log=None):
     """
     log = log or (lambda m: None)
     if not stage_present():
-        return False, "驱动文件缺失（tools\\vdd\\vdd25\\VirtualDisplayDriver）"
+        return False, i18n.t("驱动文件缺失（tools\\vdd\\vdd25\\VirtualDisplayDriver）",
+                             "driver files missing "
+                             "(tools\\vdd\\vdd25\\VirtualDisplayDriver)")
     if not os.path.isfile(INSTALL_SCRIPT):
-        return False, "安装脚本缺失: %s" % INSTALL_SCRIPT
+        return False, i18n.t("安装脚本缺失: %s", "install script missing: %s") % INSTALL_SCRIPT
     if not os.path.isfile(VDD_NEF):
-        return False, "nefcon 缺失: %s" % VDD_NEF
+        return False, i18n.t("nefcon 缺失: %s", "nefcon missing: %s") % VDD_NEF
 
     # The log lives in the data directory, which is writable by definition and is
     # where the user is told to look.  An elevated child gets its own console, so
@@ -198,7 +201,8 @@ def install(elevate=True, log=None):
         try:
             boot = _write_elevator(INSTALL_SCRIPT, args)
         except OSError as e:
-            return False, "无法准备提权脚本: %s" % e
+            return False, i18n.t("无法准备提权脚本: %s",
+                                 "could not prepare the elevation script: %s") % e
         cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", boot]
         log("正在请求管理员权限（请在弹窗中点击“是”）…")
 
@@ -209,9 +213,9 @@ def install(elevate=True, log=None):
         text = (out or b"").decode("utf-8", "replace")
         code = p.returncode
     except subprocess.TimeoutExpired:
-        return False, "安装超时"
+        return False, i18n.t("安装超时", "the install timed out")
     except Exception as e:
-        return False, "安装启动失败: %s" % e
+        return False, i18n.t("安装启动失败: %s", "could not start the install: %s") % e
 
     if os.path.isfile(log_path):
         try:
@@ -222,12 +226,19 @@ def install(elevate=True, log=None):
 
     log("安装脚本退出码 = %s" % code)
     if "canceled by the user" in text or code == 1223:
-        return False, "UAC 被取消 —— 需要点“是”才能安装虚拟显示器驱动。\n\n" + text
+        return False, i18n.t("UAC 被取消 —— 需要点“是”才能安装虚拟显示器驱动。\n\n",
+                             "The UAC prompt was cancelled -- you have to click "
+                             "\"Yes\" to install the virtual display driver.\n\n") + text
     if code == 2:
-        return False, "安装脚本检测到没有管理员权限。\n\n" + text
+        return False, i18n.t("安装脚本检测到没有管理员权限。\n\n",
+                             "The install script found no administrator "
+                             "rights.\n\n") + text
     if code == 3:
-        return False, ("安装脚本找不到驱动文件或 nefcon。\n"
-                       "这通常意味着安装不完整，重装一次 DroidExtend 即可。\n\n" + text)
+        return False, (i18n.t("安装脚本找不到驱动文件或 nefcon。\n"
+                              "这通常意味着安装不完整，重装一次 DroidExtend 即可。\n\n",
+                              "The install script cannot find the driver files or "
+                              "nefcon.\nThat usually means an incomplete install -- "
+                              "installing DroidExtend again fixes it.\n\n") + text)
     ok = code == 0 and "=== VDD install done ===" in text
     return ok, text
 
@@ -255,6 +266,42 @@ def mode_room(text):
     per = max(1, len(rates))
     rows = len(re.findall(r"<resolution(?:\s[^>]*)?>.*?</resolution>", text, re.S))
     return max(0, MAX_TARGET_MODES // per - rows), per
+
+
+def declared_modes():
+    """The modes the driver will build, read straight from its settings file.
+
+    Returns ``(sizes, rates)`` where *sizes* is a sorted list of ``(w, h)`` and
+    *rates* a sorted list of ints, or ``(None, None)`` when the file cannot be
+    read at all.
+
+    Why this exists: the form used to offer a fixed list of twenty-two sizes
+    while the driver only builds a mode table from the eleven rows in this file.
+    Every size outside that table is rejected by Windows with
+    DISP_CHANGE_BADMODE, so picking one did nothing at all -- which is exactly
+    what "改了分辨率还是没变化" was.  ``win_display.available_modes()`` answers
+    the same question from the live display, but this one is readable before
+    the virtual display has been attached.
+    """
+    path = settings_path()
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None, None
+    sizes = set()
+    for row in re.findall(r"<resolution(?:\s[^>]*)?>(.*?)</resolution>", text, re.S):
+        w = re.search(r"<width>\s*(\d+)", row)
+        h = re.search(r"<height>\s*(\d+)", row)
+        if w and h:
+            sizes.add((int(w.group(1)), int(h.group(1))))
+    rates = sorted({int(r) for r in
+                    re.findall(r"<g_refresh_rate>\s*(\d+)", text)})
+    if not sizes:
+        return None, None
+    return sorted(sizes), rates
 
 
 def add_resolution(width, height, hz=60):
@@ -314,9 +361,12 @@ def add_resolution(width, height, hz=60):
 
 def summary_line(st):
     return {
-        "missing": "未准备驱动文件",
-        "download": "驱动文件就绪，尚未安装",
-        "staged": "已复制到 C:\\VirtualDisplayDriver，等待安装设备",
-        "node": "设备节点存在，但屏幕未激活",
-        "ready": "虚拟显示器已就绪",
+        "missing": i18n.t("未准备驱动文件", "driver files not staged"),
+        "download": i18n.t("驱动文件就绪，尚未安装",
+                           "driver files ready, not installed yet"),
+        "staged": i18n.t("已复制到 C:\\VirtualDisplayDriver，等待安装设备",
+                         "copied to C:\\VirtualDisplayDriver, waiting for the device"),
+        "node": i18n.t("设备节点存在，但屏幕未激活",
+                       "device node present, but the screen is not active"),
+        "ready": i18n.t("虚拟显示器已就绪", "virtual display ready"),
     }.get(st["state"], st["state"])

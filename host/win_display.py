@@ -12,6 +12,8 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
+import i18n
+
 user32 = ctypes.windll.user32
 
 QDC_ALL_PATHS = 0x00000001
@@ -263,6 +265,7 @@ def active_paths(paths=None):
 # ---------------------------------------------------------------------------
 
 ENUM_CURRENT_SETTINGS = 0xFFFFFFFF
+ENUM_REGISTRY_SETTINGS = 0xFFFFFFFE
 CDS_UPDATEREGISTRY = 0x00000001
 CDS_TEST = 0x00000002
 CDS_FULLSCREEN = 0x00000004
@@ -418,11 +421,7 @@ def desktop_rect(device_name):
 def set_mode(device_name, width, height, hz=0, x=None, y=None, apply_=True):
     """Change resolution/refresh (and optionally position) of a display."""
     device_name = _devname(device_name)
-    dm = DEVMODEW()
-    dm.dmSize = ctypes.sizeof(dm)
-    if not user32.EnumDisplaySettingsExW(device_name, ENUM_CURRENT_SETTINGS,
-                                         ctypes.byref(dm), 0):
-        raise OSError(f"EnumDisplaySettingsEx failed for {device_name}")
+    dm = _base_mode(device_name)
     dm.dmPelsWidth = width
     dm.dmPelsHeight = height
     dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT
@@ -444,16 +443,36 @@ def _blank_mode():
     return dm
 
 
+def _base_mode(device_name):
+    """A DEVMODE for this display, live if it has one, else the stored one.
+
+    ENUM_CURRENT_SETTINGS fails outright for a display that is switched off --
+    which is exactly the state ours is in the moment it has been detached.  So
+    the old "ask for the live settings and raise if that fails" made both
+    attach() and set_mode() unable to switch it back on: the first fell back to
+    a hard-coded 1920x1080 the driver may not offer, the second just raised.
+    ENUM_REGISTRY_SETTINGS still knows the mode Windows last stored, and that
+    is what the driver comes back at anyway.
+    """
+    for flag in (ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS):
+        dm = _blank_mode()
+        if user32.EnumDisplaySettingsExW(device_name, flag, ctypes.byref(dm), 0):
+            return dm
+    raise OSError("EnumDisplaySettingsEx failed for %s" % device_name)
+
+
 def attach(device_name, enable=True):
-    """Tell Windows to (de)activate a display without changing its mode."""
-    dm = _blank_mode()
+    """Tell Windows to (de)activate a display without changing its mode.
+
+    Enabling uses _base_mode(), so a screen that was switched off comes back at
+    the size it had rather than at a hard-coded 1920x1080 the driver may not
+    even offer.
+    """
     if enable:
-        cur = current_mode(device_name)
-        dm.dmPelsWidth = cur["width"] if cur else 1920
-        dm.dmPelsHeight = cur["height"] if cur else 1080
-        dm.dmDisplayFrequency = cur["hz"] if cur else 60
+        dm = _base_mode(device_name)
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
     else:
+        dm = _blank_mode()
         dm.dmPelsWidth = 0
         dm.dmPelsHeight = 0
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT
@@ -473,23 +492,29 @@ def detach(device_name):
     SDC_TOPOLOGY_INTERNAL was the other candidate, but it switches off every
     non-internal display, so a real second monitor would go down with it.
     Returns True when the display is gone (or already was).
+
+    SDC_SAVE_TO_DATABASE is the difference between "off until reboot" and
+    "off".  Switching the screen *on* goes through ChangeDisplaySettingsEx with
+    CDS_UPDATEREGISTRY, which Windows persists -- so without this flag the two
+    halves disagreed, the switch-on survived a reboot and the switch-off did
+    not, and the virtual screen came back on every boot whether or not
+    DroidExtend was ever started.  That is #10.
     """
     paths, modes = _query(QDC_ONLY_ACTIVE_PATHS)
     keep = [p for p in paths if source_name(p) != device_name]
     if len(keep) == len(paths):
         return True
     if not keep:
-        raise RuntimeError("不能把最后一块屏幕也关掉")
+        raise RuntimeError(i18n.t("不能把最后一块屏幕也关掉",
+                                  "The last remaining screen cannot be turned off"))
     parr = (PATH_INFO * len(keep))(*keep)
+    flags = (SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY | SDC_ALLOW_CHANGES
+             | SDC_SAVE_TO_DATABASE)
     if modes:
         marr = (MODE_INFO * len(modes))(*modes)
-        rc = user32.SetDisplayConfig(len(keep), parr, len(modes), marr,
-                                     SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY
-                                     | SDC_ALLOW_CHANGES)
+        rc = user32.SetDisplayConfig(len(keep), parr, len(modes), marr, flags)
     else:
-        rc = user32.SetDisplayConfig(len(keep), parr, 0, None,
-                                     SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_APPLY
-                                     | SDC_ALLOW_CHANGES)
+        rc = user32.SetDisplayConfig(len(keep), parr, 0, None, flags)
     return rc == 0
 
 
@@ -498,27 +523,91 @@ def extend_topology():
     return user32.SetDisplayConfig(0, None, 0, None, SDC_TOPOLOGY_EXTEND | SDC_APPLY)
 
 
-def find_virtual_display(hints=("mttvdd", "virtual display", "parsec", "idd", "spacedesk")):
+# Adapters that are somebody else's virtual screen.  Acting on one of these
+# means tearing down another product's session -- GameViewer is NetEase UU
+# Remote, which the user runs on this machine, and its ten adapters match the
+# generic "idd" hint just fine.  Ours is identified by hardware id, not by the
+# word "virtual" in a description.
+FOREIGN_IDD = ("gameviewer", "netease", "uu remote", "oray", "todesk",
+               "rustdesk", "sunshine", "apollo", "parsec", "spacedesk")
+OUR_IDD = ("mttvdd", "mtt virtual display")
+
+
+def is_our_display(adapter):
+    """True when this adapter is the MTT Virtual Display Driver we install."""
+    blob = (adapter["id"] + " " + adapter["desc"]).lower()
+    return any(h in blob for h in OUR_IDD)
+
+
+def is_foreign_display(adapter):
+    blob = (adapter["id"] + " " + adapter["desc"]).lower()
+    return any(h in blob for h in FOREIGN_IDD)
+
+
+def find_virtual_display(hints=OUR_IDD + ("virtual display", "idd")):
     """Best guess at the indirect-display adapter's active output, best first.
 
     Ranked rather than merely filtered: this machine also carries ten GameViewer
     (NetEase UU) adapters that match the "idd" hint but never expose a monitor
     subdevice, so a plain "first hit wins" pick hands back \\\\.\\DISPLAY10 - an
-    adapter nothing can be shown on.  Sorting on (attached, has monitors, hint
-    order) keeps a foreign or stale adapter from beating the real one.
+    adapter nothing can be shown on.  Sorting on (hint order, attached, has
+    monitors) keeps a foreign or stale adapter from beating the real one.
+
+    Hint order comes first on purpose.  Sorting on `attached` first meant that
+    whenever UU Remote happened to be running -- its adapter attached, with a
+    monitor -- it outranked our own driver and became "the virtual display",
+    which is exactly the mix-up the user warned about in #10.  Ours is hint 0
+    and always wins; foreign IDD products are dropped outright.
     """
     ranked = []
     for a in enum_adapters():
+        if is_foreign_display(a) and not is_our_display(a):
+            continue
         blob = (a["id"] + " " + a["desc"] + " " +
                 " ".join(m["desc"] + " " + m["id"] for m in a["modes"])).lower()
         for rank, h in enumerate(hints):
             if h in blob:
-                ranked.append((0 if a["attached"] else 1,
-                               0 if a["modes"] else 1,
-                               rank, a))
+                ranked.append((rank,
+                               0 if a["attached"] else 1,
+                               0 if a["modes"] else 1, a))
                 break
     ranked.sort(key=lambda t: t[:3])
     return [t[3] for t in ranked]
+
+
+def active_virtual_displays():
+    """Ours-only: the virtual screens currently switched on.
+
+    Used both to clean up after a crash and to refuse to touch anything that is
+    not ours.
+    """
+    ours = {a["name"] for a in enum_adapters() if is_our_display(a)}
+    return [m for m in live_monitors() if m["name"] in ours]
+
+
+def cleanup_orphans(log=None):
+    """Switch off virtual screens that are on with nothing streaming to them.
+
+    A crash (or a kill from Task Manager) skips the restore in Session.stop(),
+    and the screen stays activated until something takes it down.  Returns the
+    names that were switched off.
+    """
+    targets = [m for m in active_virtual_displays() if not m["primary"]]
+    # Never take the last screen away: if only virtual displays are active,
+    # leaving them alone is strictly better than a black desktop.
+    if len(targets) >= len(live_monitors()):
+        return []
+    gone = []
+    for m in targets:
+        try:
+            if detach(m["name"]):
+                gone.append(m["name"])
+                if log:
+                    log("已关闭残留的虚拟屏 %s" % m["name"])
+        except Exception as e:
+            if log:
+                log("关闭 %s 失败: %s" % (m["name"], e))
+    return gone
 
 
 def set_dpi_aware():

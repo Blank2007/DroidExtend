@@ -21,19 +21,96 @@ import time
 
 from paths import ffmpeg_exe, popen
 
-# codec -> (ffmpeg encoder name, needs nvidia, quality knob)
+import i18n
+
+# What the phone has to decode.  The host sends this in the handshake so the
+# phone can pick the right MediaCodec mime type (video/avc, video/hevc, video/av01).
+CODEC_H264 = "avc"
+CODEC_HEVC = "hevc"
+CODEC_AV1 = "av01"
+
+
+def _enc(label, kind, codec, hw):
+    """One encoder description.
+
+    kind   which family of ffmpeg options to use (nvenc / amf / qsv / software)
+    codec  what the phone must be able to decode
+    hw     hardware encoder, so it needs hardware frames from ddagrab
+    """
+    return {"label": label, "kind": kind, "codec": codec, "hw": hw}
+
+
+# Every encoder we know how to drive.  Which of them this machine actually has
+# is answered at runtime by list_hardware_encoders(); the GUI only offers those.
+# 1.6.0: the list used to stop at H.264 plus one HEVC entry, and the muxer was
+# hard-coded to `-f h264`, so choosing anything else produced a stream the phone
+# could not decode.  That is the bug behind "other codecs simply do not work".
 ENCODERS = {
-    "h264_nvenc": {"label": "NVIDIA NVENC (H.264)", "hw": True, "kind": "nvenc"},
-    "hevc_nvenc": {"label": "NVIDIA NVENC (HEVC)", "hw": True, "kind": "nvenc"},
-    "h264_amf":   {"label": "AMD AMF (H.264)",     "hw": True, "kind": "amf"},
-    "libx264":    {"label": "CPU x264 (兼容性最好)", "hw": False, "kind": "x264"},
+    # NVIDIA
+    "h264_nvenc":  _enc("NVIDIA NVENC · H.264", "nvenc", CODEC_H264, True),
+    "hevc_nvenc":  _enc("NVIDIA NVENC · HEVC",  "nvenc", CODEC_HEVC, True),
+    "av1_nvenc":   _enc("NVIDIA NVENC · AV1",   "nvenc", CODEC_AV1,  True),
+    # AMD
+    "h264_amf":    _enc("AMD AMF · H.264", "amf", CODEC_H264, True),
+    "hevc_amf":    _enc("AMD AMF · HEVC",  "amf", CODEC_HEVC, True),
+    "av1_amf":     _enc("AMD AMF · AV1",   "amf", CODEC_AV1,  True),
+    # Intel Quick Sync
+    "h264_qsv":    _enc("Intel QSV · H.264", "qsv", CODEC_H264, True),
+    "hevc_qsv":    _enc("Intel QSV · HEVC",  "qsv", CODEC_HEVC, True),
+    "av1_qsv":     _enc("Intel QSV · AV1",   "qsv", CODEC_AV1,  True),
+    # CPU
+    "libx264":     _enc(i18n.t("CPU x264（兼容性最好）",
+                               "CPU x264 (best compatibility)"), "x264", CODEC_H264, False),
+    "libx265":     _enc("CPU x265", "x265", CODEC_HEVC, False),
+    "libsvtav1":   _enc("CPU SVT-AV1", "svtav1", CODEC_AV1, False),
 }
+
+# Preference order when the user asks for "auto": hardware first, and H.264
+# before HEVC/AV1 because every Android device since 3.0 decodes it.
+AUTO_ORDER = (
+    "h264_nvenc", "hevc_nvenc", "av1_nvenc",
+    "h264_qsv", "hevc_qsv", "av1_qsv",
+    "h264_amf", "hevc_amf", "av1_amf",
+    "libx264", "libx265", "libsvtav1",
+)
 
 NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"]
 X264_PRESETS = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]
+X265_PRESETS = X264_PRESETS
+
+
+def codec_of(encoder):
+    """The phone-facing codec name for an ffmpeg encoder."""
+    return ENCODERS.get(encoder, ENCODERS["libx264"])["codec"]
+
+
+def encoder_label(encoder):
+    return ENCODERS.get(encoder, {}).get("label", encoder)
+
+
+def pick_encoder(available, want="auto"):
+    """Choose an encoder.
+
+    `want` may be "auto" (best available, hardware first) or a specific name.
+    Returns None when nothing usable is available.
+    """
+    avail = set(available or ())
+    if want and want != "auto":
+        return want if want in avail else None
+    for name in AUTO_ORDER:
+        if name in avail:
+            return name
+    return None
 
 
 def list_hardware_encoders(ffmpeg=None):
+    """Encoders this ffmpeg build *contains*.
+
+    Fast, and not the same question as "will it work here": this build lists
+    h264_qsv / hevc_qsv / av1_qsv, and on a machine with no Intel GPU every one
+    of them dies with "Error creating a MFX session: -9".  Use
+    available_encoders() when the answer has to be trustworthy.
+    """
     ffmpeg = ffmpeg or ffmpeg_exe()
     if not ffmpeg:
         return set()
@@ -48,6 +125,79 @@ def list_hardware_encoders(ffmpeg=None):
         if name in out:
             have.add(name)
     return have
+
+
+def _mux_for(codec):
+    # AV1 uses `obu`: the `av1` muxer refuses a pipe ("pipe:: Invalid argument").
+    return {CODEC_H264: "h264", CODEC_HEVC: "hevc", CODEC_AV1: "obu"}.get(codec, "h264")
+
+
+def probe_encoder(name, ffmpeg=None, timeout=30):
+    """Run one second of test pattern through an encoder and see if it lives.
+
+    This is the only honest check.  A codec can be compiled in, the GPU can
+    advertise it, and the encoder can still refuse to initialise -- QSV without
+    an Intel GPU, AV1 on a card older than Ada, NVENC when the driver session is
+    already saturated.  Returns True only when real bytes came out.
+    """
+    ff = ffmpeg or ffmpeg_exe()
+    if not ff or name not in ENCODERS:
+        return False
+    cfg = {"encoder": name, "fps": 30, "bitrate_mbps": 2, "quality": 30,
+           "rate_control": "vbr", "draw_mouse": False, "gop": 30}
+    try:
+        probe = Capture(cfg, {"left": 0, "top": 0, "width": 320, "height": 240})
+        cmd = probe.command("gdigrab")
+        cut = cmd.index("-c:v")
+    except Exception:
+        return False
+    test = ([ff, "-hide_banner", "-loglevel", "error", "-nostats",
+             "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30", "-t", "1"]
+            + cmd[cut:])
+    try:
+        p = subprocess.run(test, capture_output=True, timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception:
+        return False
+    return p.returncode == 0 and len(p.stdout or b"") > 0
+
+
+_AVAILABLE = None
+
+
+def available_encoders(ffmpeg=None, refresh=False, log=None):
+    """Every encoder that genuinely works on this machine.  Probed once, cached."""
+    global _AVAILABLE
+    if _AVAILABLE is None or refresh:
+        built = list_hardware_encoders(ffmpeg)
+        ok = set()
+        for name in AUTO_ORDER:
+            if name not in built:
+                continue
+            if probe_encoder(name, ffmpeg):
+                ok.add(name)
+            elif log:
+                log("编码器不可用，已排除 / encoder unusable: " + name)
+        _AVAILABLE = ok
+    return _AVAILABLE
+
+
+def best_encoder(cfg, ffmpeg=None, log=None):
+    """The encoder to actually use for this config, with silent fallback.
+
+    A saved choice can stop working (driver update, GPU swap, another program
+    holding all the NVENC sessions).  Rather than failing the whole stream, fall
+    back to the best available one and say so in the log.
+    """
+    avail = available_encoders(ffmpeg, log=log)
+    want = (cfg or {}).get("encoder") or "auto"
+    if want in avail:
+        return want
+    fallback = pick_encoder(avail, "auto")
+    if fallback and fallback != want:
+        if log:
+            log("编码器 %s 当前不可用，改用 %s / falling back" % (want, fallback))
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -235,54 +385,172 @@ def pick_ddagrab_output(rect, ffmpeg=None, log=None):
 
 # ---------------------------------------------------------------------------
 # Annex-B access unit splitting
+#
+# H.264 and HEVC both arrive as start-code separated NAL units and differ only
+# in how the type is packed into the header: H.264 uses one byte with a 5-bit
+# type at bit 0, HEVC two bytes with a 6-bit type at bit 1.  Getting this wrong
+# is not a subtle degradation -- running HEVC through the H.264 reader finds no
+# VCL NAL at all, so every access unit comes back empty and the phone shows
+# nothing.  That is why the splitter needs to know the codec.
+#
+# AV1 is not NAL-based at all; it is split into temporal units further down.
 # ---------------------------------------------------------------------------
 
-def _is_vcl(nal_type):
-    return nal_type in (1, 5)
+_NAL_SPECS = {
+    CODEC_H264: {
+        "hdr": 1,
+        "type": lambda b: b[0] & 0x1F,
+        "vcl": lambda t: 1 <= t <= 5,
+        "key": lambda t: t == 5,            # IDR
+    },
+    CODEC_HEVC: {
+        "hdr": 2,
+        "type": lambda b: (b[0] >> 1) & 0x3F,
+        "vcl": lambda t: t <= 31,
+        "key": lambda t: 16 <= t <= 21,     # BLA_W_LP .. CRA_NUT (all IRAP)
+    },
+}
+
+# AV1 OBU types that matter here.
+_OBU_TEMPORAL_DELIMITER = 2
+_OBU_SEQUENCE_HEADER = 1
 
 
-def _is_key(nal_type):
-    return nal_type == 5
-
-
-def split_access_units(buf):
-    """Split an Annex-B byte stream into whole access units.
-
-    Returns (units, remainder).  A unit is one coded picture plus whatever
-    parameter sets / SEI preceded it - exactly what MediaCodec wants in one
-    input buffer.  Anything after the last complete NAL is left in remainder.
-    """
+def _start_codes(buf):
     starts = []
     i = buf.find(b"\x00\x00\x01")
     while i != -1:
         starts.append(i)
         i = buf.find(b"\x00\x00\x01", i + 3)
+    return starts
+
+
+def _obu_stream(buf):
+    """Walk a raw OBU stream.
+
+    ffmpeg's `av1` muxer refuses a pipe ("pipe:: Invalid argument"), so AV1 is
+    muxed with `-f obu`, which writes bare OBUs with no start codes -- the
+    Annex-B scanner finds nothing in it.  Each OBU is a 1-byte header, an
+    optional extension byte, and an LEB128 length, which is what this walks.
+
+    Yields (obu_type, start, end) for every *whole* OBU, and stops at the first
+    one still arriving.  That is what makes it safe on a live stream: the tail
+    is never half-parsed and then re-parsed as if it were a fresh OBU.
+    """
+    i = 0
+    n = len(buf)
+    while i < n:
+        b0 = buf[i]
+        if b0 & 0x80:                                   # forbidden bit set
+            i += 1
+            continue
+        obu_type = (b0 >> 3) & 0x0F
+        p = i + 1 + (1 if b0 & 0x04 else 0)             # optional extension byte
+        if not (b0 & 0x02) or p >= n:                   # no size field: cannot walk
+            return
+        size = 0
+        shift = 0
+        while True:
+            if p >= n:
+                return
+            byte = buf[p]
+            p += 1
+            size |= (byte & 0x7F) << shift
+            shift += 7
+            if not (byte & 0x80):
+                break
+            if shift > 28:
+                return
+        end = p + size
+        if end > n:
+            return                                      # still arriving
+        yield obu_type, i, end
+        i = end
+
+
+def _split_av1(buf):
+    """Split a raw OBU stream into temporal units.
+
+    A temporal unit opens at OBU_TEMPORAL_DELIMITER, which is the boundary
+    MediaCodec wants.  The key-frame flag lives inside the OBU frame header and
+    is not worth parsing here, so a unit counts as a sync sample when it carries
+    a sequence header -- the AV1 encoders repeat that on key frames, the same way
+    x264's repeat-headers works for H.264.
+    """
+    units = []
+    cur_start = None
+    cur_key = False
+    last_end = 0
+    for obu_type, s, e in _obu_stream(buf):
+        if obu_type == _OBU_TEMPORAL_DELIMITER:
+            if cur_start is not None:
+                units.append((buf[cur_start:last_end], cur_key))
+            cur_start = s
+            cur_key = False
+        elif cur_start is None:
+            cur_start = s                                # stream opened mid-unit
+        if obu_type == _OBU_SEQUENCE_HEADER:
+            cur_key = True
+        last_end = e
+    return units, buf[last_end:]
+
+
+def _nal_info(buf, pos, spec):
+    """(is_vcl, is_key, starts_picture) for the NAL unit starting at `pos`."""
+    hdr = spec["hdr"]
+    p = pos + 3
+    if p + hdr >= len(buf):
+        return False, False, False
+    t = spec["type"](buf[p:p + hdr])
+    if not spec["vcl"](t):
+        return False, False, False
+    sh = p + hdr                     # the slice header starts right after it
+    # A new picture begins at the slice whose first field is zero: H.264
+    # first_mb_in_slice == 0, HEVC first_slice_segment_in_pic_flag == 1.  Both
+    # are the top bit of the first slice-header byte.  Without this test every
+    # slice of a multi-slice picture became an access unit of its own -- measured
+    # 299 units for a 60-frame libx264 clip that really has 60 pictures.
+    first = bool(buf[sh] & 0x80) if sh < len(buf) else False
+    return True, spec["key"](t), first
+
+
+def split_access_units(buf, codec=CODEC_H264):
+    """Split a stream into whole access units.
+
+    Returns (units, remainder).  A unit is one coded picture plus whatever
+    parameter sets / SEI preceded it - exactly what MediaCodec wants in one
+    input buffer.  Anything after the last complete picture is left in
+    remainder, so a half-written picture never reaches the decoder.
+    """
+    if codec == CODEC_AV1:
+        return _split_av1(buf)
+
+    spec = _NAL_SPECS.get(codec) or _NAL_SPECS[CODEC_H264]
+    starts = _start_codes(buf)
     if len(starts) < 2:
         return [], buf
 
     units = []
-    cur_start = starts[0]
-    cur_end = starts[1]
-    cur_vcl = _is_vcl(buf[starts[0] + 3] & 0x1F)
-    cur_key = _is_key(buf[starts[0] + 3] & 0x1F)
-    for k in range(1, len(starts) - 1):
-        s = starts[k]
-        e = starts[k + 1]
-        t = buf[s + 3] & 0x1F
-        if cur_vcl and _is_vcl(t):
-            units.append((buf[cur_start:cur_end], cur_key))
-            cur_start, cur_end, cur_vcl, cur_key = s, e, True, _is_key(t)
-        else:
-            cur_end = e
-            if _is_vcl(t):
-                cur_vcl = True
-                cur_key = cur_key or _is_key(t)
-
-    if cur_vcl:
-        units.append((buf[cur_start:cur_end], cur_key))
-        remainder = buf[starts[-1]:]
+    cur_start = None
+    cur_key = False
+    pending = None            # parameter sets / SEI waiting for their picture
+    for k in range(len(starts) - 1):
+        pos = starts[k]
+        vcl, key, first = _nal_info(buf, pos, spec)
+        if vcl and first:
+            if cur_start is not None:
+                units.append((buf[cur_start:pos], cur_key))
+            cur_start = pending if pending is not None else pos
+            cur_key = key
+            pending = None
+        elif cur_start is None and pending is None:
+            pending = pos
+    tail = starts[-1]
+    if cur_start is not None:
+        units.append((buf[cur_start:tail], cur_key))
+        remainder = buf[tail:]
     else:
-        remainder = buf[cur_start:]
+        remainder = buf[pending:] if pending is not None else buf
     return units, remainder
 
 
@@ -297,6 +565,8 @@ class Capture(object):
         self.cfg = cfg
         self.rect = rect
         self.log = log or (lambda m: None)
+        self.encoder = cfg.get("encoder", "h264_nvenc")
+        self.codec = codec_of(self.encoder)
         self.proc = None
         self._stop = threading.Event()
         self._thread = None
@@ -378,7 +648,9 @@ class Capture(object):
                 # the virtual display's resolution.  start() turns this into a
                 # gdigrab attempt, which is exact.
                 raise RuntimeError(
-                    "无法确定虚拟显示器对应哪个 ddagrab 输出（%s）" %
+                    i18n.t("无法确定虚拟显示器对应哪个 ddagrab 输出（%s）",
+                           "Cannot tell which ddagrab output is the virtual display "
+                           "(%s)") %
                     (", ".join("#%d=%dx%d" % o for o in ddagrab_outputs(ff)) or "一个都没有"))
             native = dict((o[0], (o[1], o[2])) for o in ddagrab_outputs(ff)).get(idx)
             if native and native != (w, h):
@@ -403,6 +675,7 @@ class Capture(object):
                     "-i", "desktop"]
 
         cmd += ["-c:v", enc]
+        codec = self.codec or codec_of(enc)
         # Desktop content is mostly static, so constant-bitrate encoding wastes
         # almost the whole budget stuffing identical frames - measured that way
         # a still test pattern still burned the full 20 Mbps.  Quality-targeted
@@ -410,49 +683,83 @@ class Capture(object):
         # real motion, which is what a USB link can actually carry.
         rc = c.get("rate_control", "vbr")
         q = int(c.get("quality", 20) or 20)
-        if rc == "cbr":
-            ctl = ["-rc", "cbr", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate]
-        else:
-            ctl = ["-rc", "vbr", "-cq", str(q),
-                   "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate]
+        cbr = rc == "cbr"
+        ceiling = ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate]
+        # The profile name depends on the codec: "high" is meaningless to HEVC.
+        # AV1 gets none at all -- `-profile:v main` makes av1_nvenc refuse to
+        # open the encoder ("maybe incorrect parameters such as bit_rate, rate,
+        # width or height" in a message that mentions neither profile nor codec),
+        # and its default is already the 8-bit 4:2:0 main profile we want.
+        profile = {CODEC_H264: "high", CODEC_HEVC: "main"}.get(codec)
+        prof_args = ["-profile:v", profile] if profile else []
+
         if kind == "nvenc":
             preset = c.get("preset") or "p4"
             if preset not in NVENC_PRESETS:
                 preset = "p4"
+            ctl = (["-rc", "cbr"] if cbr else ["-rc", "vbr", "-cq", str(q)]) + ceiling
             cmd += ["-preset", preset, "-tune", "ll"] + ctl + [
                 "-g", str(gop), "-bf", "0", "-zerolatency", "1",
-                "-profile:v", "high", "-delay", "0", "-aud", "0",
-                "-surfaces", "8"]
+                "-delay", "0"] + prof_args
+            if codec == CODEC_H264:
+                cmd += ["-aud", "0", "-surfaces", "8"]
             if c.get("spatial_aq"):
                 cmd += ["-spatial-aq", "1"]
         elif kind == "amf":
-            ctl = ["-rc", "cbr" if rc == "cbr" else "vbr_peak",
-                   "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate]
-            if rc != "cbr":
+            ctl = ["-rc", "cbr" if cbr else "vbr_peak"] + ceiling
+            if not cbr:
                 ctl += ["-qp_i", str(q), "-qp_p", str(q)]
             cmd += ["-usage", "ultralowlatency", "-quality", "speed"] + ctl + [
-                "-g", str(gop), "-bf", "0"]
+                "-g", str(gop), "-bf", "0"] + prof_args
+        elif kind == "qsv":
+            preset = c.get("preset") or "veryfast"
+            if preset not in X264_PRESETS:
+                preset = "veryfast"
+            ctl = (["-b:v", bitrate, "-maxrate", bitrate] if cbr else
+                   ["-global_quality", str(q)]) + ["-look_ahead", "0"]
+            cmd += ["-preset", preset] + ctl + [
+                "-g", str(gop), "-bf", "0"] + prof_args
+        elif kind == "x265":
+            preset = c.get("preset") or "veryfast"
+            if preset not in X265_PRESETS:
+                preset = "veryfast"
+            ctl = (ceiling if cbr else
+                   ["-crf", str(q), "-maxrate", bitrate, "-bufsize", bitrate])
+            cmd += ["-preset", preset, "-tune", "zerolatency"] + ctl + [
+                "-g", str(gop), "-bf", "0"] + prof_args + [
+                "-x265-params", "repeat-headers=1:scenecut=0:rc-lookahead=0"]
+        elif kind == "svtav1":
+            # SVT-AV1's "preset" runs the other way: higher is faster.
+            ctl = (ceiling if cbr else ["-crf", str(q)])
+            cmd += ["-preset", "10", "-g", str(gop),
+                    "-svtav1-params", "rc=1:pred-struct=1"] + ctl
         else:
             preset = c.get("preset") or "veryfast"
             if preset not in X264_PRESETS:
                 preset = "veryfast"
-            ctl = (["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate]
-                   if rc == "cbr" else
+            ctl = (ceiling if cbr else
                    ["-crf", str(q), "-maxrate", bitrate, "-bufsize", bitrate])
             cmd += ["-preset", preset, "-tune", "zerolatency"] + ctl + [
-                "-g", str(gop), "-bf", "0",
+                "-g", str(gop), "-bf", "0"] + prof_args + [
                 "-x264-params", "repeat-headers=1:scenecut=0:rc-lookahead=0"]
 
         if backend == "gdigrab":
             cmd += ["-pix_fmt", "yuv420p"]
-        cmd += ["-f", "h264", "-flush_packets", "1", "-"]
+        # The muxer has to match the codec: `-f h264` on an HEVC bitstream fails
+        # outright, and AV1 is not NAL-based at all.  This one word was the
+        # reason every encoder except H.264 was unusable.
+        # AV1 uses `obu`, not `av1`: the `av1` muxer refuses a pipe outright
+        # ("pipe:: Invalid argument"), and `obu` is plain length-delimited OBUs,
+        # which the splitter can walk.
+        mux = {CODEC_H264: "h264", CODEC_HEVC: "hevc", CODEC_AV1: "obu"}.get(codec, "h264")
+        cmd += ["-f", mux, "-flush_packets", "1", "-"]
         return cmd
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
         ff = ffmpeg_exe()
         if not ff:
-            raise RuntimeError("ffmpeg.exe 未找到")
+            raise RuntimeError(i18n.t("ffmpeg.exe 未找到", "ffmpeg.exe not found"))
         want = self.cfg.get("backend", "auto")
         enc = self.cfg.get("encoder", "h264_nvenc")
         hw = ENCODERS.get(enc, {}).get("hw", False)
@@ -499,7 +806,9 @@ class Capture(object):
             self._thread = threading.Thread(target=self._reader, name="ffmpeg-reader", daemon=True)
             self._thread.start()
             return backend
-        raise RuntimeError("采集启动失败: %s" % (last or "没有可用后端"))
+        raise RuntimeError(i18n.t("采集启动失败: %s",
+                                  "Capture failed to start: %s")
+                           % (last or i18n.t("没有可用后端", "no usable backend")))
 
     def _reader(self):
         p = self.proc
@@ -523,7 +832,7 @@ class Capture(object):
                 break
             self.last_data = time.time()
             buf += chunk
-            units, buf = split_access_units(buf)
+            units, buf = split_access_units(buf, self.codec)
             if len(buf) > 16 * 1024 * 1024:
                 buf = buf[-1024 * 1024:]
             if units:

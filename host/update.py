@@ -33,6 +33,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import i18n
+
 from version import APP_VERSION, LATEST_RELEASE_API, RELEASES_URL, USER_AGENT
 
 SETUP_PREFIX = "DroidExtend-Setup-"
@@ -117,7 +119,8 @@ def check(timeout=8):
         out["error"] = "%s: %s" % (type(e).__name__, e)
         return out
     if not isinstance(data, dict):
-        out["error"] = "返回内容不是 JSON 对象"
+        out["error"] = i18n.t("返回内容不是 JSON 对象",
+                              "The response was not a JSON object")
         return out
     out["ok"] = True
     out["latest"] = str(data.get("tag_name") or data.get("name") or "").lstrip("vV")
@@ -152,10 +155,14 @@ def download(url, dest, sha256="", size=0, on_progress=None, cancel=None,
     res = {"ok": False, "path": "", "got": 0, "sha256": "", "error": ""}
     want = str(sha256 or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", want):
-        res["error"] = "官方没有给出校验和，为安全起见拒绝下载。"
+        res["error"] = i18n.t("官方没有给出校验和，为安全起见拒绝下载。",
+                              "The release publishes no checksum, so the download "
+                              "was refused for safety.")
         return res
     if not host_ok(url):
-        res["error"] = "下载地址不是 GitHub 官方域名，已拒绝：%s" % url
+        res["error"] = i18n.t("下载地址不是 GitHub 官方域名，已拒绝：%s",
+                              "The download URL is not an official GitHub domain, "
+                              "so it was refused: %s") % url
         return res
 
     part = dest + ".part"
@@ -167,11 +174,15 @@ def download(url, dest, sha256="", size=0, on_progress=None, cancel=None,
         with urllib.request.urlopen(req, timeout=timeout) as r:
             final = r.geturl()
             if not host_ok(final):
-                res["error"] = "下载被重定向到非 GitHub 域名，已拒绝：%s" % final
+                res["error"] = i18n.t("下载被重定向到非 GitHub 域名，已拒绝：%s",
+                                      "The download redirected to a non-GitHub "
+                                      "domain, so it was refused: %s") % final
                 return res
             total = int(size or r.headers.get("Content-Length") or 0)
             if total > MAX_BYTES:
-                res["error"] = "文件异常大（%d 字节），已拒绝。" % total
+                res["error"] = i18n.t("文件异常大（%d 字节），已拒绝。",
+                                      "The file is absurdly large (%d bytes), so it "
+                                      "was refused.") % total
                 return res
             with open(part, "wb") as f:
                 while True:
@@ -184,12 +195,12 @@ def download(url, dest, sha256="", size=0, on_progress=None, cancel=None,
                     h.update(b)
                     got += len(b)
                     if got > MAX_BYTES:
-                        raise OSError("超过大小上限")
+                        raise OSError(i18n.t("超过大小上限", "over the size limit"))
                     if on_progress:
                         on_progress(got, total)
     except _Cancel:
         _quiet_unlink(part)
-        res["error"] = "已取消。"
+        res["error"] = i18n.t("已取消。", "Cancelled.")
         res["got"] = got
         return res
     except Exception as e:
@@ -202,30 +213,38 @@ def download(url, dest, sha256="", size=0, on_progress=None, cancel=None,
     res["sha256"] = h.hexdigest()
     if total and got != total:
         _quiet_unlink(part)
-        res["error"] = "大小不符：官方 %d 字节，实际 %d 字节。" % (total, got)
+        res["error"] = i18n.t("大小不符：官方 %d 字节，实际 %d 字节。",
+                              "Size mismatch: the release says %d bytes, got %d.") \
+            % (total, got)
         return res
     if int(size or 0) and got != int(size):
         _quiet_unlink(part)
-        res["error"] = "大小不符：官方 %d 字节，实际 %d 字节。" % (int(size), got)
+        res["error"] = i18n.t("大小不符：官方 %d 字节，实际 %d 字节。",
+                              "Size mismatch: the release says %d bytes, got %d.") \
+            % (int(size), got)
         return res
     if res["sha256"] != want:
         _quiet_unlink(part)
-        res["error"] = ("校验和不符，文件可能被篡改。\n官方 %s\n实际 %s"
+        res["error"] = (i18n.t("校验和不符，文件可能被篡改。\n官方 %s\n实际 %s",
+                               "Checksum mismatch -- the file may have been tampered "
+                               "with.\nExpected %s\nGot %s")
                         % (want, res["sha256"]))
         return res
     try:
         with open(part, "rb") as f:
             if f.read(2) != b"MZ":
-                raise ValueError("不是 Windows 可执行文件")
+                raise ValueError(i18n.t("不是 Windows 可执行文件",
+                                        "not a Windows executable"))
     except Exception as e:
         _quiet_unlink(part)
-        res["error"] = "文件格式校验失败：%s" % e
+        res["error"] = i18n.t("文件格式校验失败：%s",
+                              "The file failed its format check: %s") % e
         return res
     try:
         os.replace(part, dest)
     except OSError as e:
         _quiet_unlink(part)
-        res["error"] = "写入失败：%s" % e
+        res["error"] = i18n.t("写入失败：%s", "Could not write the file: %s") % e
         return res
     res["ok"] = True
     res["path"] = dest
@@ -281,11 +300,12 @@ if not errorlevel 1 (
 )
 start "" /wait "{installer}" {flags}
 {restart}
+{cleanup}
 del "%~f0"
 """
 
 
-def run_installer(installer, exe="", pid=None, install_dir=""):
+def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=True):
     """Apply *installer* after this process exits.  -> (ok, error, script).
 
     The installer cannot replace ``DroidExtend.exe`` while it is running, and
@@ -296,6 +316,10 @@ def run_installer(installer, exe="", pid=None, install_dir=""):
     ``install_dir`` becomes ``/DIR=``: Inno's ``UsePreviousAppDir`` would
     normally find the earlier target, but saying it outright means an update
     can never land in a second copy of the program somewhere else.
+
+    ``delete_installer`` drops the downloaded .exe once Inno has returned.  It
+    happens after ``start /wait``, never before: deleting an installer that is
+    still running is exactly how you get a half-applied update.
     """
     pid = int(pid or os.getpid())
     exe = exe or (sys.executable if getattr(sys, "frozen", False) else "")
@@ -304,13 +328,19 @@ def run_installer(installer, exe="", pid=None, install_dir=""):
     flags = "/SILENT /NORESTART"
     if install_dir:
         flags += ' /DIR="%s"' % install_dir
+    cleanup = ('del /f /q "%s"' % installer if delete_installer
+               else 'rem keeping the installer: %s' % installer)
     d = update_dir()
     try:
         script = os.path.join(d, "apply_update.cmd")
         src = WAIT_CMD.format(pid=pid, installer=installer, flags=flags,
-                              restart=restart)
-        # cmd.exe wants CRLF and the OEM code page; the text is pure ASCII.
-        with open(script, "w", encoding="ascii", newline="\r\n") as f:
+                              restart=restart, cleanup=cleanup)
+        # A .cmd file is read by cmd.exe in the OEM code page, so a download
+        # folder with Chinese in its path has to be written as mbcs; plain
+        # ASCII would silently turn the path into question marks.
+        enc = "mbcs" if os.name == "nt" else "utf-8"
+        with open(script, "w", encoding=enc, errors="replace",
+                  newline="\r\n") as f:
             f.write(src)
         flags = 0
         if os.name == "nt":
@@ -323,10 +353,32 @@ def run_installer(installer, exe="", pid=None, install_dir=""):
         return False, "%s: %s" % (type(e).__name__, e), ""
 
 
-def update_dir():
+def update_dir(custom=""):
+    """Where an update gets downloaded to.
+
+    An empty *custom* (the default) means the temp folder.  A custom folder
+    that turns out to be unusable -- typo, unplugged drive, no permission --
+    falls back to temp instead of failing the update: the point of the setting
+    is to put the file somewhere convenient, not to make updates impossible.
+    """
+    d = os.path.expandvars(os.path.expanduser(str(custom or "").strip()))
+    if d and _writable_dir(d):
+        return d
     d = os.path.join(tempfile.gettempdir(), "droidextend_update")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
         pass
     return d
+
+
+def _writable_dir(d):
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, ".de-write-test")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("")
+        os.remove(probe)
+        return True
+    except Exception:
+        return False

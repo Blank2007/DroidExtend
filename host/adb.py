@@ -4,6 +4,8 @@ import re
 import subprocess
 import time
 
+import i18n
+
 from paths import TOOLS, adb_exe, popen
 
 # adb's forked daemon always opens "<temp>\adb.log" before it does anything
@@ -41,7 +43,8 @@ class Adb(object):
     def __init__(self, exe=None):
         self.exe = exe or adb_exe()
         if not self.exe:
-            raise AdbError("adb.exe 未找到（tools/platform-tools/adb.exe）")
+            raise AdbError(i18n.t("adb.exe 未找到（tools/platform-tools/adb.exe）",
+                                  "adb.exe not found (tools/platform-tools/adb.exe)"))
 
     # -- low level ---------------------------------------------------------
     def run(self, *args, **kw):
@@ -53,7 +56,8 @@ class Adb(object):
         except subprocess.TimeoutExpired:
             p.kill()
             out, _ = p.communicate()
-            raise AdbError("adb %s 超时" % (args[0] if args else ""))
+            raise AdbError(i18n.t("adb %s 超时", "adb %s timed out")
+                           % (args[0] if args else ""))
         text = (out or b"").decode("utf-8", "replace")
         return p.returncode, text
 
@@ -173,3 +177,153 @@ class Adb(object):
         if w <= 0 or h <= 0:
             return None
         return w, h
+
+
+# ------------------------------------------------------------- diagnostics
+# "Connected, but no picture" has a short list of dull causes, and every one of
+# them is visible from here.  Naming the one that applies beats letting the user
+# guess -- and by far the most common is the phone still sitting in charge-only
+# mode, which no amount of driver surgery will ever fix.
+
+_PORTS = (27183, 27184)      # video first, then touch; see server.py / touch.py
+PORTS = _PORTS               # public alias, the UI walks it
+
+DRIVER_URL = "https://developer.android.com/studio/run/win-usb"
+
+
+def _powershell(script, timeout=30):
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    exe = os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    if not os.path.exists(exe):
+        exe = "powershell"
+    try:
+        p = popen([exe, "-NoProfile", "-NonInteractive", "-Command", script],
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out, _ = p.communicate(timeout=timeout)
+        return (out or b"").decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def port_listeners(ports=_PORTS):
+    """{port: "name (pid)"} for the local TCP ports we hand to adb reverse.
+
+    adb reverse makes the *adb server* listen on the PC side, so anything else
+    squatting on 27183 stops the tunnel from carrying a single byte -- the phone
+    connects, and the picture simply never arrives.
+    """
+    lst = ",".join(str(p) for p in ports)
+    script = (
+        "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | "
+        "Where-Object { @(%s) -contains $_.LocalPort } | "
+        "ForEach-Object { $n = (Get-Process -Id $_.OwningProcess "
+        "-ErrorAction SilentlyContinue).ProcessName; "
+        "\"$($_.LocalPort)|$($_.OwningProcess)|$n\" }" % lst)
+    found = {}
+    for line in _powershell(script).splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 3 and parts[0].isdigit():
+            found[int(parts[0])] = "%s (pid %s)" % (parts[2] or "?", parts[1])
+    return found
+
+
+def problem_devices():
+    """[(status, class, name)] for every present PnP device Windows dislikes."""
+    script = (
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Status -ne 'OK' } | "
+        "ForEach-Object { \"$($_.Status)|$($_.Class)|$($_.FriendlyName)\" }")
+    rows = []
+    for line in _powershell(script).splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 3 and parts[0]:
+            rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
+_ANDROID_HINT = re.compile(
+    r"android|adb|\bphone\b|mtp|composite|便携设备|未知设备|unknown device", re.I)
+
+
+def android_problem_devices():
+    """The subset of problem_devices() that looks like a phone we cannot talk to.
+
+    An Android phone with no usable USB driver shows up as "Unknown device", or
+    as an MTP / composite device carrying an error -- that shape is the tell.
+    """
+    return [r for r in problem_devices() if _ANDROID_HINT.search(r[2] or "")]
+
+
+def usb_mode_hint(devices):
+    """What to tell the user when `adb devices` comes back empty.
+
+    Every Android phone defaults a freshly plugged cable to charge-only: USB
+    debugging is on, the cable is fine, the driver is fine, and adb still sees
+    nothing at all.  Pulling down the notification shade and picking "File
+    transfer" is the fix, so it gets said first.
+    """
+    if devices:
+        return ""
+    probs = android_problem_devices()
+    if probs:
+        return (i18n.t("设备管理器里有 %d 个无法识别的设备，看着像这台手机：%s。"
+                       "多半是缺 USB 驱动。",
+                       "Device Manager lists %d unrecognised devices that look like "
+                       "this phone: %s.  Most likely the USB driver is missing.")
+                % (len(probs), "、".join(p[2] for p in probs[:3])))
+    return i18n.t("没有检测到手机。最常见的原因是手机插上后停在「仅充电」模式："
+                  "下拉通知栏，把「USB 用途」改成「传输文件 / MTP」，adb 才能看到它。",
+                  "No phone detected.  The usual reason is that the phone is still in "
+                  "\"Charge only\" mode: pull down the notification shade and change "
+                  "\"USB preferences\" to \"File transfer / MTP\" so adb can see it.")
+
+
+def bundled_driver_dir():
+    """A driver shipped inside tools/, if this build carries one."""
+    d = os.path.join(TOOLS, "usb_driver")
+    return d if os.path.isdir(d) else None
+
+
+def _runas(exe, args):
+    """ShellExecuteW with the UAC prompt -- driver work needs elevation."""
+    import ctypes
+    try:
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, None, 1)
+        return rc > 32
+    except Exception:
+        return False
+
+
+def install_usb_driver():
+    """Install the bundled USB driver, if this build carries one.
+
+    Google's driver may not be redistributed with the app, so most builds ship
+    without one and the honest answer is to hand over the download link -- which
+    is what the caller falls back to.
+    """
+    d = bundled_driver_dir()
+    if not d:
+        return False, (i18n.t("本程序没有随包提供 USB 驱动（授权原因），"
+                              "请从这里下载安装：%s",
+                              "This build does not bundle the USB driver (licensing), "
+                              "so download and install it from here: %s") % DRIVER_URL)
+    inf = os.path.join(d, "android_winusb.inf")
+    if not os.path.exists(inf):
+        return False, i18n.t("随包驱动目录里没有 android_winusb.inf：%s",
+                             "The bundled driver folder has no android_winusb.inf: %s") % d
+    if _runas("pnputil.exe", '/add-driver "%s" /install' % inf):
+        return True, i18n.t("已请求管理员权限安装驱动，装完请重新插拔数据线",
+                            "Asked for administrator rights to install the driver -- "
+                            "unplug and replug the cable when it finishes")
+    return False, i18n.t("提权被取消，驱动没有安装",
+                         "Elevation was cancelled, so the driver was not installed")
+
+
+def open_device_manager():
+    """Open Device Manager so the user can see the phone the way Windows does."""
+    try:
+        os.startfile("devmgmt.msc")
+        return True
+    except Exception:
+        return False
+

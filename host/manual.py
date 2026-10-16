@@ -1,11 +1,16 @@
-"""The text behind 帮助 -> 使用说明, kept in one place.
+"""The text behind Help -> Manual, kept in one place.
 
 Plain text on purpose: it is shown in a Tk text widget, and the same string is
-what we paste into 关于 when somebody asks "how do I even use this".
+what we paste into the About window when somebody asks "how do I even use this".
+
+Two complete manuals rather than one text run through a translator: a manual is
+prose, and prose translated sentence-by-sentence reads like prose translated
+sentence-by-sentence.  Pick with text().
 """
+import i18n
 from version import APP_VERSION, EMAILS, REPO_URL
 
-TEXT = """\
+TEXT_ZH = """\
 DroidExtend 使用说明   v{ver}
 ----------------------------------------------------------
 
@@ -50,8 +55,13 @@ DroidExtend 使用说明   v{ver}
 
     · 单指点一下            = 鼠标左键单击
     · 单指按住拖动          = 按住左键拖动（选文字、拖窗口）
+    · 单指长按半秒          = 鼠标右键（弹出右键菜单）
     · 双指上下/左右滑动     = 鼠标滚轮 / 横向滚动
     · 双指快速轻点一下      = 鼠标右键（弹出右键菜单）
+
+  点一下就是点一下：手指落下时那几个像素的抖动不算拖动，要越过触摸阈值才算。
+  拖动时位置最快每 16 毫秒更新一条（正好是一帧），中间过时的位置会被丢掉，
+  但按下、抬起、右键、滚动这些事件一个都不会少。
 
   注意：触摸注入的是「那块虚拟屏」上的坐标，鼠标会真的跑到那块屏去，
   所以主屏上的鼠标位置会跟着跳，这是正常的。
@@ -89,10 +99,34 @@ DroidExtend 使用说明   v{ver}
      4) 手机上如果弹过「允许 USB 调试」，重新点一次「开始投屏」
 
   Q: 画面卡、延迟大
-  A: · 先点「测一下数据线速度」，码率上限不要超过它给的建议值
-     · 降低分辨率或帧率
-     · 换一根好一点的 USB 线，注意要插在 USB 3.0 口上
-     · 「采集」保持「自动」或 ddagrab
+  A: 打开手机上的「状态浮窗」，它会显示 fps 和 latency，先看是哪一个不对：
+     · fps 低、latency 正常 -> 数据线带宽不够。点「测一下数据线速度」，
+       码率上限不要超过它给的建议值；换一根好一点的 USB 线，插 USB 3.0 口。
+     · fps 正常、latency 高 -> 编码或解码在排队。换个编码器（h264_nvenc 最快），
+       或把帧率降到 30。
+     · 两个都正常但还是顿 -> 手机在省电降频。降帧率 / 降分辨率，
+       或在手机设置里对本程序关掉省电限制。
+     · 「采集」保持「自动」或 ddagrab。
+
+  Q: 显卡占用很高，是不是有问题？
+  A: 正常，而且和虚拟屏直接有关。虚拟屏不是真屏幕，但 Windows 的桌面合成器
+     会把它当成一块真屏去合成——屏幕越大、刷新率越高，每帧要合成的像素越多。
+     采集（ddagrab）和编码也都在显卡上跑。所以任务管理器里看到百分之几到
+     十几的 GPU 占用是设计使然。因为虚拟屏的缘故，显卡占用可能比你平时高。
+     · 想让占用降下来：优先降分辨率，其次降刷新率（两者是乘算的）。
+     · 担心影响游戏：选 h264_nvenc / hevc_nvenc / av1_nvenc 这类硬件编码器，
+       它们用显卡上的独立编码单元，不和 3D 渲染抢算力；别选 libx264（纯 CPU）。
+     · 占用真的接近打满时虚拟屏会掉帧，这时候只能降像素量。
+
+  Q: 改了分辨率 / 刷新率 / 位置，好像没生效？
+  A: 现在改这些会立刻应用到正在运行的虚拟屏，不用停掉重开。程序最多重试 4 次，
+     并且以「实际生效的模式」为准判断成功——Windows 在切换显示模式前后会短暂
+     锁住显示配置，前两次失败是正常的。如果一直不生效，检查「跟随手机分辨率」
+     是不是勾着，那个选项会覆盖你的选择。
+     另外，分辨率下拉里现在列的**就是虚拟显示器驱动真有的那些模式**（驱动从
+     vdd_settings.xml 里的每一行 <resolution> 建模式表，表外的尺寸 Windows 一律
+     拒掉，以前点了没反应就是这个原因）。如果某个尺寸不在列表里，就是驱动给不
+     出来；日志会说清楚。刷新率同理。
 
   Q: 停止之后系统里还留着一块屏幕？
   A: 正常情况下「停止」或拔线都会把虚拟屏摘掉。如果电脑上还留着，
@@ -132,10 +166,214 @@ DroidExtend 使用说明   v{ver}
   如果发现有侵权或需要补充的出处，请联系上面任一邮箱，我会在下一版写明。
 """
 
-TEXT = TEXT.format(
+TEXT_EN = """\
+DroidExtend manual   v{ver}
+----------------------------------------------------------
+
+[1] What this is
+  One USB cable turns an Android phone or tablet into a second Windows monitor.
+  A real extended desktop, not a mirror: Windows gains another screen, you can
+  drag windows onto it, move the mouse into it, and a tap on the phone is a
+  click on that screen.
+
+  Measured latency is 5-11 ms.  The picture travels over the USB cable -- never
+  over WiFi, never through a router.
+
+[2] Two things to set up on the phone first
+  1. Turn on developer options
+     Settings -> About phone -> tap "Build number" seven times
+  2. Turn on USB debugging (some phones also want "Install via USB")
+     Settings -> System -> Developer options -> USB debugging
+  3. When you plug the cable in the phone asks "Allow USB debugging?" -> Allow
+     (tick "Always allow" so it stops asking every time)
+
+[3] First run
+  Step 1  Install the virtual display driver
+          Press "Install virtual display driver (needs admin)" on the left and
+          accept Windows' UAC prompt.  This is a one-time install; the status
+          line under it turns into "ready" when it is done.
+
+  Step 2  Connect the phone with the USB cable
+          Press "Refresh"; "Android device" on the left should show the model
+          and serial number.  If it says "connected but not authorised", look at
+          the phone and allow USB debugging.
+
+  Step 3  Choose the settings
+          Under "Quality and frame rate" on the right pick resolution, refresh
+          rate, fps and bitrate ceiling.  If you have no opinion, keep the
+          defaults: 1920x1080 / 60Hz / 60fps / 40 Mbps.
+
+  Step 4  Press "Start"
+          The first time it installs and launches the phone app by itself (about
+          ten seconds).  You are done when the picture appears on the phone.
+
+  Step 5  Press "Stop" when you want to stop
+          The virtual display disappears from Windows, the desktop goes back to
+          normal and the phone stops drawing.
+
+[4] How touch works
+  Using the phone directly is the same as using a mouse on that virtual screen:
+
+    . one finger tap            = left click
+    . one finger drag           = hold the left button and drag (select text,
+                                  move windows)
+    . one finger, hold 1/2 s    = right click
+    . two finger swipe          = wheel / horizontal scroll
+    . two finger quick tap      = right click
+
+  A tap is a tap: the few pixels a finger wobbles as it lands do not count as a
+  drag -- you have to clear the touch threshold first.  While dragging, the
+  position updates at most once every 16 ms (exactly one frame), and the stale
+  positions in between are dropped; but not one event is ever lost.
+
+  Note: touch is injected at coordinates on that virtual screen, so the real
+  cursor does move over there and the pointer leaves your main screen.  That is
+  normal.  Turn the phone sideways and the picture follows.
+
+[5] How to choose the settings
+  Resolution     Size of the virtual screen.  Matching the phone's aspect ratio
+                 is sharpest; 1920x1080 is the safest general choice.  Pick
+                 "Custom" to type a width and height yourself.
+  Refresh rate   Refresh rate of the virtual screen.  60 is plenty; higher costs
+                 GPU time.
+  fps            Frames encoded per second.  30-60 for desktop work, 60+ for
+                 video.
+  Bitrate        Ceiling on the picture's data rate (Mbps).  40 suits almost
+                 every USB 3 port; if unsure press "Measure cable speed" and use
+                 what it suggests.
+  Rate control   VBR, quality first: an idle desktop costs less bandwidth
+                 (recommended).  CBR, constant bitrate: steadier under motion.
+  Quality Q      Lower looks better and costs more bitrate.  18 is visually
+                 lossless; the default is 20.
+  Encoder        h264_nvenc encodes on the GPU (recommended), libx264 on the CPU.
+  Preset         Encoder speed step.  p4 / veryfast are the usual balance.
+  Capture        ddagrab uses Desktop Duplication (fastest), gdigrab uses GDI
+                 (most compatible).  "Auto" prefers ddagrab and falls back to
+                 gdigrab when it cannot tell which screen to grab.
+  Position       Which side of the main screen the virtual one sits on.  "Right"
+                 means you drag windows to the right.
+  Draw pointer   Paints the mouse cursor into the picture.
+  Reinstall APK  Untick this once the phone already has the app; starting gets
+                 much faster.
+
+[6] Common questions
+  Q: The phone shows a picture, but it is only wallpaper and a taskbar, and it
+     looks exactly like my main screen?
+  A: That is expected.  A fresh virtual screen has no windows on it, so Windows
+     paints the wallpaper and a taskbar there too.  Drag a window over to the
+     right (or move the mouse onto that screen and open something) and the
+     difference becomes obvious.  The "extended desktop ready" line in the log
+     says where the screen sits in desktop coordinates.
+
+  Q: The phone is black / it just says "waiting for the phone..."
+  A: 1) Make sure the phone screen is on and unlocked (a locked screen encodes
+        as black)
+     2) Unplug the cable, plug it back in, then press Start again
+     3) Check the log for adb errors, and press "Refresh" to see whether the
+        device is still there
+     4) If the phone asked about USB debugging earlier, press Start again
+
+  Q: Stuttering and high latency
+  A: Turn on the status overlay on the phone -- it shows fps and latency, so you
+     can see which one is wrong:
+     . fps low, latency fine  -> the USB cable is out of bandwidth.  Press
+       "Measure cable speed" and keep the bitrate at or below what it reports;
+       try a better USB cable in a USB 3 port.
+     . fps fine, latency high -> the encoder or decoder is queueing.  Try a
+       different encoder (h264_nvenc is the fastest), or drop to 30 fps.
+     . Both fine but it still stutters -> the phone is throttling.  Lower the
+       frame rate or resolution, or exempt this app from battery optimisation
+       in the phone's own settings.
+     . Leave "Capture" on Auto or ddagrab.
+
+  Q: GPU usage is high -- is something wrong?
+  A: No, and it follows directly from the virtual screen.  The virtual screen is
+     not a real panel, but the Windows desktop compositor composites it like one
+     -- more pixels and a higher refresh rate mean more to composite every
+     frame.  Capture (ddagrab) and encoding run on the card as well.  A few
+     percent to a low-teens percent of GPU usage in Task Manager is by design.
+     Because of the virtual screen, GPU usage may be higher than you are used to.
+     . To bring it down: drop the resolution first, then the refresh rate (the
+       two multiply).
+     . Worried about gaming?  Pick h264_nvenc / hevc_nvenc / av1_nvenc: they use
+       the card's dedicated encoder block and do not compete with 3D rendering.
+       Avoid libx264, which is pure CPU encoding.
+     . Once the GPU really is saturated the virtual screen drops frames, and
+       then only fewer pixels will help.
+
+  Q: I changed the resolution / refresh rate / position and nothing happened?
+  A: Those now apply immediately to a running virtual screen -- no restart
+     needed.  The program retries up to four times and judges success by the
+     mode that actually took effect, because Windows briefly locks the display
+     configuration around a mode change; the first attempt or two failing is
+     normal.  If it never takes effect, check that "Follow the phone's
+     resolution" is not ticked -- that option overrides your choice.
+     The resolution list now holds **exactly the modes the virtual display
+     driver has** (the driver builds its mode table from every <resolution> row
+     in vdd_settings.xml, and Windows rejects anything outside that table with
+     DISP_CHANGE_BADMODE -- picking one used to do nothing at all).  A size that
+     is not in the list is a size the driver cannot produce, and the log says so.
+     The same goes for the refresh rates.
+
+  Q: A screen is still there in Windows after I stopped?
+  A: Normally Stop, or unplugging, removes the virtual screen.  If one is left
+     over, press Start and then Stop once more; a failed start also removes it
+     automatically.
+
+  Q: I cannot find the mouse on the extra screen?
+  A: The virtual screen is placed against the main one according to "Position".
+     When it is on the right, keep moving the mouse right and you will reach it.
+     Win+P also shows whether Windows is in Extend or PC screen only.
+
+[7] Settings, updates and where the files live
+  . Your settings are remembered; the next launch starts where you left off.
+  . Settings file: %USERPROFILE%\\.droidextend\\settings.json
+    (File -> Open config folder opens it for you)
+  . Tools -> Check for updates asks GitHub whether a newer version exists.
+  . README.md in the program folder has the longer story, and 开发日志.md records
+    how the thing was built.
+
+[8] Other people's work (with thanks)
+  . Virtual Display Driver (VDD) -- virtual display driver, MIT licence
+    https://github.com/VirtualDrivers/Virtual-Display-Driver
+  . nefcon -- small tool for installing and removing device drivers, MIT licence
+    https://github.com/nefarius/nefcon
+  . FFmpeg -- capture and hardware encoding (GPL build, called as a separate
+    process)  https://ffmpeg.org/  this build is gyan.dev's 6.0-essentials
+  . Android SDK Platform-Tools (adb) -- Apache License 2.0
+  . R8 / D8 (Android SDK build-tools) -- BSD 3-Clause
+  . Python / Tcl-Tk / PyInstaller -- see their own licence files
+  . The installer is built with Inno Setup; the icon is drawn by a script, no
+    stock artwork was used.
+
+[9] About this project
+  Written by: an AI coding agent (DeepSeek Harness / deepseek-flash)
+  Every line of this program, from the first to the installer, was written by an
+  AI.  A human asked for it, set the direction and accepted the result.
+  Owner: {author}
+  Repository: {repo}
+  Issues: {issues}
+  Email: {mails}
+  If you spot something misattributed or a credit that is missing, write to any
+  of the addresses above and it will be fixed in the next release.
+"""
+
+_FIELDS = dict(
     ver=APP_VERSION,
     author="Void_Blank (Blank2007)",
     repo=REPO_URL,
     issues=REPO_URL + "/issues",
     mails=" / ".join(EMAILS),
 )
+
+TEXT_ZH = TEXT_ZH.format(**_FIELDS)
+TEXT_EN = TEXT_EN.format(**_FIELDS)
+
+
+def text():
+    """The manual in whichever language the window is using."""
+    return TEXT_EN if i18n.en() else TEXT_ZH
+
+
+# Kept for anything that imported it before the split; it is the Chinese one.
+TEXT = TEXT_ZH

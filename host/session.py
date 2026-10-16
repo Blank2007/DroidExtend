@@ -15,6 +15,7 @@ Stop() reverses all of it, including removing the extra desktop area.
 import threading
 import time
 
+import i18n
 import win_display as wd
 from capture import Capture
 from server import StreamServer, HOST_PORT
@@ -41,7 +42,9 @@ DEFAULTS = {
     "spatial_aq": True,
     "gop": 0,                # 0 = 2 seconds
     "mode": "extend",        # extend | mirror
-    "position": "right",     # right | left | above | below
+    "position": "right",     # right | left | above | below | custom
+    "pos_x": 0,              # position="custom": left edge, in primary's coords
+    "pos_y": 0,              # position="custom": top edge,  in primary's coords
     "monitor": "",           # mirror mode: adapter name to copy
     "install_apk": True,
     "auto_launch": True,
@@ -60,8 +63,9 @@ class VddMissing(RuntimeError):
 
 
 class Session(object):
-    def __init__(self, log=None):
+    def __init__(self, log=None, on_notice=None):
         self.log = log or (lambda m: None)
+        self.on_notice = on_notice
         self.cfg = dict(DEFAULTS)
         self.adb = None
         self.serial = None
@@ -103,6 +107,15 @@ class Session(object):
     def _position_for(self, primary, w, h):
         pos = self.cfg.get("position", "right")
         gap = 0
+        if pos == "custom":
+            # Absolute coordinates in the primary screen's space, so the screen
+            # can sit somewhere other than the four edges -- including partially
+            # overlapping the primary one, which is what "not only up/down/left/
+            # right" asks for.
+            try:
+                return int(self.cfg.get("pos_x", 0)), int(self.cfg.get("pos_y", 0))
+            except (TypeError, ValueError):
+                return primary["right"] + gap, primary["top"]
         if pos == "left":
             return primary["left"] - w - gap, primary["top"]
         if pos == "above":
@@ -171,7 +184,8 @@ class Session(object):
         if self.cfg["mode"] == "mirror":
             mons = wd.live_monitors()
             if not mons:
-                raise RuntimeError("找不到任何活动的显示器")
+                raise RuntimeError(i18n.t("找不到任何活动的显示器",
+                                          "No active monitor was found"))
             want = self.cfg.get("monitor")
             mon = next((m for m in mons if m["name"] == want), None)
             if mon is None:
@@ -219,50 +233,44 @@ class Session(object):
             self.log("  attach 未生效，改用扩展拓扑 rc=%s" % rc2)
             time.sleep(0.7)
         if not wd.desktop_rect(name):
-            raise RuntimeError("虚拟显示器 %s 无法激活（未上桌面）" % name)
+            raise RuntimeError(i18n.t("虚拟显示器 %s 无法激活（未上桌面）",
+                                      "Virtual display %s could not be activated "
+                                      "(not on the desktop)") % name)
 
         mons = wd.live_monitors()
         primary = next((m for m in mons if m["primary"]), mons[0] if mons else None)
         if primary is None:
-            raise RuntimeError("找不到主显示器")
+            raise RuntimeError(i18n.t("找不到主显示器", "No primary monitor was found"))
 
         w = int(self.cfg["width"])
         h = int(self.cfg["height"])
         hz = int(self.cfg["hz"])
         if self.cfg.get("match_phone", True):
             w, h, hz = self._match_phone(name, w, h, hz)
+
+        w, h, hz, note, usable = self._resolve_mode(name, w, h, hz)
+        if note:
+            self.log("  " + note)
+        if not usable:
+            # Getting a picture up matters more than the exact size, so fall back
+            # to one the driver really has instead of failing outright.  The note
+            # above already told the user what was asked for and what is on offer.
+            fb = wd.best_mode(name, w, h, hz)
+            if not fb:
+                raise RuntimeError(note)
+            self.log("  改用驱动确实有的 %dx%d@%d" % (fb[0], fb[1], fb[2]))
+            w, h, hz = fb[0], fb[1], fb[2]
+
         x, y = self._position_for(primary, w, h)
 
-        modes = wd.available_modes(name)
-        if modes and (w, h, hz) not in modes:
-            near = [m for m in modes if m[0] == w and m[1] == h]
-            if near:
-                best = min(near, key=lambda m: abs(m[2] - hz))
-                self.log("  %dx%d@%d 不在驱动模式表里，改用 @%d" % (w, h, hz, best[2]))
-                hz = best[2]
-            else:
-                self.log("  警告: 驱动没有 %dx%d 模式，仍尝试设置" % (w, h))
-                if modes:
-                    self.log("  驱动模式: " + ", ".join("%dx%d@%d" % m for m in modes[:12]))
-
         # Same display-config lock can reject the mode change, so retry it too.
-        rc = None
-        for attempt in range(4):
-            try:
-                rc = wd.set_mode(name, w, h, hz, x, y)
-            except OSError as e:
-                rc = "OSError: %s" % e
-            self.log("  ChangeDisplaySettingsEx -> %s%s"
-                     % (DISP_CHANGE.get(rc, rc),
-                        "" if attempt == 0 else " (重试 %d)" % attempt))
-            time.sleep(1.0)
-            if wd.desktop_rect(name):
-                break
-            time.sleep(0.5)
+        self._set_mode_retry(name, w, h, hz, x, y)
 
         rect = wd.desktop_rect(name)
         if not rect:
-            raise RuntimeError("虚拟显示器设置后仍然不可用")
+            raise RuntimeError(i18n.t("虚拟显示器设置后仍然不可用",
+                                  "The virtual display is still unusable after "
+                                  "being configured"))
         if rect["width"] != w or rect["height"] != h:
             self.log("  实际模式 %dx%d@%d（请求 %dx%d@%d）" % (
                 rect["width"], rect["height"], rect["hz"], w, h, hz))
@@ -279,6 +287,141 @@ class Session(object):
                      % (rect["left"], rect["top"], rect["width"]))
         return rect
 
+    def _set_mode_retry(self, name, w, h, hz, x, y, attempts=4):
+        """ChangeDisplaySettingsEx, retried around Windows' display-config lock.
+
+        While Windows is reconfiguring anything it holds the configuration
+        locked for a moment, and ChangeDisplaySettingsEx answers
+        DISP_CHANGE_FAILED (-1) meanwhile.  Success is judged by the mode that
+        actually took effect, not by the return code.
+
+        DISP_CHANGE_BADMODE (-2) is the one failure that is not worth retrying:
+        it means the display has no such mode, and asking five more times cannot
+        conjure one.  Retrying it anyway cost the user nine seconds of a busy UI
+        for a change that was never going to happen.
+        """
+        rc = None
+        for attempt in range(attempts):
+            try:
+                rc = wd.set_mode(name, w, h, hz, x, y)
+            except OSError as e:
+                rc = "OSError: %s" % e
+            self.log("  ChangeDisplaySettingsEx -> %s%s"
+                     % (DISP_CHANGE.get(rc, rc),
+                        "" if attempt == 0 else " (重试 %d)" % attempt))
+            if rc == -2:
+                return rc
+            time.sleep(1.0)
+            r = wd.desktop_rect(name)
+            if r and r["width"] == w and r["height"] == h:
+                return rc
+            time.sleep(0.5)
+        return rc
+
+    def _resolve_mode(self, name, w, h, hz):
+        """Fit a wanted mode onto what the display actually offers.
+
+        Returns ``(w, h, hz, note, usable)``.  *note* is None when the request is
+        available exactly as asked, and a sentence for the user otherwise;
+        *usable* is False when Windows would answer DISP_CHANGE_BADMODE.
+
+        This is the other half of "改了分辨率还是没变化".  The form offered
+        twenty-two sizes while the driver builds its mode table from eleven rows
+        in vdd_settings.xml, so half the menu could never work -- and nothing
+        said so.  A missing size is now reported, and offered to the driver
+        (which still has room for a few more rows), so reinstalling the driver or
+        rebooting makes it real instead of silently dropping it.
+        """
+        import vdd as vd
+
+        modes = wd.available_modes(name)
+        if not modes:
+            # Nothing to compare against: let Windows have the final word.
+            return w, h, hz, None, True
+        if (w, h, hz) in modes:
+            return w, h, hz, None, True
+
+        rates = sorted({m[2] for m in modes if m[0] == w and m[1] == h})
+        if rates:
+            best = min(rates, key=lambda r: abs(r - hz))
+            return w, h, best, i18n.t(
+                "%dx%d 没有 %d Hz，改用 %d Hz" % (w, h, hz, best),
+                "%dx%d does not offer %d Hz; using %d Hz" % (w, h, hz, best)), True
+
+        sizes = sorted({(m[0], m[1]) for m in modes})
+        sep = ", " if i18n.en() else "、"
+        near = sep.join("%dx%d" % s for s in sizes[:8])
+        try:
+            added = vd.add_resolution(w, h, hz)
+        except Exception:
+            added = None
+        if added:
+            return w, h, hz, i18n.t(
+                "驱动模式表里原本没有 %dx%d，已经写进去了 —— 点「安装虚拟显示器驱动」"
+                "重装一次（或重启电脑）之后才切得过去。现在这张表里有：%s" % (w, h, near),
+                "The driver had no %dx%d; it has been added to the mode table. "
+                "Reinstall the driver (or reboot) before it can be used. "
+                "Available now: %s" % (w, h, near)), False
+        return w, h, hz, i18n.t(
+            "驱动给不出 %dx%d（模式表里没有，也没能写进去）。现在能用的：%s" % (w, h, near),
+            "The driver cannot offer %dx%d (not in its mode table, and it could "
+            "not be added). Available now: %s" % (w, h, near)), False
+
+    def retarget(self):
+        """Apply the current size / refresh / position to a running session.
+
+        Changing the resolution in the form used to save the value and stop
+        there: apply_display() only ever ran on 开始投屏, so nothing ever asked
+        Windows to switch the mode -- which is most of what "分辨率有时切不了"
+        turns out to be.  This is the missing half, and it also covers dragging
+        the virtual screen somewhere else without restarting the stream.
+        """
+        if not self.running or not self._display_applied:
+            return False
+        name = self._display_applied
+        mons = wd.live_monitors()
+        primary = next((m for m in mons if m["primary"]), mons[0] if mons else None)
+        if primary is None:
+            return False
+
+        w = int(self.cfg["width"])
+        h = int(self.cfg["height"])
+        hz = int(self.cfg["hz"])
+        if self.cfg.get("match_phone", True):
+            w, h, hz = self._match_phone(name, w, h, hz)
+        w, h, hz, note, usable = self._resolve_mode(name, w, h, hz)
+        if note:
+            self.log("  " + note)
+        if not usable:
+            # Stop here and say why.  Restarting the capture for a mode Windows
+            # never accepted is what made "没有变化" look like "something
+            # happened": the picture blinked and came back the same size.
+            self.log("显示模式未更改")
+            return False
+        x, y = self._position_for(primary, w, h)
+
+        cur = wd.desktop_rect(name) or {}
+        if (cur.get("width") == w and cur.get("height") == h
+                and cur.get("hz") == hz
+                and cur.get("left") == x and cur.get("top") == y):
+            self.log("显示模式没变，无需切换")
+            return False
+
+        self.log("切换虚拟屏到 %dx%d@%d 位置 (%d,%d)…" % (w, h, hz, x, y))
+        self._set_mode_retry(name, w, h, hz, x, y)
+        got = wd.desktop_rect(name)
+        if got:
+            self.log("  现在实际是 %dx%d@%d at (%d,%d)" % (
+                got["width"], got["height"], got["hz"], got["left"], got["top"]))
+        if not got or got["width"] != w or got["height"] != h:
+            self.log("切换没有生效，保持原来的显示模式（画面不重启）")
+            return False
+        # The running ffmpeg was told to grab a rectangle of the old size, and
+        # dxgi's duplication is invalidated by the mode change anyway; restarting
+        # the capture is also what makes the phone re-handshake for the new size.
+        self._recover_capture("显示模式已更改")
+        return True
+
     # -------------------------------------------------------------- 2. device
     def find_device(self):
         from adb import Adb
@@ -287,7 +430,8 @@ class Session(object):
         ready = [r for r in rows if r["state"] == "device"]
         if not ready:
             states = ", ".join("%s=%s" % (r["serial"], r["state"]) for r in rows) or "无"
-            raise RuntimeError("没有可用的安卓设备（adb devices: %s）" % states)
+            raise RuntimeError(i18n.t("没有可用的安卓设备（adb devices: %s）",
+                                  "No usable Android device (adb devices: %s)") % states)
         self.serial = ready[0]["serial"]
         self.log("设备: %s" % ready[0]["label"])
         return ready[0]
@@ -318,7 +462,8 @@ class Session(object):
                 ok, out = self.adb.install(s, apk)
                 self.log("  安装%s: %s" % ("成功" if ok else "失败", out.strip().splitlines()[-1] if out.strip() else ""))
                 if not ok:
-                    raise RuntimeError("APK 安装失败：%s" % out.strip())
+                    raise RuntimeError(i18n.t("APK 安装失败：%s",
+                                      "APK install failed: %s") % out.strip())
 
         if self.cfg.get("auto_launch"):
             self.adb.force_stop(s)
@@ -335,7 +480,11 @@ class Session(object):
         backend = self.capture.start()
         self.log("编码器 %s / 采集 %s" % (self.cfg["encoder"], backend))
         if self.cfg.get("touch", True):
-            self.touch = TouchServer(self.rect, log=self.log)
+            # Hand the injector the display *name*, not just its rectangle: it
+            # re-reads the real position on a short timer so that dragging the
+            # display somewhere else in 显示设置 cannot leave touches offset.
+            self.touch = TouchServer(self.rect, self._display_applied or self.target,
+                                     log=self.log, on_notice=self._phone_notice)
             self.touch.start()
             self.log("触摸控制已开启（点按/拖动/双指滚动/双指轻点=右键）")
         self._stop.clear()
@@ -343,6 +492,20 @@ class Session(object):
         self._pump.start()
         self._last = time.time()
         return backend
+
+    def _phone_notice(self, code, msg):
+        """The phone reported something about itself (screen off/on, app gone).
+
+        Worth surfacing loudly: a phone with its screen off looks exactly like a
+        frozen stream from here, and which one it is decides whether the user
+        waits or picks the phone up.
+        """
+        self.log(msg)
+        if self.on_notice is not None:
+            try:
+                self.on_notice(code, msg)
+            except Exception:
+                pass
 
     def _quality_note(self):
         """One short line describing the picture, for the phone's overlay.
@@ -436,7 +599,9 @@ class Session(object):
         old_wh = (old.get("width"), old.get("height"))
         changed = self._refresh_rect()
         if changed is None:
-            self.fatal = "虚拟显示器已从桌面消失，投屏停止"
+            self.fatal = i18n.t("虚拟显示器已从桌面消失，投屏停止",
+                                "The virtual display vanished from the desktop; "
+                                "streaming stopped")
             self.log("采集中断：" + self.fatal)
             return
         try:
@@ -456,12 +621,13 @@ class Session(object):
             # app's retry loop reconnect and pick up a fresh handshake.
             self.log("  画面尺寸变了 %dx%d → %dx%d，让手机重新握手" % (
                 old_wh[0], old_wh[1], self.rect["width"], self.rect["height"]))
-            if self.touch is not None:
-                try:
-                    self.touch.rect = self.rect
-                except Exception:
-                    pass
             self.server.drop_client()
+        if self.touch is not None:
+            # Always re-aim the injector, moved or resized alike.  (This used to
+            # write `self.touch.rect = ...`, which TouchServer never read -- the
+            # injector kept the stale rectangle and every touch was offset.)
+            self.touch.set_rect(self.rect)
+            self.touch.set_device(self._display_applied or self.target)
 
     def _refresh_rect(self):
         """Re-read the captured screen's rectangle.
@@ -504,6 +670,21 @@ class Session(object):
     def attached_display(self):
         """The virtual display this session put on the desktop, if any."""
         return self._display_applied
+
+    def release_input(self):
+        """Let go of whatever the phone is holding.
+
+        Called when the control window goes away -- closing it (or the app
+        exiting) mid-gesture used to leave the left button pressed on the PC,
+        and Windows answers a stuck button with a modal drag loop that swallows
+        every later injection.  The stream keeps running, the screen just stops
+        responding to touch.
+        """
+        if self.touch:
+            try:
+                self.touch.release("控制窗口已关闭")
+            except Exception:
+                pass
 
     def stop(self, restore_display=True):
         self._stop.set()

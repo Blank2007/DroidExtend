@@ -13,6 +13,8 @@ import socket
 import subprocess
 import time
 
+import i18n
+
 from paths import adb_exe, popen
 
 PROBE_PORT = 27199
@@ -56,12 +58,13 @@ def measure(adb, serial, seconds=6.0, port=PROBE_PORT, log=None):
            "sent": 0, "verified": False}
 
     if adb is None:
-        out["error"] = "adb 不可用"
+        out["error"] = i18n.t("adb 不可用", "adb is not available")
         return out
 
     rc, txt = adb.run("-s", serial, "shell", "toybox", "nc", "--help", timeout=15)
     if rc != 0 and "usage" not in (txt or "").lower():
-        out["error"] = "手机上没有 toybox nc，无法测速"
+        out["error"] = i18n.t("手机上没有 toybox nc，无法测速",
+                              "The phone has no toybox nc, so it cannot be measured")
         return out
 
     adb.reverse(serial, port, port)
@@ -93,7 +96,8 @@ def measure(adb, serial, seconds=6.0, port=PROBE_PORT, log=None):
         try:
             conn, _addr = srv.accept()
         except socket.timeout:
-            out["error"] = "手机没有回连（reverse 隧道不通）"
+            out["error"] = i18n.t("手机没有回连（reverse 隧道不通）",
+                                  "The phone never called back (the reverse tunnel is down)")
             return out
 
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -109,7 +113,7 @@ def measure(adb, serial, seconds=6.0, port=PROBE_PORT, log=None):
             try:
                 conn.sendall(chunk)
             except OSError as e:
-                out["error"] = "链路中断: %s" % e
+                out["error"] = i18n.t("链路中断: %s", "The link broke: %s") % e
                 break
             sent += len(chunk)
         out["sent"] = sent
@@ -124,8 +128,11 @@ def measure(adb, serial, seconds=6.0, port=PROBE_PORT, log=None):
         el = max(time.time() - start, 1e-6)
 
         if not recv:
-            out["error"] = ("手机没有回报收到多少字节（链路拥塞或隧道中断），"
-                            "本次测速不可信")
+            out["error"] = i18n.t("手机没有回报收到多少字节（链路拥塞或隧道中断），"
+                                  "本次测速不可信",
+                                  "The phone never reported how many bytes it got "
+                                  "(congested link or a broken tunnel), so this "
+                                  "measurement cannot be trusted")
             say("测速失败: 发出 %.1f MB，手机未回报接收量" % (sent / 1048576.0), "err")
             return out
 
@@ -157,11 +164,13 @@ def measure(adb, serial, seconds=6.0, port=PROBE_PORT, log=None):
 def verdict(mbps):
     """Human hint about what a measured link can carry."""
     if mbps <= 0:
-        return "未知"
+        return i18n.t("未知", "Unknown")
     if mbps < 15:
-        return "USB 1.1 全速线缆（换一根数据线可大幅提速）"
+        return i18n.t("USB 1.1 全速线缆（换一根数据线可大幅提速）",
+                      "USB 1.1 full-speed cable (a different cable is much faster)")
     if mbps < 60:
-        return "USB 1.1/2.0 全速（偏低，换线或换口更好）"
+        return i18n.t("USB 1.1/2.0 全速（偏低，换线或换口更好）",
+                      "USB 1.1/2.0 full speed (low -- a better cable or port helps)")
     if mbps < 400:
-        return "USB 2.0 高速"
-    return "USB 3.x 级别"
+        return i18n.t("USB 2.0 高速", "USB 2.0 high speed")
+    return i18n.t("USB 3.x 级别", "USB 3.x class")

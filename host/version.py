@@ -5,10 +5,30 @@ the update checker, the 关于 dialog, the README links -- reads it from here, s
 bumping a release is a one-line change.
 """
 
+import i18n
+
 APP_NAME = "DroidExtend"
-APP_TITLE = "安卓拓展屏"
-APP_VERSION = "1.5.1"
-APP_DATE = "2026-10-12"
+
+
+def app_title():
+    """The window title, in the language that is active *now*.
+
+    A module-level constant cannot do this job: app.py imports this file at line
+    64 but only calls `i18n.set_lang()` inside the window's `__init__` (line 212),
+    so anything evaluated at import time is always Chinese.  app.py should call
+    this after `set_lang()` -- once when building the window, and again from
+    `_refresh_captions()` so a runtime language switch reaches the title bar too.
+    """
+    return i18n.t("安卓拓展屏", "Android Extended Screen")
+
+
+# Kept for `from version import APP_TITLE`: correct for the language that was
+# active when this module was first imported, and it is what the packaged
+# dialogs print.  Prefer app_title() wherever the title is actually rendered.
+APP_TITLE = app_title()
+
+APP_VERSION = "1.6.3"
+APP_DATE = "2026-10-16"
 
 REPO = "Blank2007/DroidExtend"
 REPO_URL = "https://github.com/" + REPO

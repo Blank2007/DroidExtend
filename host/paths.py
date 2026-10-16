@@ -65,7 +65,10 @@ def data_dir(refresh=False):
         return _DATA_DIR
     remembered = ""
     try:
-        with open(_POINTER, "r", encoding="utf-8") as f:
+        # utf-8-sig: this file sits next to settings.json, so it can pick up a
+        # BOM the same way -- and a leading \ufeff would turn the remembered
+        # folder into a path that does not exist.
+        with open(_POINTER, "r", encoding="utf-8-sig") as f:
             remembered = f.read().strip()
     except Exception:
         remembered = ""
