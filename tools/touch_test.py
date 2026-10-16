@@ -131,11 +131,14 @@ print("cursor after swipe     = %s" % (cursor(),))
 print("touch stats            = %s" % touch.stats)
 print("events from swipe      = %d" % (touch.stats["events"] - before))
 
-# the phone's own touch stream should also have reached the host's injector
+# the phone's own touch stream should also have reached the host's injector.
+# Decode explicitly: the app log is UTF-8 with Chinese in it, and with
+# text=True Python would use the console's GBK code page and die on the first
+# byte it cannot map -- taking stdout down with it.
 r = subprocess.run([ADB, "-s", SERIAL, "logcat", "-d", "-s", "DroidExtend:I"],
-                   capture_output=True, text=True)
+                   capture_output=True)
 print("--- app log tail ---")
-for l in r.stdout.splitlines()[-6:]:
+for l in r.stdout.decode("utf8", "replace").splitlines()[-6:]:
     print(l)
 
 cap.stop()
