@@ -1,7 +1,12 @@
 package com.droidextend;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -15,6 +20,7 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
@@ -22,6 +28,7 @@ import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -55,6 +62,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final long TAP_MS = 300;
     private static final float TAP_SLOP = 24f;
 
+    /**
+     * Hold this long without moving and it is a right click, the way every
+     * other remote-desktop client on a touch screen does it.  Matches
+     * ViewConfiguration.getLongPressTimeout().
+     */
+    private static final long LONG_PRESS_MS = 500;
+
     private VideoSurface surfaceView;
     private HudView hud;
     private VideoDecoder decoder;
@@ -65,6 +79,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private FrameLayout root;
     private View sheet;
     private boolean started;
+    private BroadcastReceiver screenReceiver;
+    /** #1: true while the terms dialog is up, so a second surface cannot stack two. */
+    private boolean privacyAsking;
 
     /**
      * A SurfaceView that keeps the stream's aspect ratio.
@@ -132,6 +149,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private float lastCx, lastCy;        // two-finger centroid, in video pixels
     private float startCx, startCy;
     private long gestureStart;
+    /** Where the current one-finger gesture landed, in view coordinates. */
+    private float downX, downY;
+    /** Set once the finger has moved past touchSlop; a drag, not a tap. */
+    private boolean dragging;
+    /** Set when the long press already sent its right click. */
+    private boolean longPressed;
+    /**
+     * How far a finger may wander before a tap becomes a drag -- the platform's
+     * own touch slop, in the platform's own units.
+     *
+     * Windows has a drag threshold of a few pixels, and every real finger
+     * wobbles more than that the moment it lands.  Without a dead zone the
+     * tiniest tremor turns a click into a drag: files get moved instead of
+     * opened, windows get dragged instead of focused.
+     */
+    private int touchSlop;
 
     private float dp(float v) {
         return v * getResources().getDisplayMetrics().density;
@@ -141,6 +174,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = new Prefs(this);
+        // Apply the language before any text is built: every label goes through
+        // Lang.t(), so setting it later would leave the window half translated.
+        Lang.set(Lang.resolve(prefs.lang(), getResources().getConfiguration().locale));
         AppLog.init(this);
         AppLog.setEnabled(prefs.logging());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -148,6 +184,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
+        touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
 
         surfaceView = new VideoSurface(this);
         surfaceView.setFill(prefs.fill());
@@ -180,6 +217,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         setContentView(root);
         decoder = new VideoDecoder();
         input = new InputClient("127.0.0.1", InputClient.PORT);
+        registerScreenReceiver();
 
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (pm != null) {
@@ -247,13 +285,46 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
 
         TextView title = new TextView(this);
-        title.setText("显示设置");
+        title.setText(Lang.t("显示设置", "Display settings"));
         title.setTextColor(getResources().getColor(R.color.hud_text));
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         card.addView(title);
 
-        card.addView(check("状态浮窗（码率 / 帧率 / 延迟）", prefs.showHud(),
+        // The language picker goes first: it is the one setting that changes
+        // the meaning of every other line in this panel.
+        Button langBtn = button(Lang.t("语言：", "Language: ") + Lang.label(prefs.lang()));
+        langBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                final String[] codes = Lang.choices();
+                String[] names = new String[codes.length];
+                for (int i = 0; i < codes.length; i++) {
+                    names[i] = Lang.label(codes[i]);
+                }
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle(Lang.t("语言", "Language"))
+                        .setItems(names, new DialogInterface.OnClickListener() {
+                            @Override public void onClick(DialogInterface d, int which) {
+                                String picked = codes[which];
+                                if (picked.equals(prefs.lang())) {
+                                    return;
+                                }
+                                prefs.setLang(picked);
+                                AppLog.i("lang  语言切换到 " + picked);
+                                // Everything already on screen was built in the
+                                // old language, and retranslating a live view
+                                // tree is more machinery than this app needs:
+                                // rebuild instead.
+                                recreate();
+                            }
+                        })
+                        .show();
+            }
+        });
+        card.addView(langBtn);
+
+        card.addView(check(Lang.t("状态浮窗（码率 / 帧率 / 延迟）",
+                        "Status overlay (bitrate / fps / latency)"), prefs.showHud(),
                 new CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(CompoundButton b, boolean on) {
                         prefs.set(Prefs.SHOW_HUD, on);
@@ -261,7 +332,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 }));
 
-        card.addView(check("让画面铺满屏幕（裁掉多余边缘）", prefs.fill(),
+        card.addView(check(Lang.t("让画面铺满屏幕（裁掉多余边缘）",
+                        "Fill the screen (crop the extra edges)"), prefs.fill(),
                 new CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(CompoundButton b, boolean on) {
                         prefs.set(Prefs.FILL, on);
@@ -269,19 +341,38 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 }));
 
+        // --- 触摸操作 ---------------------------------------------------
+        // The gestures are the whole point of the app and not one of them is
+        // guessable, so they are written down here, where somebody holding the
+        // phone will actually find them -- not only in the README.
+        TextView touchTitle = new TextView(this);
+        touchTitle.setText(Lang.t("触摸操作", "Touch controls"));
+        touchTitle.setTextColor(getResources().getColor(R.color.hud_text));
+        touchTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        touchTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        touchTitle.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(4)));
+        card.addView(touchTitle);
+
+        TextView touchHelp = new TextView(this);
+        touchHelp.setText(touchHelp());
+        touchHelp.setTextColor(getResources().getColor(R.color.hud_dim));
+        touchHelp.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        touchHelp.setLineSpacing(0f, 1.35f);
+        card.addView(touchHelp);
+
         final LinearLayout logBox = new LinearLayout(this);
         logBox.setOrientation(LinearLayout.VERTICAL);
         logBox.setVisibility(prefs.logging() ? View.VISIBLE : View.GONE);
 
         TextView logPath = new TextView(this);
-        logPath.setText("日志文件：\n" + AppLog.path());
+        logPath.setText(Lang.t("日志文件：", "Log file: ") + "\n" + AppLog.path());
         logPath.setTextColor(getResources().getColor(R.color.hud_dim));
         logPath.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         logPath.setTextIsSelectable(true);
         logBox.addView(logPath);
 
         Button clear = new Button(this);
-        clear.setText("清空日志");
+        clear.setText(Lang.t("清空日志", "Clear log"));
         clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         clear.setTextColor(getResources().getColor(R.color.hud_text));
         clear.setBackgroundTintList(ColorStateList.valueOf(0x33FFFFFF));
@@ -295,13 +386,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 AppLog.i("log   用户清空了日志文件");
                 // Clearing a file is exactly the kind of thing that gives no
                 // visible feedback, so say it out loud.
-                Toast.makeText(MainActivity.this, "已清空日志", Toast.LENGTH_SHORT).show();
+                Toast.makeText(MainActivity.this, Lang.t("已清空日志", "Log cleared"),
+                        Toast.LENGTH_SHORT).show();
             }
         });
         logBox.addView(clear);
         card.addView(logBox);
 
-        card.addView(check("把日志写到文件（默认关闭）", prefs.logging(),
+        card.addView(check(Lang.t("把日志写到文件（默认关闭）",
+                        "Write the log to a file (off by default)"), prefs.logging(),
                 new CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(CompoundButton b, boolean on) {
                         prefs.set(Prefs.LOGGING, on);
@@ -310,16 +403,80 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 }));
 
+        // Motion is on by default, but a phone that stutters is a phone whose
+        // owner will blame the stream -- so it stays switchable.
+        card.addView(check(Lang.t("界面动画", "Interface animation"), prefs.anim(),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                        prefs.set(Prefs.ANIM, on);
+                    }
+                }));
+
+        // --- 后台保活 ---------------------------------------------------
+        // The single most common "it just stops working" report on Android is
+        // the system deciding we are not worth keeping.  Both fixes live in
+        // manufacturer settings pages, so all we can do is hand out the links.
+        TextView kaTitle = new TextView(this);
+        kaTitle.setText(Lang.t("后台保活", "Staying alive in the background"));
+        kaTitle.setTextColor(getResources().getColor(R.color.hud_text));
+        kaTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        kaTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        kaTitle.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(4)));
+        card.addView(kaTitle);
+
+        final TextView kaState = new TextView(this);
+        kaState.setText(KeepAlive.stateText(this));
+        kaState.setTextColor(KeepAlive.batteryRestricted(this)
+                ? getResources().getColor(R.color.accent)
+                : getResources().getColor(R.color.hud_dim));
+        kaState.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        card.addView(kaState);
+
+        Button kaBat = button(Lang.t("关掉省电限制", "Turn off battery limits"));
+        kaBat.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                openSettings(KeepAlive.batteryIntent(MainActivity.this));
+                // The system dialog is a separate activity, so re-read the
+                // answer when we get back instead of guessing it now.
+                kaState.postDelayed(new Runnable() {
+                    @Override public void run() {
+                        kaState.setText(KeepAlive.stateText(MainActivity.this));
+                    }
+                }, 1500);
+            }
+        });
+        card.addView(kaBat);
+
+        final Intent vendor = KeepAlive.autostartIntent(this);
+        Button kaAuto = button(vendor != null
+                ? Lang.t("打开自启动管理", "Open auto-start manager")
+                : Lang.t("打开应用信息", "Open app info"));
+        kaAuto.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                openSettings(vendor != null ? vendor : KeepAlive.detailsIntent(MainActivity.this));
+            }
+        });
+        card.addView(kaAuto);
+
+        TextView kaHint = new TextView(this);
+        kaHint.setText(keepAliveHint());
+        kaHint.setTextColor(getResources().getColor(R.color.hud_dim));
+        kaHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        kaHint.setPadding(0, Math.round(dp(6)), 0, 0);
+        card.addView(kaHint);
+
         TextView hint = new TextView(this);
-        hint.setText("浮窗只占用左上角，右侧齿轮随时可以打开这里；"
-                + "其它位置的点按都会照常传到电脑。");
+        hint.setText(Lang.t(
+                "浮窗只占用左上角，右侧齿轮随时可以打开这里；其它位置的点按都会照常传到电脑。",
+                "The overlay only covers the top-left corner, and the gear on the right opens this "
+                        + "panel at any time; taps anywhere else reach the PC as usual."));
         hint.setTextColor(getResources().getColor(R.color.hud_dim));
         hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         hint.setPadding(0, Math.round(dp(10)), 0, 0);
         card.addView(hint);
 
         Button close = new Button(this);
-        close.setText("关闭");
+        close.setText(Lang.t("关闭", "Close"));
         close.setTextColor(getResources().getColor(R.color.hud_text));
         close.setBackgroundTintList(ColorStateList.valueOf(
                 getResources().getColor(R.color.accent)));
@@ -334,16 +491,26 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         card.addView(close);
 
+        // The panel now carries the touch-controls list and no longer fits on
+        // every screen, so it scrolls instead of pushing the Close button off
+        // the bottom edge where nothing can reach it.
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(card);
         FrameLayout.LayoutParams cl = new FrameLayout.LayoutParams(
                 Math.min(Math.round(dp(560)), getResources().getDisplayMetrics().widthPixels
                         - Math.round(dp(56))),
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         cl.gravity = Gravity.CENTER;
-        scrim.addView(card, cl);
+        int margin = Math.round(dp(24));
+        cl.topMargin = margin;
+        cl.bottomMargin = margin;
+        scrim.addView(scroll, cl);
 
         sheet = scrim;
         root.addView(sheet, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        Anim.in(sheet, this, prefs);
         AppLog.i("ui    打开显示设置");
     }
 
@@ -357,15 +524,119 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cb.setButtonTintList(ColorStateList.valueOf(getResources().getColor(R.color.accent)));
         cb.setOnCheckedChangeListener(l);
         cb.setPadding(0, Math.round(dp(10)), 0, Math.round(dp(10)));
+        feel(cb);
         return cb;
+    }
+
+    /**
+     * A secondary button, styled like the "清空日志" one.
+     */
+    private Button button(String text) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        b.setTextColor(getResources().getColor(R.color.hud_text));
+        b.setBackgroundTintList(ColorStateList.valueOf(0x33FFFFFF));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Math.round(dp(6));
+        b.setLayoutParams(lp);
+        feel(b);
+        return b;
+    }
+
+    /**
+     * Give a control its press acknowledgement.
+     *
+     * <p>The listener returns false, which is the whole trick: the touch carries
+     * on to the real click handler, so this only ever adds a flinch.  A listener
+     * that returned true here would silently swallow every button in the panel.
+     */
+    private void feel(final View v) {
+        v.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                if (e.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    Anim.tap(view, MainActivity.this, prefs);
+                }
+                return false;
+            }
+        });
+    }
+
+    /**
+     * Fire a settings intent, surviving the phones that do not have the page.
+     * An OEM settings screen is not part of the public API and can vanish in an
+     * update, so a missing one is a normal outcome, not a crash.
+     */
+    private void openSettings(Intent i) {
+        try {
+            startActivity(i);
+        } catch (Throwable t) {
+            AppLog.w("ui    打不开设置页", t);
+            Toast.makeText(this, Lang.t("这台手机没有这个设置页", "This phone has no such settings page"),
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** The words under the keep-alive buttons. */
+    private String keepAliveHint() {
+        String lock = Lang.t(
+                "在「最近任务」里把本应用下拉锁定，按「清理全部」时才不会被一起清掉。",
+                "Lock this app in the recents list (pull its card down) so \"clear all\" spares it.");
+        if (!KeepAlive.isStrictVendor()) {
+            return lock;
+        }
+        return Lang.t(
+                "这台手机的系统对后台管得比较严，建议同时把本应用加进自启动白名单。",
+                "This phone's system manages background apps strictly -- also add us to its auto-start whitelist.")
+                + "\n" + lock;
+    }
+
+    /** Every gesture this app understands, spelled out in the settings panel. */
+    private String touchHelp() {
+        return Lang.t(
+                "单指点击　　　　单击左键\n"
+                + "单指连点两下　　双击左键\n"
+                + "单指拖动　　　　按住左键拖动（选中、移动窗口、拉选框）\n"
+                + "单指长按半秒　　单击右键\n"
+                + "双指上下滑动　　滚轮\n"
+                + "双指快速轻点　　单击右键\n"
+                + "\n"
+                + "手指落下时那一点点抖动不会被当成拖动，点一下就是点一下。"
+                + "拖动的位置按画面帧率发送（约每秒 60 次），并且只发最新的那一个；"
+                + "但按下、抬起、右键、滚轮一个都不会少。"
+                + "连点两下要落在同一处附近才算双击，程序会把第二下对齐到第一下的位置。",
+                "one finger, tap          left click\n"
+                + "one finger, tap twice    left double-click\n"
+                + "one finger, drag         drag with the left button (select, move a\n"
+                + "                         window, drag a box)\n"
+                + "one finger, hold 1/2 s   right click\n"
+                + "two fingers, slide       wheel\n"
+                + "two fingers, quick tap   right click\n"
+                + "\n"
+                + "The wobble of a finger landing is not treated as a drag: a tap is a "
+                + "tap. Drag positions go out at the frame rate (about 60 a second) and "
+                + "only the newest one is sent, but presses, releases, right clicks and "
+                + "wheel turns are never dropped. Two taps count as a double-click only "
+                + "when they land near each other, and the second one is snapped onto "
+                + "the first.");
     }
 
     private void hideSettings() {
         if (sheet == null) {
             return;
         }
-        root.removeView(sheet);
+        // Take it out of the field first: a second tap while the fade is still
+        // running must not be able to find it again, and the callback below
+        // removes the view it was given, not whatever "sheet" points at then.
+        final View gone = sheet;
         sheet = null;
+        Anim.out(gone, this, prefs, new Runnable() {
+            @Override
+            public void run() {
+                root.removeView(gone);
+            }
+        });
     }
 
     // ------------------------------------------------------------- touch -> PC
@@ -377,6 +648,28 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private float ny(float viewY) {
         float h = Math.max(surfaceView.getHeight(), 1);
         return viewY / h;
+    }
+
+    /**
+     * Where a tap is released.
+     *
+     * A tap releases where it went down, not wherever the finger had drifted
+     * to by the time it came up.  The dead zone already stops that drift from
+     * moving the cursor, but the release still went to the drifted spot: a few
+     * pixels of nudge on whatever small thing was under the finger, and enough
+     * to push two taps outside the little rectangle Windows insists both of
+     * them land inside before it will call them a double click.  A real drag
+     * still ends wherever the finger actually is.
+     *
+     * (getX() is pointer 0, which is the finger that went down first in every
+     * case these two are called from.)
+     */
+    private float tapUpX(MotionEvent e) {
+        return nx(dragging ? e.getX() : downX);
+    }
+
+    private float tapUpY(MotionEvent e) {
+        return ny(dragging ? e.getY() : downY);
     }
 
     /** Convert a view-space delta into stream pixels, so scroll feels the same
@@ -396,6 +689,26 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return (e.getY(0) + e.getY(1)) * 0.5f;
     }
 
+    /**
+     * Hold still and it is a right click -- the gesture every other
+     * remote-desktop client on a touch screen uses.
+     *
+     * The left button goes up first.  The PC has been holding it down since the
+     * initial ACTION_DOWN, and a right click on top of a held left button is a
+     * different thing entirely (Windows reads it as a drag).
+     */
+    private final Runnable longPress = new Runnable() {
+        @Override public void run() {
+            if (gesture != 1 || dragging || longPressed) {
+                return;
+            }
+            longPressed = true;
+            input.touch(InputClient.UP, nx(downX), ny(downY));
+            input.touch(InputClient.RCLICK, nx(downX), ny(downY));
+            AppLog.i("touch long press -> right click at " + downX + "," + downY);
+        }
+    };
+
     private boolean handleTouch(MotionEvent e) {
         if (input == null || !started) {
             return true;
@@ -414,14 +727,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         switch (action) {
             case MotionEvent.ACTION_DOWN:
                 gesture = 1;
-                input.touch(InputClient.DOWN, nx(e.getX()), ny(e.getY()));
+                dragging = false;
+                longPressed = false;
+                downX = e.getX();
+                downY = e.getY();
+                input.touch(InputClient.DOWN, nx(downX), ny(downY));
+                surfaceView.postDelayed(longPress, LONG_PRESS_MS);
                 return true;
 
             case MotionEvent.ACTION_POINTER_DOWN:
                 // A second finger arrived: the drag we started is over, and
                 // from here on this is a scroll (or a right-click tap).
-                if (gesture == 1) {
-                    input.touch(InputClient.UP, nx(e.getX(0)), ny(e.getY(0)));
+                surfaceView.removeCallbacks(longPress);
+                if (gesture == 1 && !longPressed) {
+                    input.touch(InputClient.UP, tapUpX(e), tapUpY(e));
                 }
                 gesture = 2;
                 lastCx = twoX(e);
@@ -452,7 +771,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         input.scroll(dx, dy);
                     }
                 } else if (gesture == 1) {
-                    input.touch(InputClient.MOVE, nx(e.getX()), ny(e.getY()));
+                    if (!dragging) {
+                        if (Math.hypot(e.getX() - downX, e.getY() - downY) <= touchSlop) {
+                            // Still a tap.  A finger is never perfectly still when
+                            // it lands, and forwarding that tremor is what makes a
+                            // click come out as a drag on the PC.
+                            return true;
+                        }
+                        dragging = true;
+                        surfaceView.removeCallbacks(longPress);
+                    }
+                    if (!longPressed) {
+                        input.touch(InputClient.MOVE, nx(e.getX()), ny(e.getY()));
+                    }
                 }
                 return true;
 
@@ -469,10 +800,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
-                if (gesture == 1) {
-                    input.touch(InputClient.UP, nx(e.getX()), ny(e.getY()));
+                surfaceView.removeCallbacks(longPress);
+                if (gesture == 1 && !longPressed) {
+                    input.touch(InputClient.UP, tapUpX(e), tapUpY(e));
                 }
                 gesture = 0;
+                dragging = false;
+                longPressed = false;
                 return true;
 
             default:
@@ -498,8 +832,45 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         decoder.setSurface((Surface) null);
     }
 
+    /**
+     * #1: the terms, once, before anything is captured or sent.
+     *
+     * Not cancellable, and declining closes the activity -- there is no "later"
+     * on offer, because later would mean running without them.
+     */
+    private void askPrivacy() {
+        new AlertDialog.Builder(this)
+                .setTitle(Terms.title())
+                .setMessage(Terms.body())
+                .setCancelable(false)
+                .setPositiveButton(Terms.agree(), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        prefs.setPrivacy(Terms.VERSION);
+                        privacyAsking = false;
+                        AppLog.i("已接受使用条款与隐私说明 v" + Terms.VERSION);
+                        startClientOnce();
+                    }
+                })
+                .setNegativeButton(Terms.decline(), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        AppLog.i("没有同意使用条款，退出。");
+                        finish();
+                    }
+                })
+                .show();
+    }
+
     private void startClientOnce() {
         if (started) {
+            return;
+        }
+        if (Terms.needsAccept(prefs.privacy())) {
+            if (!privacyAsking) {
+                privacyAsking = true;
+                askPrivacy();
+            }
             return;
         }
         started = true;
@@ -556,6 +927,35 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         AppLog.i("client started");
     }
 
+    /**
+     * Tell the PC when the phone's screen goes off or comes back.
+     *
+     * The stream itself does not stop when the screen goes off -- Android just
+     * stops compositing -- so without this the PC shows a frozen frame and has
+     * no idea why.  Both are protected system broadcasts, which is why no
+     * export flag is needed on API 33+.
+     */
+    private void registerScreenReceiver() {
+        screenReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (input == null) {
+                    return;
+                }
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    input.notice(InputClient.SCREEN_OFF);
+                } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    input.notice(InputClient.SCREEN_ON);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(screenReceiver, filter);
+    }
+
     @Override
     protected void onPause() {
         super.onPause();
@@ -566,17 +966,35 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override
     protected void onDestroy() {
+        if (screenReceiver != null) {
+            try {
+                unregisterReceiver(screenReceiver);
+            } catch (Throwable ignored) {
+                // Already gone -- nothing to undo.
+            }
+            screenReceiver = null;
+        }
         stopStream();
         super.onDestroy();
     }
 
     private void stopStream() {
+        // Only the first caller gets to say goodbye: onPause and onDestroy both
+        // land here when the user backs out, and the PC should hear it once.
+        boolean wasStarted = started;
         started = false;
         if (client != null) {
             client.shutdown();
             client = null;
         }
         if (input != null) {
+            if (wasStarted) {
+                // Without the flush the record we just queued dies with the
+                // socket, which is exactly the "the app vanished" message the
+                // PC needs to distinguish this from a yanked cable.
+                input.notice(InputClient.APP_GONE);
+                input.flush(400);
+            }
             input.stop();
         }
         if (decoder != null) {

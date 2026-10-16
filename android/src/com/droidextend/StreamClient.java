@@ -77,7 +77,7 @@ public class StreamClient extends Thread {
                 connectAndStream(unit);
             } catch (Throwable t) {
                 if (running) {
-                    status("等待电脑端…", false);
+                    status(Lang.t("等待电脑端…", "Waiting for the PC…"), false);
                     Log.w(TAG, "stream ended: " + t);
                 }
             } finally {
@@ -89,7 +89,7 @@ public class StreamClient extends Thread {
             }
             try { Thread.sleep(700); } catch (InterruptedException ignored) { }
         }
-        status("已停止", false);
+        status(Lang.t("已停止", "Stopped"), false);
     }
 
     private void closeQuietly() {
@@ -99,7 +99,7 @@ public class StreamClient extends Thread {
     }
 
     private void connectAndStream(byte[] unit) throws IOException {
-        status("连接 " + host + ":" + port + " …", false);
+        status(Lang.t("连接 ", "Connecting to ") + host + ":" + port + " …", false);
         Socket s = new Socket();
         s.setTcpNoDelay(true);
         s.setReceiveBufferSize(1024 * 1024);
@@ -137,7 +137,7 @@ public class StreamClient extends Thread {
         if (listener != null) {
             listener.onNote(note);
         }
-        status(w + "x" + h + " @" + fps + "fps  已连接", true);
+        status(w + "x" + h + " @" + fps + "fps  " + Lang.t("已连接", "connected"), true);
         Log.i(TAG, "handshake " + w + "x" + h + "@" + fps + " skew=" + clockSkewUs
                 + "us note=" + note);
 

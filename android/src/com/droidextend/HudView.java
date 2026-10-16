@@ -61,7 +61,9 @@ public class HudView extends View {
     private Listener listener;
     private Stats stats = new Stats();
     private String note = "";
-    private String status = "正在查找电脑端…";
+    // Empty means "say the default": the text is picked at draw time so it is
+    // already in whatever language the user chose.
+    private String status = "";
     private boolean streaming;
     private boolean panelWanted = true;
     private boolean everConnected;
@@ -255,7 +257,7 @@ public class HudView extends View {
         }
 
         String head = streaming ? line1()
-                : (status.isEmpty() ? "正在重连…" : status);
+                : (status.isEmpty() ? Lang.t("正在重连…", "Reconnecting…") : status);
         drawShadowed(c, head, x + dotR * 2 + dp(6), y, textPaint);
         drawShadowed(c, line2(), x + dotR * 2 + dp(6), y + gap, subPaint);
         if (!note.isEmpty()) {
@@ -284,10 +286,16 @@ public class HudView extends View {
     private void drawWaiting(Canvas c) {
         float cx = getWidth() / 2f;
         float cy = getHeight() / 2f;
-        String head = status.isEmpty() ? "正在查找电脑端…" : status;
+        String head = status.isEmpty()
+                ? Lang.t("正在查找电脑端…", "Looking for the PC…") : status;
         c.drawText(head, cx, cy, centrePaint);
-        c.drawText("用数据线连上电脑，然后在电脑端点「开始投屏」", cx, cy + sp(26), centreSubPaint);
-        c.drawText("拖动右上角的按钮可以移动它，点一下打开设置", cx, cy + sp(46), centreSubPaint);
+        c.drawText(Lang.t("用数据线连上电脑，然后在电脑端点「开始投屏」",
+                        "Connect this phone to the PC with the USB cable, "
+                                + "then press \"Start\" on the PC"),
+                cx, cy + sp(26), centreSubPaint);
+        c.drawText(Lang.t("拖动右上角的按钮可以移动它，点一下打开设置",
+                        "Drag the top-right button to move it; tap it to open the settings"),
+                cx, cy + sp(46), centreSubPaint);
     }
 
     /**
