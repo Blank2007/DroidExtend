@@ -63,6 +63,16 @@ worth knowing:
   35 MB installer through the default opener dies with `[Errno 10054]`. The
   script uses an explicit no-proxy opener. Downloads work fine either way.
 
+**What the release body contains.** Only versions that have **no release page of
+their own yet**, plus the one being published. If 1.6.4 was released, then the
+1.6.5 body starts at 1.6.5 -- do not re-integrate 1.6.0-1.6.4 into it, they are
+already written down and linked from the v1.6.4 page. (Getting this wrong once
+produced a 24 k-character body that repeated six already-published sections.)
+
+Also: `release.py` appends its own `### 校验` table to the notes. If the notes
+file already has a `## 校验` section, the page ends up with two -- PATCH the
+release body back to the file's own text afterwards.
+
 ## Two things that will waste your afternoon
 
 **1. Do not run an executable or an installer from inside the workspace.** The
