@@ -79,14 +79,25 @@ def find_vdd_adapter(adapters=None):
 
 
 def device_node_exists():
-    """Ask PnP whether a ROOT\\MTTVDD node exists at all (works even when the
-    adapter is not currently attached to the desktop)."""
-    ps = ("$d = Get-PnpDevice -ErrorAction SilentlyContinue | "
-          "Where-Object { $_.InstanceId -like 'ROOT\\MTTVDD*' }; "
-          "if ($d) { $d | ForEach-Object { $_.InstanceId + '|' + $_.Status + '|' + $_.FriendlyName } }")
+    """Ask PnP whether our device node exists at all (works even when the
+    adapter is not currently attached to the desktop).
+
+    Matched by hardware id, not by instance id.  A root-enumerated device's
+    instance id is `ROOT\\DISPLAY\\0001`, so the old filter
+    `InstanceId -like 'ROOT\\MTTVDD*'` never matched anything and this function
+    silently returned an empty list on every machine.  Nothing broke because
+    `status()` prefers the adapter, but anything that trusted the node list saw
+    "no device" on a working install.
+    """
+    ps = ("Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { "
+          "$h = Get-PnpDeviceProperty -InstanceId $_.InstanceId "
+          "-KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue; "
+          "$j = ''; if ($h -and $h.Data) { $j = ($h.Data -join ';') }; "
+          "if ($j -match 'MttVDD') { "
+          "$_.InstanceId + '|' + $_.Status + '|' + $_.FriendlyName } }")
     try:
         out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=40,
+                             capture_output=True, text=True, timeout=60,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     except Exception:
         return []
@@ -357,6 +368,341 @@ def add_resolution(width, height, hz=60):
     except OSError:
         return None
     return True
+
+
+# --- turning the monitor off for real ---------------------------------------
+#
+# The driver builds its monitors while its device node starts, from
+# <monitors><count> in vdd_settings.xml.  Nothing at runtime can add or remove
+# one: the shipped C:\VirtualDisplayDriver folder holds only the DLL, the INF,
+# the catalog and this XML -- no control tool, no IOCTL.  So the only lever is
+# that file plus a device restart, and a device restart needs admin.
+#
+# That asymmetry is what the two "off" modes in settings.vdd_off_mode are about:
+#   deep     -- count 0 + restart: nothing exists at boot, remote-desktop tools
+#               cannot offer it, and one UAC prompt is spent each way
+#   desktop  -- count 1, win_display.detach() only: the device exists but is
+#               never part of the desktop, and no prompt is ever shown
+#
+# A crash in the middle of a stream can leave count at 1 with nobody to lower
+# it; the app then degrades to detaching and says so, see app._vdd_off_work.
+
+_RESTART_PS = r"""$ErrorActionPreference = 'Continue'
+$log = __LOG__
+function Say($m) { if ($log) { try { Add-Content -LiteralPath $log -Value $m -Encoding UTF8 } catch { } } }
+Say 'begin'
+$ids = @()
+Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object {
+    $h = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue
+    $j = ''
+    if ($h -and $h.Data) { $j = ($h.Data -join ';') }
+    if ($j -match 'MttVDD') { $ids += $_.InstanceId }
+}
+if (-not $ids) { Say 'no-node'; exit 4 }
+$bad = 0
+foreach ($id in $ids) {
+    Say ('node ' + $id)
+    $out = & pnputil /restart-device $id 2>&1
+    Say ('pnputil rc=' + $LASTEXITCODE + ' ' + ($out -join ' '))
+    if ($LASTEXITCODE -ne 0) {
+        Say 'fallback disable/enable'
+        Disable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 700
+        Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    $d = Get-PnpDevice -InstanceId $id -ErrorAction SilentlyContinue
+    if (-not $d -or $d.Status -ne 'OK') { $bad = 1; Say 'node not OK afterwards' }
+}
+if ($bad) { Say 'failed'; exit 5 }
+Say 'done'
+exit 0
+"""
+
+
+def declared_count():
+    """How many monitors the driver will create the next time it starts.
+
+    None when the settings file is missing or has no <monitors><count>.
+    """
+    path = settings_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"<monitors\b[^>]*>.*?<count>\s*(\d+)\s*</count>", text, re.S)
+    return int(m.group(1)) if m else None
+
+
+def set_count(n):
+    """Rewrite <monitors><count> in the driver settings file.
+
+    True = the file changed, False = it already said that, None = cannot write.
+    Like add_resolution this needs no elevation: the installer leaves
+    C:\\VirtualDisplayDriver owned by the user who ran it.  The driver does not
+    notice until its device node restarts -- see restart_device().
+    """
+    n = int(n)
+    path = settings_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    block = re.search(r"<monitors\b[^>]*>.*?</monitors>", text, re.S)
+    if not block:
+        return None
+    old = block.group(0)
+    new = re.sub(r"(<count>\s*)(\d+)(\s*</count>)", r"\g<1>%d\g<3>" % n, old, count=1)
+    if new == old:
+        return False if re.search(r"<count>\s*%d\s*</count>" % n, old) else None
+    text = text[:block.start()] + new + text[block.end():]
+    try:
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        return None
+    return True
+
+
+def _run_ps1(body, tag, log=None, elevate=True, timeout=180):
+    """Run a PowerShell body, elevated unless we already are.  (code, text).
+
+    The elevated child gets its own console, so its stdout is thrown away; the
+    body is therefore written to also append to data_dir()\\vdd_off.log and that
+    file is what we read back.
+    """
+    import tempfile
+
+    log = log or (lambda m: None)
+    log_path = os.path.join(data_dir(), "vdd_off.log")
+    try:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+    except OSError:
+        pass
+    script = os.path.join(tempfile.gettempdir(), "droidextend_vdd_%s.ps1" % tag)
+    try:
+        # UTF-8 with BOM: Windows PowerShell 5.1 reads a BOM-less file as ANSI.
+        with open(script, "w", encoding="utf-8-sig") as f:
+            f.write(body.replace("__LOG__", _ps_single(log_path)))
+    except OSError as e:
+        return 1, "cannot write %s: %s" % (script, e)
+
+    ps_args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+    if elevate and not is_admin():
+        try:
+            launcher = _write_elevator(script, ps_args)
+        except OSError as e:
+            return 1, "cannot write the elevation script: %s" % e
+        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+               "-File", launcher]
+        log(i18n.t("正在请求管理员权限（请在弹窗中点击“是”）…",
+                   "asking for administrator rights (please click \"Yes\")..."))
+    else:
+        cmd = ["powershell.exe"] + ps_args
+    try:
+        p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out, _ = p.communicate(timeout=timeout)
+        code = p.returncode
+        text = (out or b"").decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return 1, "timeout"
+    except Exception as e:
+        return 1, str(e)
+    if os.path.isfile(log_path):
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            pass
+    return code, text
+
+
+def restart_device(log=None):
+    """Restart our device node so the driver re-reads vdd_settings.xml.
+
+    Returns (ok, text).  Costs one UAC prompt unless we are already elevated;
+    the caller has to expect the user to cancel.
+    """
+    code, text = _run_ps1(_RESTART_PS, "restart", log=log)
+    if code == 1223:
+        return False, i18n.t(
+            "UAC 被取消 —— 设备没有重启，改过的设置要等下次开机才生效。",
+            "The UAC prompt was cancelled -- the device was not restarted, so the "
+            "change waits for the next boot.")
+    if code == 0:
+        # 判成功只看退出码。提权子进程写的 vdd_off.log 有时继承的是管理员 ACL，
+        # 父进程读不到；以前拿 "done" in text 当判据，结果重启明明成功了却报失败。
+        if not text:
+            text = i18n.t(
+                "设备已重启（退出码 0；提权进程的日志读不到，不影响结果）",
+                "device restarted (exit code 0; the elevated child's log was not "
+                "readable, which does not change the result)")
+        return True, text
+    return False, text
+
+
+def set_count_and_restart(n, log=None):
+    """Write <count> and restart the device so it takes effect now.
+
+    Returns (ok, text).  `ok` is not just "the script exited 0": after the
+    restart we actually wait for the adapter to show up (or to be gone), because
+    that is the thing the caller cares about.
+    """
+    log = log or (lambda m: None)
+    n = int(n)
+    changed = set_count(n)
+    if changed is None:
+        return False, i18n.t("改不了 %s（文件不存在或不可写）",
+                             "cannot write %s (missing or read-only)") % settings_path()
+    log(i18n.t("驱动设置里的虚拟屏数量写成 %d", "monitor count in the driver settings set to %d")
+        % n)
+    ok, text = restart_device(log=log)
+    if not ok:
+        return False, text
+    if n <= 0:
+        gone, secs = wait_gone(timeout=15.0)
+        if gone:
+            log(i18n.t("虚拟屏已从系统里消失（%.1f 秒）", "the virtual display is gone (%.1f s)")
+                % secs)
+        return gone, text
+    a = wait_adapter(timeout=25.0)
+    return (a is not None), text
+
+
+def wait_adapter(timeout=25.0):
+    """Poll until our adapter is enumerable again (it disappears momentarily
+    while the device restarts).  Returns the adapter row or None."""
+    end = time.time() + timeout
+    while time.time() < end:
+        a = find_vdd_adapter()
+        if a is not None:
+            return a
+        time.sleep(0.3)
+    return None
+
+
+def wait_gone(timeout=15.0):
+    """Poll until our adapter is no longer enumerable.  Returns (gone, seconds)."""
+    t0 = time.time()
+    end = t0 + timeout
+    while time.time() < end:
+        if find_vdd_adapter() is None:
+            return True, time.time() - t0
+        time.sleep(0.3)
+    return False, time.time() - t0
+
+
+# ------------------------------------------------------- really off  (1.6.4)
+#
+# `<count>0</count>` does NOT work.  Measured 2026-10-16 on MttVDD 25.7.23:
+# with the count written to 0 and the device node restarted, the adapter still
+# enumerated, the PnP monitor was still Status OK, and the only visible change
+# was the display number going up by one.  The driver treats 0 as an invalid
+# count and falls back to a single monitor -- MttVDD.dll carries the string
+# "Loading singular monitor (Monitor Count is not valid)".
+#
+# What does work is disabling the device node itself: the adapter stops
+# enumerating, the monitor drops to Status "Unknown", and Windows keeps a
+# disabled device disabled across reboots -- so the screen is not there at boot
+# and remote-desktop software cannot offer it.  It costs one UAC prompt to turn
+# off and one to turn back on, which is why this is a mode the user chooses
+# rather than something we do behind their back.
+
+_TOGGLE_PS = r"""$ErrorActionPreference = 'Continue'
+$ids = @()
+Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object {
+    $h = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue
+    $j = ''
+    if ($h -and $h.Data) { $j = ($h.Data -join ';') }
+    if ($j -match 'MttVDD') { $ids += $_.InstanceId }
+}
+if (-not $ids) { Write-Output 'no-node'; exit 4 }
+$bad = 0
+foreach ($id in $ids) {
+    if ('__ACTION__' -eq 'disable') {
+        Disable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+    } else {
+        Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+    $d = Get-PnpDevice -InstanceId $id -ErrorAction SilentlyContinue
+    if ('__ACTION__' -eq 'disable') {
+        if ($d -and $d.Status -eq 'OK') { $bad++ }
+    } else {
+        if (-not $d -or $d.Status -ne 'OK') { $bad++ }
+    }
+    if ($d) { Write-Output ($id + '|' + $d.Status) } else { Write-Output ($id + '|gone') }
+}
+if ($bad -gt 0) { exit 5 }
+exit 0
+"""
+
+
+def device_enabled():
+    """True = the node is started, False = disabled, None = cannot tell."""
+    rows = device_node_exists()
+    if not rows:
+        return None
+    st = (rows[0].get("status") or "").strip().lower()
+    if not st:
+        return None
+    return st == "ok"
+
+
+def set_enabled(on, log=None):
+    """Enable / disable our device node.  Returns (ok, text).
+
+    Success is judged by the observable outcome, not by the exit code alone:
+    after enabling the adapter has to enumerate again, after disabling it has to
+    be gone.  Both are polled, because the driver takes a moment either way.
+    """
+    log = log or (lambda m: None)
+    on = bool(on)
+    body = _TOGGLE_PS.replace("__ACTION__", "enable" if on else "disable")
+    code, text = _run_ps1(body, "toggle", log=log)
+    if code == 1223:
+        if on:
+            return False, i18n.t(
+                "UAC 被取消 —— 虚拟屏没有重新启用，投屏起不来。",
+                "The UAC prompt was cancelled -- the virtual display was not switched "
+                "back on, so streaming cannot start.")
+        return False, i18n.t(
+            "UAC 被取消 —— 虚拟屏没有关掉，它还在系统里。",
+            "The UAC prompt was cancelled -- the virtual display is still there.")
+    if code == 4:
+        return False, i18n.t(
+            "找不到虚拟屏的设备节点，可能驱动还没装好。",
+            "Cannot find the virtual display's device node -- the driver may not be "
+            "installed properly.")
+    if code not in (0, 5):
+        return False, text or i18n.t(
+            "切换设备状态失败（退出码 %d）", "could not toggle the device (exit code %d)"
+        ) % code
+    if on:
+        if wait_adapter(timeout=25.0) is None:
+            return False, i18n.t(
+                "设备已启用，但虚拟屏没有重新出现。",
+                "The device was enabled but the virtual display did not come back.")
+        log(i18n.t("虚拟屏已重新启用", "the virtual display is back on"))
+        return True, text
+    gone, secs = wait_gone(timeout=20.0)
+    if not gone:
+        return False, i18n.t(
+            "设备已禁用，但虚拟屏还在（%.0f 秒内没消失）。",
+            "The device was disabled but the virtual display is still there after "
+            "%.0f s.") % secs
+    log(i18n.t("虚拟屏已彻底关闭（%.1f 秒）：设备节点已禁用，重启也不会自己回来",
+               "the virtual display is switched off for real (%.1f s): the device "
+               "node is disabled, so it will not come back at the next boot") % secs)
+    return True, text
 
 
 def summary_line(st):

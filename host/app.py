@@ -320,6 +320,9 @@ class App(tk.Tk):
         m_tool.add_separator()
         m_tool.add_command(label=i18n.t("清理残留的虚拟屏", "Clean up a leftover virtual screen"),
                            command=self.on_cleanup_orphans)
+        m_tool.add_command(label=i18n.t("彻底关闭虚拟屏（要授权一次）",
+                                        "Shut the virtual display down for real (asks once)"),
+                           command=self.on_vdd_off)
         m_tool.add_command(label=i18n.t("诊断连接问题…", "Diagnose connection problems..."),
                            command=self.on_diagnose)
         m_tool.add_command(label=i18n.t("安装 USB 驱动…", "Install USB driver..."),
@@ -570,6 +573,8 @@ class App(tk.Tk):
             s["autostart"] = bool(self.auto_var.get())
         if hasattr(self, "anim_var"):
             s[anim.KEY] = bool(self.anim_var.get())
+        if hasattr(self, "off_mode_var"):
+            s["vdd_off_mode"] = self.off_mode_var.get()
         if hasattr(self, "chk_var"):
             s["check_updates"] = bool(self.chk_var.get())
         try:
@@ -830,6 +835,26 @@ class App(tk.Tk):
         self.anim_chk = ttk.Checkbutton(right, text=anim.label(), variable=self.anim_var,
                                         command=self._anim_choice)
         self.anim_chk.grid(row=13, column=1, sticky="w", pady=3)
+
+        # 1.6.4 -- how thoroughly to put the virtual screen away whenever we are
+        # not streaming.  "deep" disables the driver's device node, which is the
+        # only thing that actually makes the screen disappear (writing a count of
+        # 0 does not: the driver calls that invalid and keeps one monitor), at the
+        # price of one UAC prompt per switch.  "desktop" only takes it off the
+        # desktop and never asks for anything.
+        self.off_mode_var = tk.StringVar(value=self.settings.get("vdd_off_mode", "deep"))
+        ttk.Label(right, text=i18n.t("不用时：", "When not in use:"),
+                  style="Dim.TLabel").grid(row=14, column=0, sticky="w", pady=(6, 3))
+        self.off_deep_btn = ttk.Radiobutton(
+            right, text=i18n.t("彻底关闭（开机也不出现，远程软件看不到）",
+                               "Switch it off for real (absent at boot, invisible to remote software)"),
+            value="deep", variable=self.off_mode_var, command=self._off_mode_choice)
+        self.off_deep_btn.grid(row=14, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        self.off_desk_btn = ttk.Radiobutton(
+            right, text=i18n.t("只移出桌面（不弹授权，但屏还在系统里）",
+                               "Just take it off the desktop (no prompt, but it still exists)"),
+            value="desktop", variable=self.off_mode_var, command=self._off_mode_choice)
+        self.off_desk_btn.grid(row=15, column=1, columnspan=3, sticky="w", pady=3)
 
         self.link_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.link_var, style="Dim.TLabel", wraplength=430,
@@ -1224,15 +1249,19 @@ class App(tk.Tk):
 
     # ------------------------------------------------- orphan virtual screen
     def _check_orphans(self):
-        """#10: warn about a virtual screen that is on with nothing streaming.
+        """#10: deal with a virtual screen that is on with nothing streaming.
 
         Switching the screen on went through ChangeDisplaySettingsEx with
         CDS_UPDATEREGISTRY, which Windows persists; switching it off only ever
         took effect in the current session.  So the switch-on came back at every
         boot and the switch-off did not, and the screen sat there activated with
-        DroidExtend never started.  detach() saves to the database now, but a
-        leftover from before still needs taking down once -- hence the menu
-        entry, and this nudge rather than doing it behind the user's back.
+        DroidExtend never started.  detach() saves to the database now.
+
+        1.6.4: when the user picked "switch it off for real", take a leftover down
+        ourselves instead of only saying so -- that whole choice exists because
+        they do not want the screen there.  Detaching costs no UAC and is undone
+        the moment a stream starts, so there is nothing to ask about.  In "just
+        take it off the desktop" mode this stays a nudge.
         """
         try:
             orphans = [m for m in wd.active_virtual_displays() if not m["primary"]]
@@ -1241,6 +1270,10 @@ class App(tk.Tk):
         if not orphans:
             return
         names = "、".join(m["name"] for m in orphans)
+        if (self.settings.get("vdd_off_mode") or "deep").lower() == "deep":
+            self.log("没有在投屏，但虚拟屏 %s 还开着，按设置把它移出桌面" % names)
+            self.run_bg(self._cleanup_orphans_work)
+            return
         self.log("注意：没有在投屏，但虚拟屏 %s 仍处于激活状态（桌面会多出一块空屏）" % names)
         self.log("      菜单「工具 → 清理残留的虚拟屏」可以关掉它。")
 
@@ -1263,6 +1296,59 @@ class App(tk.Tk):
             self.log("已关闭 %d 块残留的虚拟屏：%s" % (len(gone), "、".join(gone)))
         else:
             self.log("没有需要清理的虚拟屏")
+
+    # ------------------------------------------------------ really off (1.6.4)
+    def _off_mode_choice(self):
+        self._save_settings()
+        if self.off_mode_var.get() == "deep":
+            self.log(i18n.t(
+                "「不用时」已改成彻底关闭：停止投屏后会把虚拟屏的设备节点禁用掉——"
+                "下次开机不会有这块屏，远程软件也看不到它。开始和停止时各弹一次授权。",
+                "\"When not in use\" is now switch it off for real: stopping the stream "
+                "disables the virtual display's device node, so the screen is not there "
+                "at the next boot and remote software cannot see it.  One approval when "
+                "you start and one when you stop."))
+        else:
+            self.log(i18n.t(
+                "「不用时」已改成只移出桌面：停止投屏后只是把它从桌面上摘掉，"
+                "驱动不碰、不弹授权，但这块屏仍然存在于系统里。",
+                "\"When not in use\" is now just take it off the desktop: stopping the "
+                "stream only detaches it, the driver is left alone and nothing asks for "
+                "approval, but the screen still exists in the system."))
+
+    def on_vdd_off(self):
+        self.run_bg(self._vdd_off_work)
+
+    def _vdd_off_work(self):
+        import vdd as vd
+
+        if self.session.running:
+            self.log("正在投屏，先停止再关闭")
+            try:
+                self.session.stop()
+            except Exception as e:
+                self.log("停止投屏失败: %s" % e)
+        st = vd.status()
+        if st["state"] not in ("ready", "node"):
+            self.log("虚拟屏还没装好，没有可关闭的东西")
+            return
+        ok, text = vd.set_enabled(False, log=self.log)
+        if ok:
+            self.log(i18n.t(
+                "虚拟屏已彻底关闭：开机不会有这块屏，远程软件也看不到它",
+                "The virtual display is switched off for real: it will not appear at "
+                "boot and remote software will not see it"))
+            return
+        self.log(i18n.t("彻底关闭没成功（%s），至少先把它移出桌面",
+                        "Could not switch it off for real (%s); at least taking it off "
+                        "the desktop") % (str(text)[:200] or i18n.t("未知原因", "unknown reason")))
+        try:
+            gone = wd.cleanup_orphans(log=self.log)
+        except Exception as e:
+            self.log("移出桌面也失败了: %s" % e)
+            return
+        if gone:
+            self.log("已关闭 %d 块残留的虚拟屏：%s" % (len(gone), "、".join(gone)))
 
     # ------------------------------------------------------ connection check
     def on_diagnose(self):
@@ -1582,6 +1668,7 @@ class App(tk.Tk):
         cfg["install_apk"] = bool(self.inst_var.get())
         cfg["tray_on_close"] = bool(self.tray_var.get())
         cfg["autostart"] = bool(self.auto_var.get())
+        cfg["vdd_off_mode"] = self.off_mode_var.get()
         self.settings[anim.KEY] = bool(self.anim_var.get())
         if cfg["mode"] == "extend":
             cfg["bitrate_mbps"] = max(cfg["bitrate_mbps"], 4)
@@ -2192,6 +2279,10 @@ class App(tk.Tk):
                  % (script, "装完会删掉安装包。" if delete_installer
                     else "安装包会保留在原地。"), "ok")
         applog.line("更新: 交给 %s 应用 %s" % (script, res["path"]))
+        # Do not toggle the device node on the way out: the installer is what the
+        # user is waiting for, and a UAC prompt appearing now would look like the
+        # update asking for permission.  The new build re-enables it on start.
+        self.session.skip_vdd_off = True
         self._quit_now()
 
     def open_path_dir(self, path):

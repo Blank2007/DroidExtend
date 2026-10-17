@@ -47,6 +47,8 @@
 | [21](#21-161-touch--measure-the-numbers-first) | 1.6.1: touch dead zone / long-press right click / frame-rate pacing | the phone went from 91 writes a second to 45 |
 | [22](#22-162-a-double-click-that-windows-refused-to-call-one) | 1.6.2: install folder / agree button / double click | Windows' double-click box is 4 × 4 pixels |
 | [23](#23-163-two-menus-that-both-asked-the-wrong-question) | 1.6.3: resolution menu / encoder menu | eleven of twenty-two sizes had no mode behind them |
+| [24](#24-164-making-the-virtual-display-actually-disappear) | 1.6.4: putting the virtual display away / two modes | a count of 0 does nothing; disabling the device works |
+| [25](#25-164-part-two-the-in-app-update-never-once-installed) | 1.6.4, part two: the in-app update never installed | under `DETACHED_PROCESS` the child exits 0 and runs nothing |
 
 ---
 
@@ -1968,6 +1970,247 @@ Assertion counts for the rest: `i18n_app_test` 83, `mode_menu_test` 76, `update_
   it calls a gesture a drag, and the button does not snap, so **no input could ever satisfy that
   assertion**. A permanently red case desensitises everyone to the whole regression report, which is
   worse than not having it; either make it pass or delete it and say why.
+
+---
+
+## 24. 1.6.4: making the virtual display actually disappear
+
+This release does one thing: **when it is not in use, can this screen be treated as not existing?**
+
+### 24.1 The request
+
+> 虚拟屏能不能关闭干净 就是不要让这块屏幕开机自己激活和远程软件使用
+
+Two things that turn out to be one: as long as Windows can still enumerate this screen, remote-desktop
+software (ToDesk, Sunlogin, UU Remote and friends) will offer it as a selectable monitor; and it is there
+every boot because **the driver creates it by itself**, whether or not our program runs.
+
+`C:\VirtualDisplayDriver\vdd_settings.xml` says:
+
+```xml
+<monitors>
+    <count>1</count>
+</monitors>
+```
+
+Every time the device node starts (`ROOT\DISPLAY\0001`, hardware id `Root\MttVDD`, service `WUDFRd`) it
+creates that many monitors. So there are exactly two levers: **change the count**, or **do not let the
+device start**.
+
+### 24.2 The obvious attempt, which does not work: a count of 0
+
+Measured with `tools\tmp\count_zero_probe.py` and `count_monitor_probe.py`, each of which really restarts
+the device node:
+
+```
+count = 1  ->  adapter \\.\DISPLAY22   55 modes   monitor Status OK       desktop: laptop only
+count = 0  ->  adapter \\.\DISPLAY23   55 modes   monitor Status OK       desktop: laptop only
+count = 0  ->  adapter \\.\DISPLAY24   55 modes   monitor Status OK       desktop: laptop only
+```
+
+**Nothing changed.** A string inside `MttVDD.dll` explains why:
+
+```
+Loading singular monitor (Monitor Count is not valid)
+```
+
+The driver treats 0 as invalid and falls back to one monitor. That road is closed.
+
+(One side effect worth recording: **every device-node restart increments the display number** -- 22, 23,
+24. This release restarted it a few dozen times, so `\\.\DISPLAY` is now in the twenties. Harmless.)
+
+### 24.3 What does work: disabling the device node
+
+A disabled device never starts the driver, so there is no screen. Measured with
+`tools\tmp\device_toggle_probe.py`:
+
+```
+before: vdd.status()["state"] = ready     adapter \\.\DISPLAY26   monitor Status OK
+after : vdd.status()["state"] = node      adapter None            monitor Status Unknown
+again : vdd.status()["state"] = ready     adapter \\.\DISPLAY27   monitor Status OK
+```
+
+All three things line up: **the adapter no longer enumerates** (so remote software has nothing to find),
+**the monitor is no longer OK**, and **the desktop only ever holds the laptop**. Windows also persists the
+disabled state, so it is **still disabled after a reboot** -- which is exactly the property "do not show up
+at boot" needs.
+
+The price: `Disable-PnpDevice` / `Enable-PnpDevice` need administrator rights, so **one UAC prompt per
+switch**.
+
+### 24.4 Two modes, defaulting to switching it off
+
+Because that price is real, 1.6.4 makes it a choice, defaulting to the thorough one:
+
+| Mode | What it does | Price |
+|---|---|---|
+| **Switch it off for real** (default) | disables the device node when the stream stops, enables it when a stream starts | one UAC prompt each way |
+| Just take it off the desktop | only detaches it from the desktop; the driver is left alone | none, but the screen still exists |
+
+Leftovers from a crash have a fallback too: if the last session died mid-stream, the device node is still
+enabled, and the next launch notices it, takes it off the desktop straight away (no approval needed) and
+says so in the log; the menu item "Shut the virtual display down for real (asks once)" does the thorough
+job on demand. In the other direction -- device disabled, and now you want to stream -- starting a stream
+enables it, and if that fails it says so plainly instead of quietly showing a black screen.
+
+### 24.5 A check that had never once worked, fixed in passing
+
+The function that answers "is the virtual display's device node still there" filtered like this:
+
+```python
+"Get-PnpDevice ... | Where-Object { $_.InstanceId -like 'ROOT\\MTTVDD*' }"
+```
+
+But a root-enumerated device's instance id is **`ROOT\DISPLAY\0001`**; nothing of the shape
+`ROOT\MTTVDD\...` exists. So **in this project's entire history it never found anything** and always
+returned an empty list.
+
+Nothing broke, because `status()` prefers the adapter and the adapter is visible while it exists -- until
+this release needed the state "device disabled, node still present". It now matches on the **hardware id**
+(`DEVPKEY_Device_HardwareIds` containing `MttVDD`) and immediately returns
+`ROOT\DISPLAY\0001 | OK | Virtual Display Driver`.
+
+### 24.6 Verification
+
+New `tools/tmp/vdd_off_test.py`, **61 assertions green**:
+
+```
+device_enabled            5   OK / Unknown / Error / no node / empty status
+set_enabled               6   UAC cancelled (two different messages) / no node / odd exit code /
+                              adapter never came back / still there after disabling / success
+_TOGGLE_PS                6   has Enable/Disable-PnpDevice, matches by hardware id,
+                              re-checks the end state, exits 4 when there is no node
+settings                  5   vdd_off_mode in EXTRA, defaults to deep, is a str, comes back from load()
+Session, three methods   13   default mode / lowercasing / no-op when already on / enable when disabled /
+                              enable in "desktop" mode too / RuntimeError that is bilingual /
+                              "desktop" never touches the driver / does not re-disable / disables and
+                              logs / a failure logs without raising
+source guards            13   session.py no longer calls set_count_and_restart, app.py has the menu item
+                              and the radio buttons, the choice is saved and reaches the stream config,
+                              "deep" detaches a leftover at startup
+```
+
+The same change also passed `py_compile` and a real-machine `import`, and `vdd.device_enabled()` returns
+`True` on the actual machine.
+
+Full regression: **35 scripts green, zero non-zero exits** (33 when 1.6.3 shipped; this release adds
+`vdd_off_test.py`, plus one script that started life as a 1.6.3 probe).
+
+### 24.7 Lessons
+
+1. **Measure the "obvious" approach before shipping it.** Writing `count=0` took ten minutes and proving
+   it useless took another ten. Skipping the proof would have shipped a setting that does nothing at
+   all -- exactly the bug 1.6.3 had just fixed in two menus.
+2. **A `PermissionError` in a traceback is not necessarily from the code under test.** That
+   `restart_device -> False` took several rounds; the failing line was not in `vdd.py` at all but in a
+   throwaway diagnostic script reading a log. Check which file the line number belongs to first.
+3. **Judge success by the observable outcome -- not the exit code, and not the log.** Exit code 0 only
+   means the script finished. What this release finally checks is "the adapter enumerates, or it does
+   not".
+4. **A branch that never once worked is harder to notice than a bug that errors.** `InstanceId -like
+   'ROOT\MTTVDD*'` returned an empty list forever, and nobody raises an alarm about "found nothing".
+5. **A hardcoded number in a test quietly changes what the test is testing.** `update_test.py` had the
+   expected APK size as `194390`, a leftover from v1.4 / v1.5. Once the APK grew to 210774, sections 3
+   and 4 -- "does the MZ check reject an apk" and "is a hash mismatch thrown away" -- both failed at the
+   *size* check first, with an error message that had nothing to do with what they were written to test.
+   The size now comes out of the release body, falling back to the local build.
+6. **The `adb reverse` tunnel is not persistent.** It lives in the adb daemon; restart the daemon and
+   the tunnel is silently gone (this time it was restarted to clear an `adb.log` with bad permissions),
+   after which `gesture_test` receives `(nothing)` for every gesture and looks like broken touch handling
+   on the phone. `gesture_test.py` now creates the tunnel itself instead of relying on whatever a
+   previous session happened to leave behind.
+7. **When a real-device test goes red, check the phone's state first.** With the screen locked no
+   gesture reaches the app, and `drag_test` and `gesture_test` both go red saying "nothing happened".
+   One `adb shell dumpsys window | grep isKeyguardShowing` is faster than reading two test files -- and
+   this time the answer really was "the code is fine, the phone was locked".
+
+---
+
+## 25. 1.6.4, part two: the in-app update never once installed
+
+"Redo check-for-updates, it still cannot install directly -- test it yourself, is it a logic
+problem?" By the time the user said that they had tried it more than once. The whole chain looked
+right: it finds the new version, downloads it, passes four checks, asks "close DroidExtend now,
+install v1.6.4 and start it again?" -- you press yes, the window closes, and nothing happens.
+
+### 25.1 Actually run that step
+
+Rather than reading code and guessing, reproduce it (`tools/tmp/update_apply_probe.py`): stand up a
+dummy process to impersonate the running DroidExtend, call `upd.run_installer()`, wait four seconds to
+confirm it has not jumped the gun, kill the dummy, then wait for `DroidExtend.exe` to appear in the
+target folder.
+
+Result: **180 seconds and `DroidExtend.exe` never appeared**, while `apply_update.cmd` was still
+sitting there -- and if it had finished, its last line (`del "%~f0"`) would have removed it.
+
+### 25.2 The script itself is fine
+
+Change that script's PID to one that does not exist and run it in the foreground with `cmd /c`:
+**installed in four seconds**, the target folder got the complete install, and the script deleted
+itself.
+
+So the problem is not what the script does, it is **how it gets launched**.
+
+### 25.3 Instrument the script
+
+`tools/tmp/batch_trace_probe.py` swaps `WAIT_CMD` for an identical script that appends a line to
+`batch.log` at every step, still launched exactly the way `run_installer` launches it. Result:
+
+```
+[1] script started
+[2] loop checking 26696      <- this line only; no further [2], and no [3] at all
+```
+
+The dummy had been dead for 90 seconds; the batch had neither moved on nor exited, and `cmd.exe` was
+still hanging there.
+
+### 25.4 The culprit is the launch flag
+
+`tools/tmp/ps_launch_probe.py` swaps the creationflags one at a time, and every variant has its child
+write a marker file:
+
+```
+DETACHED|NEW_GROUP (what it used)  started=18672 exit=0  mark=False   <- exit 0, did nothing
+CREATE_NO_WINDOW                   started=5316  exit=0  mark=True
+CREATE_NEW_CONSOLE                 started=3392  exit=0  mark=True
+no flags                           started=648   exit=0  mark=True
+cmd with DETACHED|NEW_GROUP        started=2280  exit=0  mark=False
+```
+
+**Under `DETACHED_PROCESS` the child exits 0 without executing a single line**, for cmd and for
+powershell alike. The old code picked DETACHED_PROCESS precisely so the child would outlive the parent
+process -- and what it got was a child that lives but does nothing, which is harder to find than one
+that never starts, because `Popen` returns success.
+
+### 25.5 The fix: PowerShell, and different flags
+
+Both halves changed:
+
+1. The batch file became a PowerShell script, `apply_update.ps1` (written as **utf-8-sig**; PowerShell
+   5.1 reads a BOM-less file as ANSI, which mangles non-ASCII paths). One process does everything:
+   wait for the PID to vanish (with a 180 s deadline) -> `Start-Process -Wait` the installer ->
+   relaunch the new build -> delete the installer if that setting is on -> delete itself. **Every step
+   goes into `apply_update.log`**, so a failure is no longer silent.
+2. Launch with `CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`, and try adding
+   `CREATE_BREAKAWAY_FROM_JOB` first (when the job does not allow breakaway that raises, and we fall
+   back to the version without it).
+
+### 25.6 Verified
+
+Same probe again: the moment the dummy is killed, `DroidExtend.exe` shows up in the target folder --
+**1.5 seconds** -- and `apply_update.log` says `app is gone; running the installer`. The script deletes
+itself, `delete_installer=False` keeps the download, and no processes are left behind.
+
+### 25.7 Lessons
+
+1. **Exit code 0 does not mean any work was done.** Here `Popen` succeeded, the child exited 0, not a
+   single word was printed -- and not one thing happened.
+2. **"It works when I run it by hand" is a hint to look at how it is launched**, not proof the script
+   is right. The same script installs in four seconds in the foreground and does nothing under a
+   different launch.
+3. **A feature that never once worked is quieter than one that errors.** This update chain downloads,
+   verifies and asks for confirmation, all of it "working" -- only the last step never happens, which
+   is why it survived so long.
 
 ---
 

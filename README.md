@@ -27,7 +27,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-10 至 2026-10-16 的几次会话内从零写完，此后每个版本（当前 1.6.3）都由它在同一个仓库里继续维护。
+> 于 2026-10-10 至 2026-10-16 的几次会话内从零写完，此后每个版本（当前 1.6.4）都由它在同一个仓库里继续维护。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -48,7 +48,7 @@
 | 🔄 **程序内更新** | 「检查更新」直接在程序里下载新版本，校验大小 / SHA256 / 文件格式，**校验不过就不装**，不用自己跑浏览器 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.6.3.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.6.4.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（206 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
@@ -64,7 +64,7 @@
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.6.3.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.6.4.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -292,8 +292,15 @@ server: sent 1482 帧  dropped 0  bytes 7,614,539
 `ChangeDisplaySettingsEx` 会直接回 `DISP_CHANGE_BADMODE`（-2），画面一动不动——而旧版的下拉
 列了 22 个写死的尺寸，其中 11 个驱动根本没有对应的模式行。现在下拉里的每一项都来自驱动自己的
 表，表外的尺寸不会出现在菜单里；万一请求还是落空，日志会写明驱动给不出，并且**不再白等 9 秒、
-也不再为了一个不存在的模式把画面重启一遍**。驱动的模式表还有空位的话，程序会把缺的那个尺寸
+也不再把为了一个不存在的模式把画面重启一遍**。驱动的模式表还有空位的话，程序会把缺的那个尺寸
 写进 `vdd_settings.xml`，并告诉你重装一次驱动（或重启）之后就能用。
+
+**不想用的时候，那块多出来的屏能不能当作不存在？** 能，而且是默认行为。设置里的「不用时」
+有两档：**彻底关闭**（默认）会在停止投屏后把驱动的设备节点禁用掉——开机不会有这块屏，
+ToDesk / 向日葵这类远程软件也枚举不到它；代价是开始和停止投屏时各弹一次管理员授权。
+另一档**只移出桌面**不碰驱动、不弹授权，屏仍然在系统里，只是不在桌面上。工具菜单里还有一项
+「彻底关闭虚拟屏（要授权一次）」，想现在就关掉的话点它。注意**不能靠把驱动设置里的
+`<count>` 写成 0** 来实现：MttVDD 把 0 当成非法值（`Monitor Count is not valid`），照样建一块屏。
 
 ---
 
@@ -308,7 +315,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.6.3.exe ← Windows 安装程序（35 MB）
+│   └─ DroidExtend-Setup-1.6.4.exe ← Windows 安装程序（35 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）

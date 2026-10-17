@@ -177,6 +177,82 @@ class Session(object):
             self.log("  想完全撑满：点「安装虚拟显示器驱动」重装一次驱动")
         return bw, bh, bhz
 
+    def _vdd_off_mode(self):
+        """How thoroughly to put the virtual display away when we are not using it.
+
+        "deep"    -- disable the driver's device node when the stream stops, so the
+                     screen does not exist at all while it is not in use: nothing
+                     at boot, nothing for remote-desktop software to list, and
+                     Windows keeps a disabled device disabled across reboots.
+                     Costs one UAC prompt at each switch.
+        "desktop" -- leave the driver alone and just keep the screen off the
+                     desktop.  No UAC, but the screen still exists.
+
+        Not `<count>0</count>`: measured 2026-10-16, MttVDD treats 0 as an
+        invalid count and falls back to a single monitor, so the screen stays.
+        Disabling the device node is what actually makes it disappear.
+        """
+        return (self.cfg.get("vdd_off_mode") or "deep").lower()
+
+    def _ensure_vdd_on(self):
+        """上次用完把设备节点禁用了，现在得先打开它。"""
+        import vdd as vd
+
+        if vd.device_enabled() is not False:
+            return
+        if self._vdd_off_mode() != "deep":
+            self.log(i18n.t(
+                "虚拟屏的设备节点现在是被禁用的（以前用过「彻底关闭」），先把它打开…",
+                "The virtual display's device node is currently disabled (left over "
+                "from \"switch it off for real\"); switching it back on..."))
+        else:
+            self.log(i18n.t(
+                "虚拟屏上次是彻底关掉的（设备节点被禁用），先把它打开…",
+                "The virtual display was switched off completely last time (its device "
+                "node is disabled); switching it back on..."))
+        ok, text = vd.set_enabled(True, log=self.log)
+        if not ok:
+            if text:
+                self.log("  " + str(text)[:400])
+            raise RuntimeError(i18n.t(
+                "虚拟屏没能打开（这一步要管理员权限）。可以在菜单里点「彻底关闭虚拟屏」重试，"
+                "或者把「不用时」那一项改成「只移出桌面」。",
+                "The virtual display could not be switched on (this step needs "
+                "administrator rights). Retry from the menu with \"Shut the virtual "
+                "display down for real\", or set the \"when not in use\" choice back to "
+                "\"just take it off the desktop\"."))
+
+    def _shut_vdd_down(self):
+        """用完按档位把虚拟屏收起来。deep 档要提权，可能弹一次 UAC。"""
+        import vdd as vd
+
+        if getattr(self, "skip_vdd_off", False):
+            # 正在装更新：这会儿弹一个授权框只会让人以为更新要 UAC，而且新版本
+            # 启动时反正会把它重新打开。留着不动，只是不在桌面上。
+            self.log(i18n.t("  正在安装更新，这次不切换虚拟屏的状态",
+                            "  installing an update, so the virtual display's state is "
+                            "left as it is"))
+            return
+        if self._vdd_off_mode() != "deep":
+            return
+        if vd.device_enabled() is not True:
+            return
+        self.log(i18n.t("按设置把虚拟屏彻底关掉（禁用设备节点，会弹一次管理员授权）…",
+                        "shutting the virtual display down completely (disabling its "
+                        "device node; this asks for administrator rights once)..."))
+        ok, text = vd.set_enabled(False, log=self.log)
+        if ok:
+            self.log(i18n.t(
+                "  虚拟屏已彻底关闭：下次开机不会有这块屏，远程软件也看不到它",
+                "  the virtual display is gone: it will not come back at boot and "
+                "remote software will not see it"))
+        else:
+            self.log(i18n.t(
+                "  没能彻底关掉（%s）。它现在只是不在桌面上，下次开机还会回来。",
+                "  could not shut it down completely (%s). It is off the desktop "
+                "for now, but it will come back at the next boot.")
+                % (str(text)[:200] if text else i18n.t("未知原因", "unknown reason")))
+
     def apply_display(self):
         """Make sure a second screen exists at the requested size. Returns rect."""
         import vdd as vd
@@ -197,6 +273,7 @@ class Session(object):
                 mon["name"], mon["monitor"] or mon["desc"], mon["width"], mon["height"]))
             return self.rect
 
+        self._ensure_vdd_on()
         st = vd.status()
         if st["state"] != "ready":
             raise VddMissing(vd.summary_line(st))
@@ -728,4 +805,9 @@ class Session(object):
                     self.log("移除虚拟显示器失败（%s 仍在系统中）" % name)
             except Exception as e:
                 self.log("移除虚拟显示器失败: %s" % e)
+            # deep 档：连驱动里那块屏本身也撤掉，别让它留在系统里等下一次开机。
+            try:
+                self._shut_vdd_down()
+            except Exception as e:
+                self.log("彻底关闭虚拟屏时出错: %s" % e)
         self.log("会话已停止")

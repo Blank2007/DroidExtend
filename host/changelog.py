@@ -13,6 +13,38 @@ import i18n
 # 新版本写在最前面。
 ENTRIES = [
     {
+        "v": "1.6.4",
+        "date": "2026-10-17",
+        "zh": [
+            "新增「不用时」选项，默认是彻底关闭虚拟屏：停止投屏后会把驱动的设备节点禁用掉，"
+            "开机不会有这块屏，远程桌面类软件也看不到它。代价是开始和停止时各弹一次管理员授权。",
+            "也可以改成「只移出桌面」：不碰驱动、不弹授权，但屏还留在系统里。",
+            "工具菜单新增「彻底关闭虚拟屏（要授权一次）」，现在就能关掉，不用等下次停止投屏。",
+            "顺手修了一个一直没生效的检查：以前判断虚拟屏的设备节点在不在用的是实例 ID 前缀，"
+            "而那台设备的实例 ID 是 ROOT\\DISPLAY\\0001，所以它从来没找到过东西——现在按硬件 ID 找。",
+            "还修了一个更严重的：程序内更新从来没能真正装上去——下载和校验都正常，点「是」之后"
+            "却什么都没发生。原因是启动更新脚本用了 DETACHED_PROCESS，那个旗子下子进程退出码 0 "
+            "却一行都不执行；现在换成 PowerShell 脚本加 CREATE_NO_WINDOW，实测 1.5 秒装好。",
+        ],
+        "en": [
+            "New \"when not in use\" choice, defaulting to switching the virtual display off for real: "
+            "stopping the stream disables the driver's device node, so the screen is not there at boot "
+            "and remote-desktop software cannot see it either. It costs one administrator approval when "
+            "you start and one when you stop.",
+            "It can be set to \"just take it off the desktop\" instead: the driver is left alone and "
+            "nothing asks for approval, but the screen stays in the system.",
+            "New menu item \"Shut the virtual display down for real (asks once)\", so it can be done right "
+            "now instead of waiting for the next stream to stop.",
+            "Fixed a check that had never worked: it looked for the virtual display's device node by "
+            "instance-id prefix, but that device's instance id is ROOT\\DISPLAY\\0001, so it never found "
+            "anything. It matches on the hardware id now.",
+            "And a worse one: the in-app update never actually installed. The download and the checks "
+            "were fine, and after you said yes nothing happened, because the update script was launched "
+            "with DETACHED_PROCESS -- under which the child exits 0 without running a single line. It is "
+            "a PowerShell script launched with CREATE_NO_WINDOW now, and a measured install takes 1.5 s.",
+        ],
+    },
+    {
         "v": "1.6.3",
         "date": "2026-10-16",
         "zh": [

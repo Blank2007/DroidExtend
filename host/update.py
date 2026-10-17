@@ -288,20 +288,42 @@ def _ps_quote(s):
 
 # ------------------------------------------------------------------ installing
 
-WAIT_CMD = """@echo off
-rem Written by DroidExtend to apply an update it already downloaded and
-rem verified.  Wait for the running app to release its files, install, restart.
-set PID={pid}
-:wait
-tasklist /FI "PID eq %PID%" 2>nul | find /I "%PID%" >nul
-if not errorlevel 1 (
-  ping -n 2 127.0.0.1 >nul
-  goto wait
-)
-start "" /wait "{installer}" {flags}
-{restart}
-{cleanup}
-del "%~f0"
+# Why PowerShell and not a batch file with `start "" /wait`:
+#
+# the batch version worked when run by hand and hung when the app launched it
+# from a detached process.  Measured 2026-10-17 with tools/tmp/batch_trace_probe.py:
+# cmd.exe started the script, wrote the first wait-loop line [2], and then sat
+# there for ninety seconds after the app was already gone -- `start "" /wait`
+# inside a windowless cmd never came back, so the update was downloaded,
+# verified, announced ... and never applied.  The user's words: 「还是不能直接安装」.
+#
+# PowerShell has no such problem: one process launch, paths passed as literals
+# (no %-expansion and no cmd quoting rules), and it leaves a log behind, so a
+# failure is visible instead of silent.
+
+APPLY_PS1 = r"""$ErrorActionPreference = 'Continue'
+$log = @LOG@
+function Say($m) {
+    try { Add-Content -LiteralPath $log -Value ((Get-Date).ToString('HH:mm:ss') + '  ' + $m) -Encoding UTF8 } catch { }
+}
+Say 'started; waiting for the running app to exit'
+$deadline = (Get-Date).AddSeconds(180)
+while ($true) {
+    if (-not (Get-Process -Id @PID@ -ErrorAction SilentlyContinue)) { break }
+    if ((Get-Date) -gt $deadline) { Say 'timed out waiting for the app; continuing anyway'; break }
+    Start-Sleep -Milliseconds 250
+}
+Say 'app is gone; running the installer'
+try {
+    $p = Start-Process -FilePath @INSTALLER@ -ArgumentList @(@ARGS@) -Wait -PassThru
+    Say ('installer exit code ' + $p.ExitCode)
+} catch {
+    Say ('could not run the installer: ' + $_.Exception.Message)
+}
+@RESTART@
+@CLEANUP@
+Say 'done'
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 """
 
 
@@ -310,44 +332,84 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
 
     The installer cannot replace ``DroidExtend.exe`` while it is running, and
     the app cannot wait for an installer that is waiting for the app, so a tiny
-    detached batch file breaks the deadlock: it polls until our PID is gone,
-    runs Inno Setup with ``/SILENT /NORESTART``, and starts the new build.
+    detached PowerShell script breaks the deadlock: it polls until our PID is
+    gone, runs Inno Setup with ``/SILENT /NORESTART``, and starts the new build.
+    Everything it does lands in ``apply_update.log`` next to itself.
 
     ``install_dir`` becomes ``/DIR=``: Inno's ``UsePreviousAppDir`` would
     normally find the earlier target, but saying it outright means an update
     can never land in a second copy of the program somewhere else.
 
     ``delete_installer`` drops the downloaded .exe once Inno has returned.  It
-    happens after ``start /wait``, never before: deleting an installer that is
-    still running is exactly how you get a half-applied update.
+    happens after the installer finishes, never before: deleting an installer
+    that is still running is exactly how you get a half-applied update.
     """
     pid = int(pid or os.getpid())
     exe = exe or (sys.executable if getattr(sys, "frozen", False) else "")
-    restart = ('if exist "%s" start "" "%s"' % (exe, exe) if exe
-               else "rem dev run: nothing to restart")
-    flags = "/SILENT /NORESTART"
+    args = ["/SILENT", "/NORESTART"]
     if install_dir:
-        flags += ' /DIR="%s"' % install_dir
-    cleanup = ('del /f /q "%s"' % installer if delete_installer
-               else 'rem keeping the installer: %s' % installer)
+        args.append("/DIR=" + install_dir)
+    args_ps = ", ".join(_ps_quote(a) for a in args)
+    if exe:
+        restart = ("if (Test-Path %s) { Say 'starting the new build'; "
+                   "Start-Process -FilePath %s }"
+                   % (_ps_quote(exe), _ps_quote(exe)))
+    else:
+        restart = "Say 'dev run: nothing to restart'"
+    if delete_installer:
+        cleanup = ("if (Test-Path %s) { Remove-Item -LiteralPath %s -Force; "
+                   "Say 'installer removed' }"
+                   % (_ps_quote(installer), _ps_quote(installer)))
+    else:
+        cleanup = "Say 'keeping the installer'"
     d = update_dir()
     try:
-        script = os.path.join(d, "apply_update.cmd")
-        src = WAIT_CMD.format(pid=pid, installer=installer, flags=flags,
-                              restart=restart, cleanup=cleanup)
-        # A .cmd file is read by cmd.exe in the OEM code page, so a download
-        # folder with Chinese in its path has to be written as mbcs; plain
-        # ASCII would silently turn the path into question marks.
-        enc = "mbcs" if os.name == "nt" else "utf-8"
-        with open(script, "w", encoding=enc, errors="replace",
-                  newline="\r\n") as f:
+        script = os.path.join(d, "apply_update.ps1")
+        logp = os.path.join(d, "apply_update.log")
+        src = (APPLY_PS1
+               .replace("@LOG@", _ps_quote(logp))
+               .replace("@PID@", str(pid))
+               .replace("@INSTALLER@", _ps_quote(installer))
+               .replace("@ARGS@", args_ps)
+               .replace("@RESTART@", restart)
+               .replace("@CLEANUP@", cleanup))
+        # utf-8-sig, not utf-8: PowerShell 5.1 reads a BOM-less file as ANSI and
+        # would mangle a download folder with Chinese in its path.
+        with open(script, "w", encoding="utf-8-sig", newline="\r\n") as f:
             f.write(src)
         flags = 0
         if os.name == "nt":
-            flags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
-        subprocess.Popen(["cmd", "/c", script], close_fds=True,
-                         creationflags=flags, cwd=d)
+            # CREATE_NO_WINDOW, NOT DETACHED_PROCESS.  Measured 2026-10-17
+            # (tools/tmp/ps_launch_probe.py): a child started with
+            # DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP exits 0 without running
+            # anything at all -- the marker file was never written, for cmd.exe
+            # and for powershell.exe alike.  The same child with
+            # CREATE_NO_WINDOW does the work.  That single flag is why an update
+            # could be downloaded, verified, announced and then simply not
+            # happen (「还是不能直接安装」).
+            #
+            # CREATE_BREAKAWAY_FROM_JOB is added so the helper is not killed with
+            # us if we happen to be inside a job object; it is only allowed when
+            # the job permits breakaway, so it is tried and dropped on failure.
+            base = (getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+            breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            try:
+                subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                                  "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                                  "-File", script],
+                                 close_fds=True, creationflags=base | breakaway, cwd=d)
+            except OSError:
+                flags = base
+                subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                                  "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                                  "-File", script],
+                                 close_fds=True, creationflags=flags, cwd=d)
+        else:
+            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                              "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                              "-File", script],
+                             close_fds=True, creationflags=flags, cwd=d)
         return True, "", script
     except Exception as e:
         return False, "%s: %s" % (type(e).__name__, e), ""

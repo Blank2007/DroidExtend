@@ -63,6 +63,10 @@ EXTRA = (
     "update_dir",        # where to keep the downloaded installer ("" = %TEMP%)
     "delete_installer",  # remove the installer once it has been applied
     "animations",        # fade windows and flicker controls; see anim.py
+    # 1.6.4 -- what "off" means for the virtual display, see vdd.set_count /
+    # app._apply_vdd_off.  "deep" = no monitor at boot at all (needs UAC);
+    # "desktop" = the monitor exists but never sits on the desktop (no UAC).
+    "vdd_off_mode",
 )
 
 _EXTRA_DEFAULTS = {
@@ -76,6 +80,7 @@ _EXTRA_DEFAULTS = {
     "update_dir": "",
     "delete_installer": True,
     "animations": True,
+    "vdd_off_mode": "deep",
 }
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}

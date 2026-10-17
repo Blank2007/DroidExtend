@@ -132,6 +132,15 @@ DroidExtend 使用说明   v{ver}
   A: 正常情况下「停止」或拔线都会把虚拟屏摘掉。如果电脑上还留着，
      再点一次「开始投屏」然后「停止」即可；程序在启动失败时也会自动摘屏。
 
+  Q: 不投屏的时候，能不能让这块屏彻底不出现？
+  A: 能，而且默认就是这样。设置里「不用时」有两档：
+     · 彻底关闭（默认）—— 停止投屏后会把驱动的设备节点禁用掉。开机不会有这块屏，
+       ToDesk / 向日葵这类远程软件也枚举不到它，重启之后它仍然是关着的；
+       代价是开始和停止投屏时各弹一次管理员授权。
+     · 只移出桌面 —— 不碰驱动、不弹授权，屏还在系统里，只是不在桌面上。
+     想现在就关掉（而不是等下次停止投屏），点工具菜单的「彻底关闭虚拟屏（要授权一次）」。
+     注意不能靠把驱动设置里的 <count> 写成 0 来实现：驱动把 0 当成非法值，照样建一块屏。
+
   Q: 电脑上多出来的那块屏找不到鼠标？
   A: 虚拟屏是按「屏幕位置」贴着主屏放的。放在右边时，鼠标一直往右移就过去了。
      也可以按 Win+P 看当前是「扩展」还是「仅电脑屏幕」。
@@ -319,6 +328,20 @@ DroidExtend manual   v{ver}
   A: Normally Stop, or unplugging, removes the virtual screen.  If one is left
      over, press Start and then Stop once more; a failed start also removes it
      automatically.
+
+  Q: When I am not streaming, can that screen be made to not exist at all?
+  A: Yes -- that is the default.  "When not in use" has two modes:
+     * Switch it off for real (the default) -- stopping the stream disables the
+       driver's device node.  The screen is not there at boot, remote-desktop
+       tools such as ToDesk or Sunlogin cannot enumerate it, and it stays
+       disabled across a reboot.  The price is one administrator approval when
+       you start and one when you stop.
+     * Just take it off the desktop -- the driver is left alone and nothing asks
+       for approval; the screen still exists, it is simply not on the desktop.
+     To do it right now instead of waiting for the next stop, use the menu item
+     Tools -> "Shut the virtual display down for real (asks once)".
+     Writing <count> 0 into the driver settings does NOT achieve this: the
+     driver treats 0 as invalid and creates one monitor anyway.
 
   Q: I cannot find the mouse on the extra screen?
   A: The virtual screen is placed against the main one according to "Position".
