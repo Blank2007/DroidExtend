@@ -7,6 +7,7 @@ the USB cable to the phone through an adb reverse tunnel.
 """
 import os
 import queue
+import ctypes
 import re
 import shutil
 import subprocess
@@ -303,8 +304,6 @@ class App(tk.Tk):
         m_file.add_command(label=i18n.t("打开数据目录（设置与日志）",
                                         "Open data folder (settings and logs)"),
                            command=self.on_open_config_dir)
-        m_file.add_command(label=i18n.t("更改数据目录…", "Change data folder..."),
-                           command=self.on_change_data_dir)
         m_file.add_command(label=i18n.t("打开程序目录", "Open program folder"),
                            command=self.on_open_root_dir)
         m_file.add_separator()
@@ -1772,49 +1771,10 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def on_change_data_dir(self):
-        """Move settings.json and DroidExtend.log somewhere else.
-
-        Kept to one folder on purpose: "send me your log" should not also need
-        "and find settings.json in your user profile".
-        """
-        old = paths.data_dir()
-        d = filedialog.askdirectory(
-            title=i18n.t("选择保存设置和日志的文件夹",
-                         "Pick the folder for settings and logs"),
-            parent=self, initialdir=old, mustexist=False)
-        if not d:
-            return
-        d = os.path.abspath(d)
-        if os.path.normcase(d) == os.path.normcase(old):
-            return
-        moved = []
-        for name in ("settings.json", applog.NAME):
-            src = os.path.join(old, name)
-            if not os.path.exists(src):
-                continue
-            try:
-                shutil.copy2(src, os.path.join(d, name))
-                moved.append(name)
-            except Exception as e:
-                self.log("复制 %s 失败: %s" % (name, e), "err")
-        try:
-            paths.set_data_dir(d)
-        except Exception as e:
-            messagebox.showerror(i18n.t("切换失败", "Could not switch"),
-                                 "%s\n\n%s" % (e, d), parent=self)
-            return
-        # Reopen the log at the new place so the rest of this run lands there.
-        applog.close()
-        applog.start("%s v%s" % (APP_NAME, APP_VERSION))
-        self.log("数据目录已改为: %s  (已搬移: %s)" % (d, "、".join(moved) or "无"))
-        self._refresh_paths_label()
-        messagebox.showinfo(
-            i18n.t("数据目录已更改", "Data folder changed"),
-            i18n.t("设置和日志现在保存在：\n%s\n\n已搬移：%s\n以后所有设置和日志都写在这里。",
-                   "Settings and logs now live in:\n%s\n\nMoved: %s\n"
-                   "Everything from now on is written there.")
-            % (d, "、".join(moved) or i18n.t("（没有旧文件）", "(no old files)")), parent=self)
+    # on_change_data_dir() is gone as of 1.6.6: settings, logs, updates and
+    # scratch files all live in the program folder, which is also the folder the
+    # installer created and the uninstaller removes.  An option to move the data
+    # somewhere else would re-scatter exactly what this change gathers up.
 
     def on_open_root_dir(self):
         try:
@@ -2266,7 +2226,8 @@ class App(tk.Tk):
             return
         ok, err, script = upd.run_installer(
             res["path"], install_dir=(ROOT if getattr(sys, "frozen", False) else ""),
-            delete_installer=delete_installer)
+            delete_installer=delete_installer,
+            work_dir=self.settings.get("update_dir", ""))
         if not ok:
             self.log("无法启动安装程序：%s" % err, "err")
             messagebox.showerror(i18n.t("安装更新", "Install the update"),
@@ -2434,6 +2395,12 @@ class App(tk.Tk):
             if self.session.adb is not None:
                 self.session.adb.reverse_remove_all(None)
                 self.log("已清理 adb 端口转发。")
+                # The bundled adb runs a server that outlives the window and keeps
+                # tools\platform-tools\adb.exe open.  Leaving it running is why an
+                # uninstall used to finish with the adb files still in place, so
+                # the daemon is shut down whenever the program exits.
+                self.session.adb.kill_server()
+                self.session.adb = None
         except Exception:
             pass
         try:
@@ -2446,12 +2413,96 @@ class App(tk.Tk):
             pass
 
 
+# --------------------------------------------------------------- single copy
+#
+# Two copies of this program mean two tray icons, two adb servers and two of us
+# fighting over the same virtual screen -- and nothing stops a second copy except
+# this.  A named mutex is the cheapest arbitration that covers every way the
+# program gets started (double-click, shortcut, autostart, the tray icon), because
+# the kernel answers instead of us.  "Local\\" keeps it per logon session, which is
+# what we want: a second user on the same machine is a different matter.
+_INSTANCE_MUTEX = None      # module-level keeps the handle alive for the process
+
+
+def _already_running():
+    """True when another copy of us already holds the single-instance mutex."""
+    global _INSTANCE_MUTEX
+    if os.name != "nt":
+        return False
+    if _INSTANCE_MUTEX:
+        # We are the owner; asking twice must not leak a second handle (closing
+        # one would then leave the mutex alive and confuse a later check).
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+        handle = k32.CreateMutexW(None, 1, "Local\\DroidExtend.single")
+        if not handle:
+            # Could not create one at all -- better to start than to refuse.
+            return False
+        _INSTANCE_MUTEX = handle
+        return ctypes.get_last_error() == 183       # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False
+
+
+def _raise_existing_window():
+    """Bring the copy that is already running to the front.  Best effort."""
+    try:
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+        u32.FindWindowW.restype = ctypes.c_void_p
+        for title in ("%s — %s   v%s" % (APP_NAME, app_title(), APP_VERSION),):
+            hwnd = u32.FindWindowW(None, title)
+            if hwnd:
+                u32.ShowWindow(hwnd, 9)            # SW_RESTORE
+                u32.SetForegroundWindow(hwnd)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _tell_already_running():
+    """Last resort when the running copy has no window to raise (it is in the tray)."""
+    text = i18n.t(
+        "程序已经在运行了（可能是缩在托盘里）。\n\n看屏幕右下角的托盘区，双击那个图标就能把窗口叫回来。",
+        "It is already running -- probably hidden in the tray.\n\n"
+        "Double-click its icon in the notification area to bring the window back.")
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None, text,
+            "%s v%s" % (APP_NAME, APP_VERSION), 0x00000040)   # MB_ICONINFORMATION
+    except Exception:
+        pass
+
+
 def main():
     # The log file is opened before anything can go wrong, so even a failure in
     # the checks below leaves a record of what the process saw.
     applog.start("%s v%s" % (APP_NAME, APP_VERSION))
     applog.line("ROOT %s" % ROOT)
     applog.line("数据目录 %s" % paths.data_dir())
+    # Load the language before anything can show a message: the single-instance
+    # notice is the one dialog that happens before the window exists.
+    try:
+        i18n.set_lang(st.load().get("language", i18n.AUTO))
+    except Exception:
+        i18n.set_lang(i18n.AUTO)
+    if _already_running():
+        applog.line("已经有一个实例在运行，本次启动直接退出（不想多出第二个托盘图标）")
+        if not _raise_existing_window():
+            _tell_already_running()
+        applog.close()
+        return 0
+    # 1.6.6: everything lives in the program folder now.  Bring back anything an
+    # older version put elsewhere and delete the old pointer, so "uninstall"
+    # really does mean "remove this one folder".
+    try:
+        paths.migrate_old_data_dir(log=applog.line)
+        paths.clean_old_temp(log=applog.line)
+    except Exception as e:
+        applog.line("迁移旧数据目录失败: %s" % e)
     st.migrate_legacy(log=applog.line)
     missing = []
     if not adb_exe():

@@ -49,6 +49,8 @@
 | [23](#23-163-two-menus-that-both-asked-the-wrong-question) | 1.6.3: resolution menu / encoder menu | eleven of twenty-two sizes had no mode behind them |
 | [24](#24-164-making-the-virtual-display-actually-disappear) | 1.6.4: putting the virtual display away / two modes | a count of 0 does nothing; disabling the device works |
 | [25](#25-164-part-two-the-in-app-update-never-once-installed) | 1.6.4, part two: the in-app update never installed | under `DETACHED_PROCESS` the child exits 0 and runs nothing |
+| [26](#26-165-the-update-folder-moved-on-its-own-and-uninstalling-left-the-app-running) | 1.6.5: the update folder / uninstall leftovers | the data-folder pointer had been written to point into `%TEMP%` |
+| [27](#27-166-all-data-in-the-install-folder-one-instance-only) | 1.6.6: all data in one folder / a clean uninstall / one instance | the folder disappears after an uninstall; a second double-click starts nothing |
 
 ---
 
@@ -2213,5 +2215,242 @@ itself, `delete_installer=False` keeps the download, and no processes are left b
    is why it survived so long.
 
 ---
+
+## 26. 1.6.5: the update folder moved on its own, and uninstalling left the app running
+
+This round of feedback was two sentences:
+
+> Why did the update folder change again? And the uninstaller does not close the background
+> process, so it never uninstalls completely.
+> (`User said (m06361)`)
+
+Three unrelated problems behind them: one of my own tests had hijacked the data folder of an
+installed copy, the updater did not honour the folder the user picked, and the installer never
+checked whether a process was still running.
+
+### 26.1 First: the data folder was hijacked by a test
+
+Where settings live is decided by a pointer file, in this order:
+`%DROIDEXTEND_HOME%` -> `%LOCALAPPDATA%\DroidExtend\data_dir.txt` -> the program folder.
+
+On the affected machine the pointer had been written to
+`C:\Users\15530\AppData\Local\Temp\de_bom_target_c9uhsnz0` -- a leftover test sandbox.
+
+The culprit was `settings_bom_test.py`: to prove that a settings file with a BOM does not lose
+every setting, it called `paths.set_data_dir()`, and that function wrote the **real** pointer. So
+for a whole day the installed copy read its settings out of `%TEMP%`.
+
+The damage shows up later: the moment Windows cleans TEMP (or the folder is deleted), the pointer
+stops resolving, the app falls back to the program folder, and **every setting drops to its
+default** -- which is what "the update folder changed again" looks like from the outside. The
+machine still had 22 `de_bom_target_*` folders, one per full regression run.
+
+### 26.2 Second: the update script did not follow the folder
+
+Even with the settings intact, changing the update folder only half worked: the downloaded
+installer went to the chosen folder, but `run_installer()` called `update_dir()` **with no
+argument**, so `apply_update.ps1` and `apply_update.log` always landed in
+`%TEMP%\droidextend_update`.
+
+### 26.3 Third: the uninstaller did not close the program
+
+`DroidExtend.iss` says `CloseApplications=no`, and the file has no `[Code]`, no `AppMutex` and no
+`[UninstallRun]`. So uninstalling while the app sits in the tray leaves it running, the files
+cannot be deleted, and the uninstall "succeeds" with leftovers. `CloseApplications` would not have
+helped either -- it sends WM_CLOSE, and "close the window" in this program means "hide to tray".
+
+The evidence is direct: after that uninstall, `D:\DroidExtend` contained only a `tools\` folder
+(`adb.exe`, two DLLs, an `adb.log`) -- exactly the files the running program held open.
+
+### 26.4 The fixes
+
+| Problem | Fix |
+|---|---|
+| hijacked pointer | `data_dir()` now **ignores a remembered folder that sits under `%TEMP%`**; the pointer itself is written under `%DROIDEXTEND_HOME%` (tests all set it, so they can no longer touch the real one); added `forget_data_dir()` / `remembered_data_dir()` |
+| update script location | `run_installer(..., work_dir="")`; `host/app.py` passes the `update_dir` setting in |
+| uninstall leaves the app running | the `.iss` gained a `[Code]` section: `PrepareToInstall` and `CurUninstallStepChanged(usUninstall)` both run `taskkill /F /IM DroidExtend.exe /T`, retrying up to 8 times; exit code 128 (not running) counts as success |
+
+### 26.5 A false alarm fixed along the way
+
+The live log contained `could not shut it down completely (the device was disabled but the
+virtual display is still there after 20 s)`. The device node really was disabled and the adapter
+row was merely still enumerable -- it will not start at the next boot, so that is a success. Now
+`set_enabled(False)` reports success in that case and says the screen will drop out of the list
+once the system lets go of it.
+
+### 26.6 Verification
+
+New `tools/tmp/datadir_guard_test.py`, **31 assertions all green**:
+
+```
+pointer location   3  %DROIDEXTEND_HOME% wins / default LOCALAPPDATA\DroidExtend / data_dir.txt
+%TEMP% guard       7  containment, a %TEMP% pointer is ignored and ROOT is used instead
+switch and forget  7  set_data_dir takes effect at once, pointer in the sandbox, forget is idempotent
+update script      8  script and log go to the chosen folder, UTF-8 BOM, powershell really starts,
+                      empty work_dir falls back to %TEMP%
+installer          6  [Code], PrepareToInstall, CurUninstallStepChanged, taskkill
+```
+
+Full regression, 36 scripts: **31 green, 5 red**. All five are environmental -- the phone was not
+connected (`drag_test` / `gesture_test` cannot even get a screenshot), and at that moment the virtual
+screen happened to be the primary display with the laptop panel not attached, while `db_roundtrip_test` /
+`mode_live_test` / `orphan_cleanup_test` all assume "laptop only" as their baseline. None of them goes
+through anything this release changed (`paths` / `update` / `.iss`): `_ensure_vdd_on` is a no-op while
+the device is enabled, and the attach / detach / registry path those three tests exercise was not touched.
+
+### 26.7 Lessons
+
+1. **A test that writes to a real location costs more than a failing test.** Nobody looked at
+   those 22 sandboxes, and the price was paid by a real machine -- with the symptom (settings
+   changing by themselves) a day away from the cause (running a regression).
+2. **"Settings change by themselves" -- suspect the folder and the pointer before suspecting an
+   overwrite.** `_form_values()` starts with `dict(self.settings)`, so unknown keys cannot be
+   dropped; find out which folder the program is actually reading first.
+3. **A successful uninstall is not a clean one.** What was left was exactly the files the running
+   program held open, and one `[Code]` section with a single `taskkill` would have avoided it.
+
+---
+
+## 27. 1.6.6: all data in the install folder, one instance only
+
+### 27.1 The request
+
+> I am on a remote session, never mind the display state. I just want the installer to not go wrong,
+> the uninstaller to remove the program completely, and as much as possible every piece of data kept
+> inside the install folder I picked -- not scattered all over the place.
+
+And later:
+
+> Uninstalling still throws an error. Also make it so only one copy of the program can run at a time,
+> because double-clicking the exe just starts another copy, and another tray icon.
+
+### 27.2 How many places the data was in
+
+Apart from `DroidExtend.exe` and `_internal\` in the install folder, the program wrote to seven other
+locations:
+
+| Location | What | Since |
+|---|---|---|
+| `%LOCALAPPDATA%\DroidExtend\data_dir.txt` | the data-folder pointer | 1.4, "change data folder" |
+| `<data folder>\settings.json` | settings | always |
+| `<data folder>\DroidExtend.log` | the log | always |
+| `%TEMP%\droidextend_update\` | the update script and its log (the installer went to the folder you picked) | 1.5 |
+| `%TEMP%\droidextend_vdd_*.ps1` | scratch PowerShell for elevation | 1.6.4 |
+| `%TEMP%\droidextend_vdd_elevate.ps1` | the same | 1.6.0 |
+| `<data folder>\vdd_install.log`, `vdd_off.log` | driver install / switch results | 1.6.0 |
+
+For "all data in the install folder" to be true, the first six had to change.
+
+### 27.3 Pulling it all into the install folder
+
+1. **The pointer is gone.** `data_dir()` now has two answers: `%DROIDEXTEND_HOME%` (used by tests, and
+   the only way to override) or the install folder. The 1.6.5 "remembered folder" was deleted -- it
+   existed precisely so data could live elsewhere, which is the opposite of what this release wants.
+   `set_data_dir()` still exists but only sets an in-process variable and writes no file.
+2. **The "File -> Change data folder..." menu item is removed.** Leaving a button that moves the
+   settings away is leaving a door for the data to scatter again.
+3. **The update folder applies to the whole update.** `update_dir()` defaults to
+   `<data folder>\updates` instead of `%TEMP%\droidextend_update`, and `run_installer(work_dir=...)`
+   makes the script and its log follow the setting -- previously only the installer obeyed it.
+4. **The elevation scripts moved to** `<data folder>\tmp\`.
+5. **The uninstaller names every file.** `[UninstallDelete]` lists `settings.json`, `DroidExtend.log`,
+   `vdd_install.log`, `vdd_off.log`, `data_dir.txt`, the folders `updates`, `tmp`, `tools`, and the
+   `%LOCALAPPDATA%\DroidExtend` an older version left in the profile. Inno only removes what it
+   installed, so anything unnamed survives.
+6. **Old data is brought back.** `paths.migrate_old_data_dir()` reads the old pointer at startup,
+   copies `settings.json` and the logs into the install folder (never overwriting), then deletes the
+   pointer; `paths.clean_old_temp()` removes leftover update and elevation scripts from `%TEMP%`.
+
+### 27.4 Why an uninstall still left files behind
+
+What survived was `tools\platform-tools` -- `adb.exe`, `AdbWinApi.dll`, `AdbWinUsbApi.dll` and
+`adb.log`. Not because Inno could not delete them, but because **they belonged to adb's daemon**: once
+the program has started adb, `adb.exe` spawns a **server process** that outlives the window and keeps
+those files open. Inno sees open files, skips them, and reports at the end that some elements could not
+be removed.
+
+Three changes together:
+
+* `[Code]` gained `KillAppAdb()`, which kills only an adb **inside the install folder**
+  (`Where-Object { $_.Path -like '{app}\*' }`) and leaves the one Android Studio installed alone;
+  it runs before both install and uninstall.
+* The program cleans up after itself: `_quit_now()` calls `adb.kill_server()` after removing the port
+  forwards.
+* `[UninstallDelete]` now covers the whole `{app}\tools` folder.
+
+### 27.5 Why an uninstall still showed an error box
+
+The uninstall had actually finished. The box said:
+
+```
+Runtime error (at 7:852):
+Unknown constant "userprofile".
+```
+
+The last step of the uninstaller starts a detached PowerShell sweep of leftover folders, and one of its
+three targets was `ExpandConstant('{userprofile}\.droidextend')`. **Inno Setup has no `{userprofile}`
+constant**, and `ExpandConstant` raises a runtime error on a constant it does not know -- so the
+uninstall crashed on its very last statement.
+
+The fix is `GetEnv('USERPROFILE')`. Every `{...}` constant in the `.iss` was then listed and checked;
+only `{app}`, `{autodesktop}`, `{group}`, `{localappdata}`, `{sys}` and `{uninstallexe}` remain, all
+valid.
+
+Separately, the sweep used to sleep two seconds and then start deleting, while the uninstaller itself
+(`unins000.exe`) was still living in `{app}` -- competing for the same files also produces "some
+elements could not be removed". It now **waits for `unins000` to disappear** (up to 30 s) before
+touching anything, and only deletes leftovers.
+
+A sibling folder named `<install folder>-backup` is **deliberately left alone**: that name is very
+likely the user's own backup, and an uninstaller has no business deleting it just because it happens to
+sit next to the program.
+
+### 27.6 Only one instance
+
+Double-clicking the exe again used to start a second process and a second tray icon, and two instances
+could fight over the same virtual screen. A named mutex fixes it:
+
+* `CreateMutexW(None, 1, "Local\\DroidExtend.single")`; `GetLastError() == 183`
+  (`ERROR_ALREADY_EXISTS`) means an instance is already there. The `Local\` prefix keeps it inside the
+  current logon session.
+* The handle is held in a module-level variable so it cannot be collected; a second call to
+  `_already_running()` returns True immediately instead of creating another handle (otherwise closing
+  one instance leaves the other's handle alive and later checks misread it).
+* The check sits in `main()` before `App()` is built, so losing the race exits **without flashing a
+  window**.
+* Before exiting it raises the existing window (`FindWindowW` + `ShowWindow(SW_RESTORE)` +
+  `SetForegroundWindow`); if that instance is hidden in the tray with no window to find, it says
+  "the program is already running -- double-click its tray icon".
+
+### 27.7 Tests
+
+| Script | Result | Covers |
+|---|---|---|
+| `datadir_guard_test.py` | **45 PASS** | one folder / no pointer / migration / `%TEMP%` cleanup / update folder / applier placement / `.iss` guards |
+| `single_instance_test.py` | **14 PASS** | twice in one process / cross-process / released and re-taken / raising the window / source guards |
+| `uninstall_sweep_test.py` | **11 PASS** | rebuilds the `[Code]` PowerShell and really runs it against fake folders / missing targets are silent / **no unknown Inno constants** |
+| `settings_bom_test.py` | **24 PASS** | a legacy pointer is ignored, `_old_pointer_path()` location |
+| `update_extras_test.py` | **65 PASS** | the default update folder is inside the install folder, not in `%TEMP%` |
+
+One environment note: on this machine the Inno installer **of every version** exits 1 within 0.1 s
+("Setup could not create the directory `%TEMP%\is-XXXX.tmp`. Error 5: access denied"), while the same
+account can `mkdir` that very directory from PowerShell. That is this machine, not the package
+(1.6.3 / 1.6.4 / 1.6.5 all behave identically), so the install-then-uninstall round trip could not be
+completed here; the uninstall logic was verified by the script-level tests above plus the user's own
+machine.
+
+### 27.8 Lessons
+
+1. **An error box and a failed operation are two different things.** Every uninstall really did
+   finish; the code crashed on its last statement, which makes it look like the uninstall failed.
+   Read what the box says before deciding which layer broke.
+2. **Do not write constant names from memory.** `{userprofile}` reads as self-evident and simply does
+   not exist in Inno; the `ExpandConstant` message already gave the answer.
+3. **"The uninstall is not clean" -- suspect a child process that is still alive.** A daemon the
+   program started itself (adb server) does not exit with the window, and Inno will not delete the
+   files it holds.
+4. **Fewer places to put data beats more flexibility.** A pointer, a movable data folder and update
+   scripts in `%TEMP%` were each "convenient" at the time, and each one ended up as "the settings
+   changed on their own" or "there is still junk after an uninstall".
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

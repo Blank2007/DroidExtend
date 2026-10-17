@@ -35,6 +35,8 @@ import urllib.request
 
 import i18n
 
+from paths import data_dir
+
 from version import APP_VERSION, LATEST_RELEASE_API, RELEASES_URL, USER_AGENT
 
 SETUP_PREFIX = "DroidExtend-Setup-"
@@ -327,7 +329,8 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
 """
 
 
-def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=True):
+def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=True,
+                  work_dir=""):
     """Apply *installer* after this process exits.  -> (ok, error, script).
 
     The installer cannot replace ``DroidExtend.exe`` while it is running, and
@@ -343,6 +346,11 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
     ``delete_installer`` drops the downloaded .exe once Inno has returned.  It
     happens after the installer finishes, never before: deleting an installer
     that is still running is exactly how you get a half-applied update.
+
+    ``work_dir`` is the folder the user chose for downloads; the script and its
+    log go there too.  They used to always land in %TEMP%, so the installer sat
+    in the folder the user picked while the two files that explain what happened
+    were somewhere else -- and %TEMP% is exactly the place Windows cleans.
     """
     pid = int(pid or os.getpid())
     exe = exe or (sys.executable if getattr(sys, "frozen", False) else "")
@@ -362,7 +370,7 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
                    % (_ps_quote(installer), _ps_quote(installer)))
     else:
         cleanup = "Say 'keeping the installer'"
-    d = update_dir()
+    d = update_dir(work_dir)
     try:
         script = os.path.join(d, "apply_update.ps1")
         logp = os.path.join(d, "apply_update.log")
@@ -416,17 +424,24 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
 
 
 def update_dir(custom=""):
-    """Where an update gets downloaded to.
+    """Where an update gets downloaded to, and where its script and log go.
 
-    An empty *custom* (the default) means the temp folder.  A custom folder
-    that turns out to be unusable -- typo, unplugged drive, no permission --
-    falls back to temp instead of failing the update: the point of the setting
-    is to put the file somewhere convenient, not to make updates impossible.
+    An empty *custom* (the default) means "updates" inside the program's own
+    directory -- the folder the installer created, next to settings.json and the
+    log.  Everything about an update therefore lives under one folder and
+    disappears when the program is uninstalled.
+
+    1.6.5 and earlier used %TEMP% for this, which is why an uninstall left the
+    update folder behind and why a cleaned %TEMP% looked like "the update folder
+    changed".  A custom folder that turns out to be unusable -- typo, unplugged
+    drive, no permission -- falls back to the program folder instead of failing
+    the update: the point of the setting is to put the file somewhere convenient,
+    not to make updates impossible.
     """
     d = os.path.expandvars(os.path.expanduser(str(custom or "").strip()))
     if d and _writable_dir(d):
         return d
-    d = os.path.join(tempfile.gettempdir(), "droidextend_update")
+    d = os.path.join(data_dir(), "updates")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:

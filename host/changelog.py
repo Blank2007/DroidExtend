@@ -13,6 +13,65 @@ import i18n
 # 新版本写在最前面。
 ENTRIES = [
     {
+        "v": "1.6.6",
+        "date": "2026-10-18",
+        "zh": [
+            "一切数据都收进安装目录了：设置、日志、下载的更新包、更新脚本、提权用的临时脚本，"
+            "以前散在 %TEMP% 和用户目录里的东西现在都在程序旁边。",
+            "「文件 → 更改数据目录…」这个菜单项删掉了——它本来就是数据散开的入口。"
+            "旧版本留在别处的设置会在启动时自动搬回来。",
+            "卸载现在真的把整个目录删干净：除了设置和日志，还会关掉程序拉起的 adb 守护进程，"
+            "连它占着的 tools 目录一起删。",
+            "卸载到最后不再弹报错框：那句「Unknown constant \"userprofile\"」是因为卸载脚本用了"
+            "一个 Inno 里根本不存在的常量，卸载其实已经做完了。",
+            "只允许同时运行一个本程序：再双击 exe 不会多出一个进程和一个托盘图标，"
+            "而是把已经在运行的那个叫到前面来。",
+        ],
+        "en": [
+            "All data now lives in the install folder: settings, the log, downloaded updates, the update "
+            "script and the temporary elevation scripts -- what used to sit in %TEMP% and the user "
+            "profile is now next to the program.",
+            "The \"File -> Change data folder...\" menu item is gone: it was the door through which the "
+            "data scattered. Settings an older version left elsewhere are moved back at startup.",
+            "Uninstalling now really empties the folder: besides settings and logs it closes the adb "
+            "daemon the program started, and removes the tools folder that daemon was holding open.",
+            "No more error box at the end of an uninstall: \"Unknown constant \\\"userprofile\\\"\" came "
+            "from the uninstaller script using a constant Inno does not have -- the uninstall itself had "
+            "already finished.",
+            "Only one copy can run at a time: double-clicking the exe no longer starts a second process "
+            "and a second tray icon, it brings the running one to the front instead.",
+        ],
+    },
+    {
+        "v": "1.6.5",
+        "date": "2026-10-18",
+        "zh": [
+            "修掉「更新目录会自己变」：数据目录的指针文件以前可能被写到 %TEMP% 下，"
+            "那个目录一被清理，程序就退回程序目录、所有设置回到默认值。现在落在 %TEMP% 下的"
+            "指针会被忽略，而且指针本身也不会再写到真实位置上去。",
+            "更新目录现在真的全程生效：以前只有下载的安装包放在你选的目录，"
+            "更新脚本和它的日志总是扔在 %TEMP%，现在三样都跟着走。",
+            "卸载现在会先关掉正在运行的程序（最多重试 8 次），不会再出现「卸载完了目录里还留着"
+            "删不掉的文件」。",
+            "顺手修了一个误报：设备节点已经禁用了、只是那块屏还暂时留在显示列表里时，"
+            "以前会报「没能彻底关掉」，现在算成功并说明原因。",
+        ],
+        "en": [
+            "Fixed \"the update folder changes by itself\": the data-folder pointer could end up under "
+            "%TEMP%, and the moment that folder was cleaned the program fell back to its own folder and "
+            "every setting reverted to its default. A pointer under %TEMP% is ignored now, and the "
+            "pointer is no longer written to the real location in the first place.",
+            "The update folder now applies to the whole update: previously only the downloaded installer "
+            "went to the folder you picked, while the update script and its log were always dropped in "
+            "%TEMP%. All three follow the setting now.",
+            "Uninstalling now closes the running program first (retrying up to eight times), so it can no "
+            "longer finish with undeletable files left in the folder.",
+            "Fixed a false alarm along the way: when the device node is already disabled and the screen is "
+            "merely still in the display list, it used to report \"could not shut it down completely\". "
+            "That counts as success now, and says why.",
+        ],
+    },
+    {
         "v": "1.6.4",
         "date": "2026-10-17",
         "zh": [

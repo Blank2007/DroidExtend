@@ -141,6 +141,17 @@ DroidExtend 使用说明   v{ver}
      想现在就关掉（而不是等下次停止投屏），点工具菜单的「彻底关闭虚拟屏（要授权一次）」。
      注意不能靠把驱动设置里的 <count> 写成 0 来实现：驱动把 0 当成非法值，照样建一块屏。
 
+  Q: 为什么「更新目录」会自己变回默认值？
+  A: 程序保存设置的位置（数据目录）以前可能被指到 %TEMP% 下面——那是测试留下的坑，
+     %TEMP% 一被系统清理，程序就只能退回程序目录，所有设置一起变回默认值。
+     1.6.5 起，落在 %TEMP% 下的记忆目录会被忽略。而且「更新目录」现在全程生效：
+     下载的安装包、更新脚本、它的日志都放在你选的那个目录里。
+
+  Q: 卸载的时候程序还在托盘里，会不会卸不干净？
+  A: 1.6.5 起不会了：安装和卸载都会先强制关掉 DroidExtend.exe（最多重试 8 次）再动文件。
+     更早的版本确实会留下几个删不掉的文件（tools 目录下的 adb 相关文件最典型），
+     重启之后手动删掉就行。
+
   Q: 电脑上多出来的那块屏找不到鼠标？
   A: 虚拟屏是按「屏幕位置」贴着主屏放的。放在右边时，鼠标一直往右移就过去了。
      也可以按 Win+P 看当前是「扩展」还是「仅电脑屏幕」。
@@ -342,6 +353,21 @@ DroidExtend manual   v{ver}
      Tools -> "Shut the virtual display down for real (asks once)".
      Writing <count> 0 into the driver settings does NOT achieve this: the
      driver treats 0 as invalid and creates one monitor anyway.
+
+  Q: Why does the "update folder" keep reverting to its default?
+  A: The folder the program keeps its settings in (the data folder) could end up
+     pointed under %TEMP% -- a hole left by a test.  As soon as Windows cleaned
+     that folder the program could only fall back to its own folder and every
+     setting reverted at once.  Since 1.6.5 a remembered folder under %TEMP% is
+     ignored.  "Update folder" also applies to the whole update now: the
+     downloaded installer, the update script and its log all go to the folder
+     you picked.
+
+  Q: If the program is still in the tray, will uninstalling leave files behind?
+  A: Not since 1.6.5: both install and uninstall force-close DroidExtend.exe
+     first (retrying up to eight times) before touching files.  Earlier versions
+     did leave a few undeletable files behind (most typically the adb files under
+     the tools directory); delete them by hand after a reboot.
 
   Q: I cannot find the mouse on the extra screen?
   A: The virtual screen is placed against the main one according to "Position".

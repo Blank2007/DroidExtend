@@ -167,7 +167,11 @@ def _write_elevator(script, args):
         "-WorkingDirectory %s -ArgumentList @(%s)\r\n"
         "exit $p.ExitCode\r\n" % (_ps_single(ROOT), argv)
     )
-    path = os.path.join(tempfile.gettempdir(), "droidextend_vdd_elevate.ps1")
+    path = os.path.join(data_dir(), "tmp", "droidextend_vdd_elevate.ps1")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except OSError:
+        pass
     # UTF-8 with BOM: Windows PowerShell 5.1 would otherwise read it as ANSI.
     with open(path, "w", encoding="utf-8-sig") as f:
         f.write(body)
@@ -487,7 +491,11 @@ def _run_ps1(body, tag, log=None, elevate=True, timeout=180):
             os.remove(log_path)
     except OSError:
         pass
-    script = os.path.join(tempfile.gettempdir(), "droidextend_vdd_%s.ps1" % tag)
+    script = os.path.join(data_dir(), "tmp", "droidextend_vdd_%s.ps1" % tag)
+    try:
+        os.makedirs(os.path.dirname(script), exist_ok=True)
+    except OSError:
+        pass
     try:
         # UTF-8 with BOM: Windows PowerShell 5.1 reads a BOM-less file as ANSI.
         with open(script, "w", encoding="utf-8-sig") as f:
@@ -695,6 +703,18 @@ def set_enabled(on, log=None):
         return True, text
     gone, secs = wait_gone(timeout=20.0)
     if not gone:
+        # Disabling the node does not always make the adapter row vanish right
+        # away: measured 2026-10-18 on a machine where the display had been
+        # attached and the detach had failed, the adapter stayed enumerable for
+        # the whole 20 s while the PnP node was already Status "Unknown".  A
+        # disabled device does not start at boot, so the screen really is gone by
+        # then -- calling that a flat failure is wrong and alarming.
+        if device_enabled() is False:
+            log(i18n.t(
+                "虚拟屏的设备节点已禁用；这块屏要等系统松手（或下次开机）才从列表里消失",
+                "the device node is disabled; the screen stays in the list until the "
+                "system lets go of it, and is not there at the next boot"))
+            return True, text
         return False, i18n.t(
             "设备已禁用，但虚拟屏还在（%.0f 秒内没消失）。",
             "The device was disabled but the virtual display is still there after "

@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.6.4"
+#define AppVer "1.6.6"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -67,6 +67,11 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 AllowNoIcons=yes
+; Left off on purpose: the restart manager closes applications by sending them
+; WM_CLOSE, and this program's close button only hides it to the tray (that is
+; what tray_on_close means), so the dialog would come back every time asking
+; about a file that "cannot" be replaced.  The [Code] section at the bottom kills
+; the image outright instead, on upgrade and on uninstall.
 CloseApplications=no
 ; "auto" shows the picker when the system language is not one of ours, which is
 ; exactly the case we want it in: an English Windows gets an English installer
@@ -183,3 +188,121 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\DroidExtend.exe"; IconFilenam
 [Run]
 Filename: "{app}\DroidExtend.exe"; Description: "立即启动 {#AppName}"; Languages: cn; Flags: nowait postinstall skipifsilent
 Filename: "{app}\DroidExtend.exe"; Description: "Start {#AppName} now"; Languages: en; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; Since 1.6.6 everything the program writes lives in {app}: settings.json, the
+; log, the downloaded updates and the short-lived PowerShell files.  Inno only
+; removes files it installed itself, so each of these has to be named -- without
+; them an uninstall leaves the folder behind with the user's data still in it.
+Type: files;          Name: "{app}\settings.json"
+Type: files;          Name: "{app}\DroidExtend.log"
+Type: files;          Name: "{app}\vdd_install.log"
+Type: files;          Name: "{app}\vdd_off.log"
+Type: files;          Name: "{app}\data_dir.txt"
+Type: filesandordirs; Name: "{app}\updates"
+Type: filesandordirs; Name: "{app}\tmp"
+Type: filesandordirs; Name: "{app}\tools"
+; The pointer file 1.6.5 and earlier kept in the user profile.
+Type: files;          Name: "{localappdata}\DroidExtend\data_dir.txt"
+Type: filesandordirs; Name: "{localappdata}\DroidExtend"
+
+[Code]
+// The program lives in the tray, and its window's close button only hides it
+// (tray_on_close).  So neither the user nor Setup's restart manager ever really
+// ends the process, and Inno then cannot replace DroidExtend.exe on an upgrade,
+// nor delete it on an uninstall: it reports "file in use" and leaves a program
+// behind that still holds the virtual screen.
+//
+// Killing the image outright is the only thing that works here, and it is safe:
+// the app saves its settings on exit, and any virtual screen it had is detached
+// at the next start anyway.
+procedure KillRunningApp();
+var
+  ResultCode: Integer;
+  Attempt: Integer;
+begin
+  // taskkill returns 128 when no matching process exists and 0 after a kill, so
+  // "anything but 0" means there is nothing left to kill.  Repeating covers the
+  // moment the process is still winding down.
+  for Attempt := 1 to 8 do
+  begin
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM DroidExtend.exe /T',
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if ResultCode <> 0 then
+      Exit;
+    Sleep(400);
+  end;
+end;
+
+// adb.exe is our own bundled adb *server*.  It outlives the window, and while it
+// runs it holds {app}\tools\platform-tools\adb.exe open -- which is exactly why
+// an uninstall used to finish with the adb files and adb.log still in tools\.
+// Only processes whose image really lives under {app} are killed, so an adb
+// server belonging to Android Studio or another SDK is left alone.
+procedure KillAppAdb();
+var
+  ResultCode: Integer;
+  Cmd: String;
+begin
+  Cmd := '-NoProfile -WindowStyle Hidden -Command "' +
+         'Get-Process adb -ErrorAction SilentlyContinue | Where-Object { ' +
+         '$_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | ' +
+         'Stop-Process -Force -ErrorAction SilentlyContinue"';
+  Exec('powershell.exe', Cmd, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(300);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  KillRunningApp();
+  KillAppAdb();
+  Result := '';
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+  Cmd: String;
+begin
+  if CurUninstallStep = usUninstall then begin
+    KillRunningApp();
+    KillAppAdb();
+    // Let the killed processes actually release their file handles before Inno
+    // starts deleting: adb.exe in particular is held by its own server process.
+    Sleep(800);
+  end;
+  if CurUninstallStep = usPostUninstall then begin
+    // "Uninstall" should mean the folder is gone, not "mostly gone" -- but the
+    // sweep must not fight the uninstaller: deleting {app} from in here races
+    // Inno's own cleanup (the uninstaller still lives in it), and the loser of
+    // that race is the dialog "some elements could not be removed".
+    //
+    // So the sweep is handed to a detached PowerShell that waits for the
+    // uninstaller to finish, then removes whatever is left: the program folder
+    // (a stray adb.log, a settings file written after Setup made its list) and
+    // the folders older versions kept outside the program folder.
+    //
+    // A "<app>-backup" sibling is deliberately NOT in this list: a backup folder
+    // can be the user's own, and deleting one because it happens to sit next to
+    // the program folder is not something an uninstaller may do.
+    Cmd := '-NoProfile -WindowStyle Hidden -Command "' +
+           'sleep 2; ' +
+           '$w = 0; ' +
+           'while ($w -lt 60 -and (Get-Process -Name ''unins000'' -ErrorAction SilentlyContinue)) ' +
+           '{ Start-Sleep -Milliseconds 500; $w++ }; ' +
+           '$targets = @(''' + ExpandConstant('{app}') + ''',' +
+           '''' + ExpandConstant('{localappdata}\DroidExtend') + ''',' +
+           // GetEnv, not {userprofile}: that constant does not exist in Inno, and
+           // ExpandConstant on an unknown name raises "Runtime error ... Unknown
+           // constant" -- which is exactly the dialog that appeared at the end of
+           // an uninstall that had otherwise already done its job.
+           '''' + GetEnv('USERPROFILE') + '\.droidextend' + '''); ' +
+           'for ($round = 0; $round -lt 10; $round++) { ' +
+           '$left = @($targets | Where-Object { Test-Path -LiteralPath $_ }); ' +
+           'if ($left.Count -eq 0) { break }; ' +
+           'foreach ($t in $left) { ' +
+           'Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }; ' +
+           'Start-Sleep -Milliseconds 800 }"';
+    Exec('powershell.exe', Cmd, '', SW_HIDE, ewNoWait, ResultCode);
+  end;
+end;
