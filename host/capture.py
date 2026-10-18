@@ -21,6 +21,8 @@ import time
 
 from paths import ffmpeg_exe, popen
 
+from clock import now_us
+
 import i18n
 
 # What the phone has to decode.  The host sends this in the handshake so the
@@ -838,7 +840,8 @@ class Capture(object):
             if units:
                 # Stamp each unit with the moment its bytes came out of ffmpeg;
                 # the phone turns that into a real end-to-end latency figure.
-                stamp = int(time.time() * 1000000)
+                # Monotonic, not the wall clock: see host/clock.py.
+                stamp = now_us()
                 with self._cv:
                     for u in units:
                         self.unit_queue.append((u[0], u[1], stamp))

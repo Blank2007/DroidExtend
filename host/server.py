@@ -17,13 +17,22 @@ import struct
 import threading
 import time
 
+from clock import now_us
+
 MAGIC = b"DXS3"
 HOST_PORT = 27183
 MAX_UNIT = 8 * 1024 * 1024
 
 
 def _now_us():
-    return int(time.time() * 1000000)
+    """The frame/​handshake timestamp clock.  Monotonic, see clock.py.
+
+    Kept as a name so the tests can keep referring to it; it used to be
+    `time.time()` in microseconds, which is the wall clock -- and a wall clock
+    that gets stepped by the time service turns into "the latency jumped" on the
+    phone.
+    """
+    return now_us()
 
 
 def header(width, height, fps, note=""):

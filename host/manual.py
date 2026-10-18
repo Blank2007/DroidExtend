@@ -108,6 +108,12 @@ DroidExtend 使用说明   v{ver}
        或在手机设置里对本程序关掉省电限制。
      · 「采集」保持「自动」或 ddagrab。
 
+  Q: 浮窗上的延迟数字用久了会慢慢变大，是不是越来越卡？
+  A: 不是。1.6.7 之前那个数字会把两台机器时钟的细微差别也算进去
+     （大约 3 ms/分钟），所以看起来一直涨，而画面其实没变慢。
+     现在手机端会自己把这种漂移修掉，两端的时间戳也换成了单调时钟。
+     如果数字真的变大并且画面也跟不上，那才是上面那条「画面卡、延迟大」。
+
   Q: 显卡占用很高，是不是有问题？
   A: 正常，而且和虚拟屏直接有关。虚拟屏不是真屏幕，但 Windows 的桌面合成器
      会把它当成一块真屏去合成——屏幕越大、刷新率越高，每帧要合成的像素越多。
@@ -305,6 +311,14 @@ DroidExtend manual   v{ver}
        frame rate or resolution, or exempt this app from battery optimisation
        in the phone's own settings.
      . Leave "Capture" on Auto or ddagrab.
+
+  Q: The latency number on the overlay slowly grows.  Is it getting laggier?
+  A: No.  Before 1.6.7 that figure also counted the tiny difference between the two
+     machines' clocks (about 3 ms per minute), so it looked like it kept climbing
+     while the picture was never getting slower.  The phone now corrects that drift
+     itself and both ends stamp frames from a monotonic clock.  If the number grows
+     AND the picture cannot keep up, that is the "stuttering and high latency" case
+     above instead.
 
   Q: GPU usage is high -- is something wrong?
   A: No, and it follows directly from the virtual screen.  The virtual screen is

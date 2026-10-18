@@ -27,7 +27,7 @@
 > ### 🤖 这个仓库的代码是 AI 写的
 >
 > **全部源代码由 AI 编码代理编写**——在 **DeepSeek Harness** 里、用 **deepseek-flash** 模型，
-> 于 2026-10-10 至 2026-10-16 的几次会话内从零写完，此后每个版本（当前 1.6.5）都由它在同一个仓库里继续维护。
+> 于 2026-10-10 至 2026-10-16 的几次会话内从零写完，此后每个版本（当前 1.6.7）都由它在同一个仓库里继续维护。
 > 人类（[@Blank2007](https://github.com/Blank2007)）负责提需求、插上真机、在需要管理员权限时点“是”、以及验收。
 >
 > 整个过程（包括踩过的每一个坑和实测数据）记在 **[开发日志.md](开发日志.md)** 里，
@@ -48,7 +48,7 @@
 | 🔄 **程序内更新** | 「检查更新」直接在程序里下载新版本，校验大小 / SHA256 / 文件格式，**校验不过就不装**，不用自己跑浏览器 |
 
 > **想直接拿现成的？**
-> * 安装程序 ⬇️ **[DroidExtend-Setup-1.6.5.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
+> * 安装程序 ⬇️ **[DroidExtend-Setup-1.6.7.exe](https://github.com/Blank2007/DroidExtend/releases/latest)**（35 MB）
 > * 手机端 App ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)**（206 KB）
 >
 > 也可以在 [Releases](https://github.com/Blank2007/DroidExtend/releases) 页面里下载。
@@ -64,7 +64,7 @@
 
 ## 〇、安装（推荐，双击下一步就行）
 
-双击 **`DroidExtend-Setup-1.6.5.exe`** → 一路“下一步”。
+双击 **`DroidExtend-Setup-1.6.7.exe`** → 一路“下一步”。
 **第一个页面就是“选择安装位置”**，默认装在下面这个目录，想换地方点旁边的“浏览…”。
 
 * 装到 `%LOCALAPPDATA%\Programs\DroidExtend`（默认值，可以改），**全程不请求管理员权限**，装完直接能用
@@ -302,13 +302,14 @@ ToDesk / 向日葵这类远程软件也枚举不到它；代价是开始和停�
 「彻底关闭虚拟屏（要授权一次）」，想现在就关掉的话点它。注意**不能靠把驱动设置里的
 `<count>` 写成 0** 来实现：MttVDD 把 0 当成非法值（`Monitor Count is not valid`），照样建一块屏。
 
-**更新目录为什么老是变回默认？** 因为程序存放设置的位置（数据目录）曾经被指到 `%TEMP%` 下——
-那是我自己测试留下的坑，`%TEMP%` 一被系统清理，程序就只能退回程序目录，所有设置一起变回默认值。
-1.6.5 起，落在 `%TEMP%` 下的记忆目录会被忽略，指针文件本身也不会再写到真实位置上去。另外
-「更新目录」现在真的全程生效：下载的安装包、更新脚本、脚本日志三样都放在你选的那个目录。
+**数据都放在哪？** 1.6.6 起全部在**安装目录**里：`settings.json`、`DroidExtend.log`、
+下载的更新包（`updates\`）、更新脚本和提权用的临时脚本（`tmp\`）。没有任何指针文件，
+也不会往 `%TEMP%` 或用户目录里塞东西——所以卸载就是把整个目录删掉，不留残渣。
+1.6.5 及更早的版本会把这些散在 `%TEMP%` 和 `%LOCALAPPDATA%` 里，升级时旧数据会自动搬回来。
 
-**卸载的时候程序还在托盘里跑怎么办？** 1.6.5 起安装和卸载都会先强制关掉 `DroidExtend.exe`
-（最多重试 8 次）再动文件。1.6.4 及更早的版本不会，所以卸载完目录里可能还剩几个删不掉的文件
+**卸载的时候程序还在托盘里跑怎么办？** 1.6.6 起安装和卸载都会先强制关掉 `DroidExtend.exe`
+**和它自己拉起来的 adb 守护进程**（最多重试 8 次）再动文件，卸载完还会有一个分离的小脚本把整个
+目录再扫一遍。1.6.5 及更早的版本不会，所以卸载完目录里可能还剩几个删不掉的文件
 （`tools` 下的 adb 相关文件最典型）——重启之后手动删掉就行。
 
 ---
@@ -324,7 +325,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← 改了手机端 Java 代码才需要
 ├─ dist/
 │   ├─ DroidExtend.apk           ← 手机端安装包
-│   └─ DroidExtend-Setup-1.6.5.exe ← Windows 安装程序（35 MB）
+│   └─ DroidExtend-Setup-1.6.7.exe ← Windows 安装程序（35 MB）
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← 安装程序的 Inno Setup 脚本
 ├─ host/                          ← Windows 端（Python）

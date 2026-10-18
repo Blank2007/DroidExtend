@@ -20,6 +20,20 @@ public class StreamClient extends Thread {
     // is still generous for a momentary burst but caps the wait at a level
     // where jumping to the next keyframe is better than catching up.
     private static final int BACKLOG_DROP_BYTES = 384 * 1024;
+    // The two devices' monotonic clocks run at slightly different rates -- a
+    // consumer crystal is good to roughly 50 ppm -- so the offset measured once
+    // at the handshake slowly stops being true.  Left alone, that drift is added
+    // to every sample and the overlay reports it as latency that keeps growing
+    // (3 ms becoming 60 ms over half an hour) while the picture feels identical.
+    //
+    // The fastest frame in a report window is the best estimate of "the pipeline
+    // is empty right now".  If that minimum moves away from the reference by a
+    // little, it is drift and the offset takes it out -- in either direction; a
+    // slower crystal makes the reported number shrink until it goes negative.  A
+    // move larger than any crystal could manage in one window is a real change in
+    // latency, and then the new level becomes the reference instead.
+    private static final long DRIFT_MIN_US = 50;     // below this it is just jitter
+    private static final long DRIFT_CAP_US = 1500;   // above this it cannot be drift
 
     public interface Listener {
         void onStatus(String text, boolean streaming);
@@ -148,6 +162,11 @@ public class StreamClient extends Thread {
         long latSum = 0;
         long latMax = 0;
         int latCount = 0;
+        long latMin = Long.MAX_VALUE;
+        // The reference the drift is measured against: the window minimum of a
+        // window that looked trustworthy.  It is only moved when the level
+        // genuinely changes, never to "keep up" with the drift.
+        long latFloorUs = Long.MIN_VALUE;
         while (running) {
             int len = readIntLE(in);
             if (len <= 0 || len > MAX_UNIT) {
@@ -177,12 +196,34 @@ public class StreamClient extends Thread {
                     if (latUs > latMax) {
                         latMax = latUs;
                     }
+                    if (latUs < latMin) {
+                        latMin = latUs;
+                    }
                 }
             }
 
             long now = System.currentTimeMillis();
             if (now - lastReport >= 2000) {
                 long secs = Math.max(now - lastReport, 1);
+                // Correct accumulated clock drift before reporting, so the number
+                // means "how fast is the pipeline" rather than "how long have we
+                // been connected".
+                if (latMin != Long.MAX_VALUE) {
+                    if (latFloorUs == Long.MIN_VALUE) {
+                        latFloorUs = latMin;
+                    } else {
+                        long excess = latMin - latFloorUs;
+                        if (Math.abs(excess) > DRIFT_CAP_US) {
+                            // Too big to be drift: the pipeline really did change.
+                            // Take the new level as the reference.
+                            latFloorUs = latMin;
+                        } else if (Math.abs(excess) > DRIFT_MIN_US) {
+                            clockSkewUs += excess;
+                            Log.i(TAG, "clock resync: the two clocks drifted "
+                                    + (excess / 1000.0) + " ms, offset corrected");
+                        }
+                    }
+                }
                 Stats st = new Stats();
                 st.width = w;
                 st.height = h;
@@ -210,6 +251,7 @@ public class StreamClient extends Thread {
                 latSum = 0;
                 latMax = 0;
                 latCount = 0;
+                latMin = Long.MAX_VALUE;
                 lastReport = now;
             }
         }

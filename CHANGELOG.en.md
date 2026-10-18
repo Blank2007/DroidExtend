@@ -51,6 +51,7 @@
 | [25](#25-164-part-two-the-in-app-update-never-once-installed) | 1.6.4, part two: the in-app update never installed | under `DETACHED_PROCESS` the child exits 0 and runs nothing |
 | [26](#26-165-the-update-folder-moved-on-its-own-and-uninstalling-left-the-app-running) | 1.6.5: the update folder / uninstall leftovers | the data-folder pointer had been written to point into `%TEMP%` |
 | [27](#27-166-all-data-in-the-install-folder-one-instance-only) | 1.6.6: all data in one folder / a clean uninstall / one instance | the folder disappears after an uninstall; a second double-click starts nothing |
+| [28](#28-167-why-the-latency-creeps-up) | 1.6.7: the latency figure keeps growing | clock drift of 3 ms per minute; the picture never got slower |
 
 ---
 
@@ -2452,5 +2453,119 @@ machine.
 4. **Fewer places to put data beats more flexibility.** A pointer, a movable data folder and update
    scripts in `%TEMP%` were each "convenient" at the time, and each one ended up as "the settings
    changed on their own" or "there is still junk after an uninstall".
+
+---
+
+## 28. 1.6.7: why the latency creeps up
+
+### 28.1 One sentence
+
+> It is stable now, but why does the latency shown on the Android side keep growing after a while?
+> From 3 ms to 60 ms, though I can barely feel it.
+
+"I can barely feel it" is the clue: the picture did not get slower, only the number did. A number that
+climbs while the picture stays identical is measuring something that has nothing to do with the
+encoder or the link.
+
+### 28.2 Where that number comes from
+
+The phone reports a latency figure every two seconds, computed like this:
+
+```java
+// measured once at handshake, and never again
+clockSkewUs = SystemClock.elapsedRealtimeNanos() / 1000 - hostNowUs;
+
+// for every frame
+long latUs = SystemClock.elapsedRealtimeNanos() / 1000 - clockSkewUs - stampUs;
+```
+
+`latUs` is "what time the phone thinks it is", minus "the offset between the two machines", minus
+"when this frame was stamped on the PC". Averaged over a two-second window and reported as
+`latency_avg_ms`.
+
+The formula assumes **the two monotonic clocks tick at the same rate**. They do not: consumer crystals
+are off by roughly ±50 ppm, which is 50 seconds per million -- 0.05 ms/s, or **3 ms per minute**. With
+the offset measured once at handshake, that drift is added to every single frame. After an hour the
+number is 180 ms larger and the picture has not changed at all.
+
+### 28.3 Both ends were wrong
+
+* **The PC side used the wall clock**: `host/capture.py` had
+  `stamp = int(time.time() * 1000000)`, and so did `_now_us()` in `host/server.py`. The Windows time
+  service slews the wall clock and occasionally steps it -- a step is "the latency suddenly changed".
+  The whole chain wants `time.monotonic()`.
+* **The phone treated a one-off measurement as permanent**: the offset was computed at handshake and
+  never corrected, so all of the drift went straight into the reported figure.
+
+Together: slow steady growth (drift) plus occasional jumps (time sync).
+
+### 28.4 The fix
+
+**(a) A monotonic clock on the PC.** New `host/clock.py`:
+
+```python
+def now_us():
+    """Microseconds of a clock that only moves forward.
+
+    time.time() is the wall clock: the Windows time service slews it, and
+    occasionally steps it.  Frame timestamps must not jump.
+    """
+    return int(time.monotonic() * 1000000)
+```
+
+`host/capture.py` and `host/server.py` both use it now.
+
+**(b) The phone corrects the drift itself.** Each window also keeps `latMin`, the fastest frame in it
+-- the fastest frame is the one where the pipeline was empty, so a change in *that* is drift. The
+reference `latFloorUs` is the first window's minimum, and after that:
+
+```java
+if (Math.abs(excess) > DRIFT_CAP_US)      latFloorUs = latMin;   // really faster/slower: new reference
+else if (Math.abs(excess) > DRIFT_MIN_US) clockSkewUs += excess; // drift: take it out
+```
+
+Two attempts failed before this one, and both are worth remembering:
+
+* **A ring buffer of the last 30 window minima**: the correction pinned the reading to the floor, the
+  ring could never rise, and **a genuine increase in latency was erased permanently**; on top of that
+  `latSum -= excess*latCount` subtracted twice and the readings went negative.
+* **A reference that followed `latMin`**: the correction only removed the increment above a moving
+  reference, never the accumulated residual -- after an hour it still read 92 ms, exactly half the
+  true drift, which looks like "half fixed".
+
+The key property of the final version: **the reference must not follow the signal**. It moves only
+when the level genuinely changes (more than `DRIFT_CAP_US`); ordinary drift is absorbed by
+`clockSkewUs`.
+
+### 28.5 Verification
+
+`tools/tmp/latency_clock_test.py`, **28 assertions all green**. The core ones re-implement the Java
+algorithm in Python and feed it 60 minutes of synthetic data (60 fps, a report every 2 s):
+
+```
++50 ppm   uncorrected 3.0 -> 182.9 ms   corrected 3.05 -> 3.15
+-50 ppm                                 corrected 2.85 -> 2.95
++200 ppm  (worst-case crystal)          corrected 3.20 -> 3.60
+-200 ppm                                corrected 2.40 -> 2.80
+0 ppm                                   corrected 3.00 -> 3.00
+true latency 3 -> 12 ms                 reads 12.25 within two minutes
+```
+
+The thresholds (`DRIFT_MIN_US` / `DRIFT_CAP_US`) are **read out of `StreamClient.java` with a regex**,
+so the test and the code cannot drift apart -- 1.6.6 had just been burned by exactly that
+(`update_test.py` had the APK size hardcoded).
+
+### 28.6 Lessons
+
+1. **"It gets worse the longer you run it" is almost always drift.** Two clocks, one accumulator and an
+   offset measured once will produce that curve every time; suspect the clock before the encoder.
+2. **Drift must be corrected against a reference that does not move.** If the reference follows the
+   signal, the correction only ever removes the increment -- it looks fixed and is half fixed.
+3. **Get the algorithm right in three minutes of Python before touching Java.** The ring-buffer
+   version cost several compile cycles; running the same data through Python takes seconds.
+4. **The test and the code must not each keep their own constant.** Read it out of the source so a
+   change to the code changes the test instead of quietly invalidating it.
+
+---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

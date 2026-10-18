@@ -13,6 +13,29 @@ import i18n
 # 新版本写在最前面。
 ENTRIES = [
     {
+        "v": "1.6.7",
+        "date": "2026-10-19",
+        "zh": [
+            "安卓端显示的延迟不再越用越大：以前从 3 ms 一路涨到 60 ms，其实是两台机器时钟频率的"
+            "细微差别被算进了延迟里，画面本身一点没变慢。",
+            "手机端现在会自己把这种漂移修掉（每一轮上报前对比最近窗口的最小值），实测一小时"
+            "从 183 ms 压回 3 ms 上下。",
+            "电脑端打时间戳改用单调时钟，系统校时再也不会让这个数字突然跳一下。",
+            "真延迟变大的时候一分钟内仍然看得出来——修的是漂移，不是把数字按住。",
+        ],
+        "en": [
+            "The latency shown on the phone no longer creeps up: it used to climb from 3 ms to 60 ms, "
+            "which was the two machines' clock crystals running at slightly different rates and that "
+            "drift being counted as latency. The picture itself never got slower.",
+            "The phone now corrects that drift itself by comparing each report window against the "
+            "recent minimum -- measured, an hour of drift goes from 183 ms back to about 3 ms.",
+            "The PC side stamps frames from a monotonic clock now, so the Windows time service can no "
+            "longer make the number jump.",
+            "A genuine rise in latency is still visible within a minute: what is corrected is drift, "
+            "not the number itself.",
+        ],
+    },
+    {
         "v": "1.6.6",
         "date": "2026-10-18",
         "zh": [
