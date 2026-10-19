@@ -14,6 +14,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.util.TypedValue;
+import android.view.Display;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.Surface;
@@ -904,6 +905,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
 
             @Override public void onStats(final Stats s) {
+                // The panel rate is a property of the phone, not of the link;
+                // it is filled in here because only the Activity has a Context.
+                if (s.screenHz <= 0) {
+                    s.screenHz = panelHz();
+                }
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (hud != null) {
@@ -925,6 +931,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
         client.start();
         AppLog.i("client started");
+    }
+
+    /**
+     * The panel's current refresh rate, or 0 when it cannot be read.
+     *
+     * This is not the stream rate: the PC captures at whatever fps is
+     * configured, and the phone decodes at that rate regardless of how fast the
+     * screen refreshes.  The overlay shows both so the two are not confused.
+     */
+    private double panelHz() {
+        try {
+            Display d = getWindowManager().getDefaultDisplay();
+            return d.getRefreshRate();
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /**

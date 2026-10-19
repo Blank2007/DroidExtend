@@ -157,6 +157,7 @@ public class StreamClient extends Thread {
 
         boolean skipUntilKey = false;
         long frames = 0;
+        long shownPrev = decoder.renderedFrames();
         long bytes = 0;
         long lastReport = System.currentTimeMillis();
         long latSum = 0;
@@ -230,6 +231,12 @@ public class StreamClient extends Thread {
                 st.fps = fps;
                 st.streaming = true;
                 st.streamFps = frames * 1000.0 / secs;
+                // Frames actually put on screen, which is what "the fps of the
+                // extended screen" means.  Received frames can be higher: the
+                // decoder drops a unit when its input queue is full.
+                long shownNow = decoder.renderedFrames();
+                st.shownFps = (shownNow - shownPrev) * 1000.0 / secs;
+                shownPrev = shownNow;
                 st.mbps = bytes * 8.0 / 1000.0 / secs;
                 st.latencyMs = latCount > 0 ? latSum / (double) latCount / 1000.0 : -1;
                 st.latencyMaxMs = latMax / 1000.0;

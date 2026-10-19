@@ -29,7 +29,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 > **Every line of source was written by an AI coding agent** — inside **DeepSeek Harness**, using the
 > **deepseek-flash** model, written from scratch in a handful of sessions between 2026-10-10 and
 > 2026-10-16; every release since
-> (currently 1.6.7) has been maintained by it in this same repository.
+> (currently 1.6.8) has been maintained by it in this same repository.
 > The human ([@Blank2007](https://github.com/Blank2007)) supplies the requirements, plugs in a real device, clicks
 > "Yes" when admin rights are needed, and signs off on the result.
 >
@@ -53,7 +53,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 | 🔄 **In-app updates** | "Check for updates" downloads the new version right there in the app and verifies size / SHA256 / file format — **if verification fails, it doesn't install**; no browser required |
 
 > **Just want the ready-made binaries?**
-> * Installer ⬇️ **[DroidExtend-Setup-1.6.7.exe](https://github.com/Blank2007/DroidExtend/releases/latest)** (35 MB)
+> * Installer ⬇️ **[DroidExtend-Setup-1.6.8.exe](https://github.com/Blank2007/DroidExtend/releases/latest)** (35 MB)
 > * Phone app ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)** (206 KB)
 >
 > You can also grab them from the [Releases](https://github.com/Blank2007/DroidExtend/releases) page.
@@ -72,7 +72,7 @@ This document only covers how to use it.
 
 ## 0. Install (recommended — just keep clicking Next)
 
-Double-click **`DroidExtend-Setup-1.6.7.exe`** → keep clicking "Next" all the way through.
+Double-click **`DroidExtend-Setup-1.6.8.exe`** → keep clicking "Next" all the way through.
 **The very first page is "Select install location"**; it defaults to the directory below — click "Browse…" next to it
 to put it somewhere else.
 
@@ -352,12 +352,12 @@ mode that never existed**. When the driver's table still has room, the missing s
 **Can the extra screen be treated as not existing when it is not in use?** Yes — that is the default.
 "When not in use" has two modes. **Switch it off for real** (the default) disables the driver's device
 node when a stream stops, so the screen is not there at boot and remote-desktop tools such as ToDesk or
-Sunlogin cannot enumerate it either; the price is one administrator approval when you start and one when
-you stop. **Just take it off the desktop** leaves the driver alone and asks for nothing — the screen still
-exists, it is simply not on the desktop. There is also a menu item, "Shut the virtual display down for
-real (asks once)", if you want it gone right now. Note that writing `<count>` 0 into the driver settings
-does **not** achieve this: MttVDD treats 0 as invalid (`Monitor Count is not valid`) and creates one
-monitor anyway.
+Sunlogin cannot enumerate it either; the program already runs as administrator, so this asks for
+nothing extra. **Just take it off the desktop** leaves the driver alone and asks for nothing — the
+screen still exists, it is simply not on the desktop. There is also a menu item, "Shut the virtual
+display down for real", if you want it gone right now. Note that writing `<count>` 0 into the driver
+settings does **not** achieve this: MttVDD treats 0 as invalid (`Monitor Count is not valid`) and
+creates one monitor anyway.
 
 **Where does everything live?** Since 1.6.6, all of it is in the **install folder**: `settings.json`,
 `DroidExtend.log`, downloaded updates (`updates\`), the update script and the short-lived elevation
@@ -370,6 +370,18 @@ force-close `DroidExtend.exe` **and the adb daemon it started** (retrying up to 
 touching files, and after the uninstall a detached script sweeps the folder once more. 1.6.5 and
 earlier did not, so an uninstall could leave a few undeletable files behind (most typically the adb
 files under the `tools` folder) -- delete them by hand after a reboot.
+
+**Where does the window go when I click ×?** The first time, × asks: **hide to the tray** (the program
+keeps running in the background and the stream stays up) or **quit**, with a
+「不再提醒（记住这次的选择）」 (do not ask again, remember this choice) box next to them. After that it
+stops asking. To change it back use **Tools → 「关闭窗口时的行为…」** (closing behaviour), where
+"ask me every time" is always available. The check box this replaced used to sit permanently in the
+main window; it is gone in 1.6.8 -- where the window goes after × is not something a check box should
+decide silently.
+
+**Is the fps on the overlay my phone's refresh rate?** No. It is the **stream frame rate** (how many
+frames the PC sent and the phone decoded). Since 1.6.8 it is followed by 「（屏 120 Hz）」 -- that one is
+the panel's own refresh rate. 60 fps of video on a 120 Hz screen is normal.
 
 ---
 
@@ -384,7 +396,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← only needed if you changed the phone-side Java code
 ├─ dist/
 │   ├─ DroidExtend.apk           ← phone-side package
-│   └─ DroidExtend-Setup-1.6.7.exe ← Windows installer (35 MB)
+│   └─ DroidExtend-Setup-1.6.8.exe ← Windows installer (35 MB)
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← Inno Setup script for the installer
 ├─ host/                          ← Windows side (Python)

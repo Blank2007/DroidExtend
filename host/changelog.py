@@ -13,6 +13,68 @@ import i18n
 # 新版本写在最前面。
 ENTRIES = [
     {
+        "v": "1.6.9",
+        "date": "2026-10-19",
+        "zh": [
+            "程序现在每次启动都会申请管理员权限（系统弹一次「是」）。好处有两个："
+            "触摸注入不会再被权限更高的前台窗口挡掉；开关虚拟屏时也不再单独弹授权。",
+            "开机自动启动改用计划任务（最高权限），登录时不会再弹框。",
+            "浮窗上的 fps 现在是「真正显示出来的帧率」——解码器来不及处理时会丢帧，"
+            "以前那个数只统计收到的帧，看起来比实际流畅；收得比显示多时会标「（收 N）」。",
+            "浮窗后面同时列出手机屏幕自己的刷新率，两个数不会再被混为一谈。",
+            "安装程序也改成要管理员权限，并且默认会显示「选择安装位置」那一页（升级时预填上次的目录）。",
+            "修好了安装包在某些机器上装不了的问题：以前安装脚本里有一段代码，会让它建不了自己的"
+            "临时目录（报「无法创建目录 %TEMP%\\is-XXXX.tmp，错误 5」），现在这段已经去掉。",
+            "修好了装完之后自动启动失败的问题（错误代码 740，提示需要提升）。",
+        ],
+        "en": [
+            "The program now asks for administrator rights on every start (one Windows prompt). "
+            "Two things come out of it: touch injection is no longer blocked by a foreground window "
+            "with a higher integrity level, and switching the virtual display on or off no longer "
+            "raises its own separate approval prompt.",
+            "Autostart now uses a scheduled task with highest privileges, so signing in does not "
+            "raise a prompt.",
+            "The fps on the overlay is now the rate frames are *actually shown* at. The decoder drops "
+            "units when it cannot keep up, and the old figure only counted frames received, so it "
+            "looked smoother than the picture was; when more arrives than is shown, it says "
+            "\"(got N)\" as well.",
+            "The overlay also lists the panel's own refresh rate now, so the two numbers are not "
+            "confused with each other.",
+            "Setup asks for administrator rights too, and it always shows the \"select destination "
+            "folder\" page now (pre-filled with the previous folder on an upgrade).",
+            "Fixed the installer failing on some machines: a script block inside it stopped it from "
+            "creating its own temporary folder (\"cannot create directory %TEMP%\\is-XXXX.tmp, error "
+            "5\"). That block is gone.",
+            "Fixed the launch-after-install failure (error 740, \"the requested operation requires "
+            "elevation\").",
+        ],
+    },
+    {
+        "v": "1.6.8",
+        "date": "2026-10-19",
+        "zh": [
+            "安卓端浮窗上的 fps 现在写明是「流帧率」，后面还会跟一个「屏 N Hz」——"
+            "以前那个数只说明电脑发了、手机解了多少帧，跟屏幕刷新率没有关系。",
+            "点窗口右上角的 × 现在会先问一句：最小化到托盘还是直接退出，可以勾「不再提醒」；"
+            "主界面上原来那个「关闭窗口时缩到托盘」的勾选框撤掉了。",
+            "想改这个默认值：工具菜单 →「关闭窗口时的行为…」，不用再翻主界面。",
+            "触摸在某些程序里失效时，日志会更明确地说明是被控窗口权限更高（需要以管理员身份运行本程序）"
+            "还是 Windows 卡在了拖动状态。",
+        ],
+        "en": [
+            "The fps figure on the phone's overlay now says it is the stream rate, followed by the "
+            "panel's own refresh rate -- the old number only described how many frames the PC sent and "
+            "the phone decoded, which has nothing to do with the screen.",
+            "The window's close button now asks once: minimise to the tray, or quit -- with a \"do not "
+            "ask again\" box. The old \"shrink to tray\" check box is gone from the main window.",
+            "To change that default later: Tools -> \"What closing the window does...\" instead of "
+            "digging through the main window.",
+            "When touch stops working in some program, the log now says plainly whether the target "
+            "window has higher privileges (run this program as administrator) or Windows is stuck in a "
+            "drag state.",
+        ],
+    },
+    {
         "v": "1.6.7",
         "date": "2026-10-19",
         "zh": [

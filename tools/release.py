@@ -275,6 +275,12 @@ def build_exe():
     pb = os.path.join(HERE, "pybuild")
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
            "--onedir", "--windowed", "--name", "DroidExtend",
+           # 1.6.9: the exe asks for administrator on every start.  Touch
+           # injection is refused by Windows when a lower-integrity process
+           # targets a higher-integrity window (UIPI), and enabling/disabling the
+           # virtual display's device node needs admin anyway -- running elevated
+           # turns both problems into zero prompts after the one at launch.
+           "--uac-admin",
            "--icon", os.path.join(ROOT, "DroidExtend.ico"),
            "--paths", HOST,
            "--distpath", os.path.join(pb, "out"),

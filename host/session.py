@@ -237,9 +237,9 @@ class Session(object):
             return
         if vd.device_enabled() is not True:
             return
-        self.log(i18n.t("按设置把虚拟屏彻底关掉（禁用设备节点，会弹一次管理员授权）…",
+        self.log(i18n.t("按设置把虚拟屏彻底关掉（禁用设备节点）…",
                         "shutting the virtual display down completely (disabling its "
-                        "device node; this asks for administrator rights once)..."))
+                        "device node)..."))
         ok, text = vd.set_enabled(False, log=self.log)
         if ok:
             self.log(i18n.t(

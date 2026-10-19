@@ -52,6 +52,8 @@
 | [26](#26-165-the-update-folder-moved-on-its-own-and-uninstalling-left-the-app-running) | 1.6.5: the update folder / uninstall leftovers | the data-folder pointer had been written to point into `%TEMP%` |
 | [27](#27-166-all-data-in-the-install-folder-one-instance-only) | 1.6.6: all data in one folder / a clean uninstall / one instance | the folder disappears after an uninstall; a second double-click starts nothing |
 | [28](#28-167-why-the-latency-creeps-up) | 1.6.7: the latency figure keeps growing | clock drift of 3 ms per minute; the picture never got slower |
+| [29](#29-168-three-small-questions-and-a-tidier-window) | 1.6.8: what the fps means / touch diagnosis / closing behaviour | fps is the stream rate; the panel's refresh rate is a different number |
+| [30](#30-169-one-approval-instead-of-two-prompts) | 1.6.9: administrator rights / the shown frame rate | one UAC at launch replaces one UAC per virtual-screen toggle |
 
 ---
 
@@ -2565,6 +2567,171 @@ so the test and the code cannot drift apart -- 1.6.6 had just been burned by exa
    version cost several compile cycles; running the same data through Python takes seconds.
 4. **The test and the code must not each keep their own constant.** Read it out of the source so a
    change to the code changes the test instead of quietly invalidating it.
+
+---
+
+## 29. 1.6.8: three small questions, and a tidier window
+
+### 29.1 In the author's words
+
+> 现在有个问题 我安卓端显示的帧率真的是安卓端的真实刷新率吗 第二个问题为什么有时候
+> Windows端只要软件不在最前一个窗口 触摸就有几率失效呢  更换一下最小化到托盘的设置
+> 在用户点击X关闭软件时提示是否最小化到托盘 并给一个是否不再提醒 然后后续更改默认的
+> 关闭方式放在工具里面或者你另开一个设置入口 不要搞得软件界面这么臃肿
+
+### 29.2 What that fps actually is
+
+The `1920 × 1080 · 60 fps` on the overlay is the **decoded stream frame rate**:
+
+```java
+st.streamFps = frames * 1000.0 / secs;                            // StreamClient.java
+size += String.format(Locale.US, " · %.0f fps", stats.streamFps);  // HudView.java
+```
+
+It answers "how many frames did the PC send, and how many did the phone decode". It says nothing
+about the screen, so a 120 Hz phone fed a 60 fps stream correctly reads 60. The confusion comes from
+there being exactly one number on screen, which makes it look like a claim about the display.
+
+**The fix**: `Stats` gained `screenHz`, filled in by `MainActivity.panelHz()`
+(`getWindowManager().getDefaultDisplay().getRefreshRate()`), and the overlay now appends
+"（屏 120 Hz）" -- "screen 120 Hz". With both side by side the question cannot come up again.
+
+### 29.3 Why a touch sometimes does nothing
+
+Not mysterious: two specific mechanisms, and both now say so in the log.
+
+| Symptom | Mechanism | What the log says now |
+| --- | --- | --- |
+| Nothing responds, then another window works fine | **UIPI**: a lower-integrity process cannot inject into a higher-integrity window, so `SendInput` returns 0 | 「系统拒绝了触摸注入（SendInput 返回 0）：前台窗口的权限比本程序高。用管理员身份启动本程序就能解决」 |
+| The cursor sticks and releasing does not help | Windows is in a **modal drag loop**; `SendInput` reports success and the system swallows everything | 「触摸被系统吞掉了（SendInput 说成功，光标不动）：Windows 可能卡在拖动状态，先松开左键再重试」 |
+
+The second one already had self-healing (release the left button after eight cursor non-moves); this
+release only puts it into the log, so "it fails sometimes" becomes a sentence the user can read.
+
+### 29.4 What closing the window does
+
+The old arrangement was a permanent check box in the main window, "shrink to tray when the window
+closes". It took a row of space, and **its default meant that clicking × made the window vanish for
+good** -- not something a check box should decide silently.
+
+Three values now, stored as `close_action`:
+
+| Value | Behaviour |
+| --- | --- |
+| `ask` (default) | × opens "关闭窗口时想怎样？" (what should closing do?) with two buttons plus 「不再提醒（记住这次的选择）」 (do not ask again -- remember this choice) |
+| `tray` | hide to the tray, the stream keeps running |
+| `quit` | exit |
+
+The check box is gone from the main window; the default is changed from **Tools →
+「关闭窗口时的行为…」** (closing behaviour). A `tray_on_close` boolean left by an older version is
+converted into the matching value on first load, so an existing choice is not lost. "Start with
+Windows" only passes `--minimized` when `close_action == "tray"`.
+
+### 29.5 Verification
+
+```
+tray_app_test.py        51/51  settings round trip, the × dispatch, the dialog, "do not ask again",
+                               the menu entry, converting the legacy value
+tray_gui_test.py        17/17  real Tk: default asks -> hide to tray -> bring back -> quit -> tray gone
+touch_test.py           25/25  coordinates and semantics
+touch_batch_test.py     23/23  batching
+settings_bom_test.py    24/24  BOM tolerance in the settings file
+```
+
+The APK was rebuilt and installed: `versionCode 18` / `versionName 1.6.8`.
+
+### 29.6 Lessons
+
+1. **Put a number on screen and users will read it as being about the screen.** One extra "（屏 N Hz）"
+   beats ten sentences of explanation.
+2. **Chase a mechanism for "it fails sometimes", not a frequency.** Both mechanisms fit into one log
+   line, and once written the user can tell which one they hit.
+3. **A default does not belong inside a permanent widget.** Where the window goes after × is something
+   the user should be told the first time it happens, not a side effect of a check box.
+4. **When a test hangs, check whether it is waiting for a real dialog.** `tray_gui_test` sat for five
+   minutes because the new modal was waiting to be clicked.
+
+---
+
+## 30. 1.6.9: one approval instead of two prompts
+
+### 30.1 In the author's words
+
+> 那就每次使用前都申请管理员权限 还有 激活虚拟屏幕的时候能不能通过另外一种方式来激活做到不弹窗口
+> 第二个问题 我要的是手机端实时显示出来的拓展屏幕帧率而且为什么画面明显看起来还不如远程软件
+> 看起来流畅（就是设置同样帧率情况下你做出来的画面帧率明显比远程控制软件帧率还低）
+
+(Translation: "then ask for administrator rights before every use, and can activating the virtual
+screen be done another way so no window pops up. Second question: what I want is the frame rate the
+phone really displays, and why does the picture look clearly less smooth than remote-desktop
+software -- at the same configured frame rate, yours is obviously lower.")
+
+### 30.2 One prompt at launch instead of one per action
+
+`DroidExtend.exe` now carries a `requireAdministrator` manifest (PyInstaller's `--uac-admin`, set in
+`tools/release.py`). Windows asks once at launch, and after that:
+
+* **Touch injection is no longer blocked by UIPI.** A lower-integrity process cannot inject into a
+  window of higher integrity, which is exactly the first mechanism behind "touch sometimes does
+  nothing when the program is not in front". Elevated, both sides are equal and `SendInput` stops
+  returning 0.
+* **Toggling the virtual display no longer asks for its own approval.** The
+  `if elevate and not is_admin()` guard in `vdd._run_ps1()` is false once we are already elevated, so
+  the script just runs. The default "switch it off for real" mode used to raise one prompt when a
+  stream started and one when it stopped; it now raises none.
+
+The price is stated plainly: one UAC every launch. That is the trade.
+
+### 30.3 Autostart cannot use a Run key any more
+
+Once the exe requires elevation, a `HKCU\...\Run` entry raises a UAC prompt at every sign-in -- and
+if the user says no, nothing happens at all, which is worse than not autostarting. `host/autostart.py`
+therefore creates a **scheduled task**:
+
+```
+schtasks /Create /F /SC ONLOGON /TN DroidExtend /RL HIGHEST /TR "<command line>"
+```
+
+It falls back to the Run key only when the task cannot be created (policy disabled, say), where at
+least a prompt appears instead of a silent failure. `enabled()` / `remove()` look at both, so nothing
+is left orphaned.
+
+### 30.4 The fps is now the rate frames are actually shown at
+
+`streamFps` used to mean "frames received". When the decoder is saturated, `VideoDecoder.queue()`
+drops a whole access unit (`if (idx < 0) { return true; }` -- "drop rather than stall the socket"),
+so the received rate can be clearly higher than the displayed one: the overlay read 60 while the
+picture was dropping frames.
+
+`VideoDecoder` now counts `rendered` after `releaseOutputBuffer(idx, true)`, and the overlay shows
+`shownFps`. When more arrives than is shown by more than 1 fps, it also prints "(got N)". With both
+numbers visible, dropped frames are no longer invisible.
+
+### 30.5 Why it looks less smooth than remote software
+
+Three structural reasons, largest first:
+
+1. **The decoder drops frames when saturated**, silently (above). Remote-desktop tools adapt the
+   bitrate or the resolution to protect the cadence; this program protects the socket instead.
+2. **There is no presentation pacing.** `releaseOutputBuffer(idx, true)` means "show it the moment it
+   is decoded", so several frames that arrive together are shown together and then there is a gap --
+   the average rate is right, the rhythm is not, and that reads as stutter. Remote tools usually keep
+   a small jitter buffer and hand frames out on the display's refresh tick.
+3. **Transport is TCP through adb forward**, with no head-of-line-blocking protection: one network
+   hiccup becomes a pause followed by a catch-up burst. Remote tools mostly use UDP with their own
+   pacing.
+
+(3) is architectural and is not touched in this release; (1) and (2) are the next things to do, and
+measurement comes first.
+
+### 30.6 Lessons
+
+1. **If the number's definition is wrong, every discussion of "smoothness" is wrong.** Separate
+   "frames received" from "frames shown" before optimising anything.
+2. **Elevation is a trade, not a free fix.** One UAC at launch buys N fewer prompts, and that is only
+   worth it when N > 1 -- here N is "start streaming plus stop streaming".
+3. **Autostart and elevation are natural enemies.** Run key plus requireAdministrator means either a
+   UAC at every sign-in or a silent no-op, so it has to become a highest-privilege scheduled task.
 
 ---
 

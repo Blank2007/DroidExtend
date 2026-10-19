@@ -319,9 +319,10 @@ class App(tk.Tk):
         m_tool.add_separator()
         m_tool.add_command(label=i18n.t("清理残留的虚拟屏", "Clean up a leftover virtual screen"),
                            command=self.on_cleanup_orphans)
-        m_tool.add_command(label=i18n.t("彻底关闭虚拟屏（要授权一次）",
-                                        "Shut the virtual display down for real (asks once)"),
+        m_tool.add_command(label=i18n.t("彻底关闭虚拟屏", "Shut the virtual display down for real"),
                            command=self.on_vdd_off)
+        m_tool.add_command(label=i18n.t("关闭窗口时的行为…", "What closing the window does..."),
+                           command=self.on_close_behavior)
         m_tool.add_command(label=i18n.t("诊断连接问题…", "Diagnose connection problems..."),
                            command=self.on_diagnose)
         m_tool.add_command(label=i18n.t("安装 USB 驱动…", "Install USB driver..."),
@@ -566,8 +567,10 @@ class App(tk.Tk):
         s["install_apk"] = bool(self.inst_var.get())
         s["match_phone"] = bool(self.match_var.get())
         s["mode"] = self.mode_var.get()
-        if hasattr(self, "tray_var"):
-            s["tray_on_close"] = bool(self.tray_var.get())
+        if hasattr(self, "close_action"):
+            s["close_action"] = self.close_action
+            # Kept in step for older builds that still read the boolean.
+            s["tray_on_close"] = self.close_action != "quit"
         if hasattr(self, "auto_var"):
             s["autostart"] = bool(self.auto_var.get())
         if hasattr(self, "anim_var"):
@@ -819,11 +822,11 @@ class App(tk.Tk):
                                         variable=self.inst_var)
         self.inst_chk.grid(row=7, column=2, columnspan=2, sticky="w", pady=3)
 
-        self.tray_var = tk.BooleanVar(value=bool(self.settings.get("tray_on_close", True)))
-        self.tray_chk = ttk.Checkbutton(right, text=i18n.t("关闭窗口时缩到托盘",
-                                                           "Shrink to tray when the window closes"),
-                                        variable=self.tray_var, command=self._tray_choice)
-        self.tray_chk.grid(row=12, column=1, sticky="w", pady=3)
+        # 1.6.8 -- the "shrink to tray" check box left the window: it is one
+        # preference and it was taking a permanent place in the main window.
+        # The × now asks the first time, and 工具 → 关闭窗口时的行为… changes the
+        # answer for good.
+        self.close_action = self._initial_close_action()
         self.auto_var = tk.BooleanVar(value=bool(self.settings.get("autostart", False)))
         self.auto_chk = ttk.Checkbutton(right, text=i18n.t("开机自动启动", "Start with Windows"),
                                         variable=self.auto_var,
@@ -1302,11 +1305,12 @@ class App(tk.Tk):
         if self.off_mode_var.get() == "deep":
             self.log(i18n.t(
                 "「不用时」已改成彻底关闭：停止投屏后会把虚拟屏的设备节点禁用掉——"
-                "下次开机不会有这块屏，远程软件也看不到它。开始和停止时各弹一次授权。",
+                "下次开机不会有这块屏，远程软件也看不到它。程序本身已经以管理员身份运行，"
+                "所以这一步不会再额外弹授权。",
                 "\"When not in use\" is now switch it off for real: stopping the stream "
                 "disables the virtual display's device node, so the screen is not there "
-                "at the next boot and remote software cannot see it.  One approval when "
-                "you start and one when you stop."))
+                "at the next boot and remote software cannot see it.  The program already "
+                "runs as administrator, so this step no longer asks for approval."))
         else:
             self.log(i18n.t(
                 "「不用时」已改成只移出桌面：停止投屏后只是把它从桌面上摘掉，"
@@ -1665,7 +1669,7 @@ class App(tk.Tk):
         cfg["draw_mouse"] = bool(self.mouse_var.get())
         cfg["mode"] = self.mode_var.get()
         cfg["install_apk"] = bool(self.inst_var.get())
-        cfg["tray_on_close"] = bool(self.tray_var.get())
+        cfg["tray_on_close"] = bool(self.close_action != "quit")
         cfg["autostart"] = bool(self.auto_var.get())
         cfg["vdd_off_mode"] = self.off_mode_var.get()
         self.settings[anim.KEY] = bool(self.anim_var.get())
@@ -1702,9 +1706,20 @@ class App(tk.Tk):
         self._perf_job = self.after(700, self._poll_perf)
 
     def _on_close(self):
-        """窗口上的 ×。开了托盘就只是收起来，不然就真的退出。（日志按项目约定保持中文）"""
+        """窗口上的 ×。
+
+        1.6.8: 按「关闭窗口时的行为」分派 —— ask 先问一次（用户可以勾「不再提醒」），
+        tray 收进托盘，quit 真的退出。以前这里读的是一个常驻在界面上的勾选框。
+        """
         self._save_settings()          # remember the window and the parameters
-        if self.tray_var.get() and not self._quitting:
+        if self._quitting:
+            return
+        action = self.close_action
+        if action == "ask":
+            action = self._ask_close_action()
+            if action is None:
+                return
+        if action == "tray":
             self._hide_to_tray()
             return
         self._quit_now()
@@ -2253,13 +2268,120 @@ class App(tk.Tk):
             self.log("打不开目录：%s" % e, "err")
 
     # ------------------------------------------------------------ 托盘 (#3)
-    def _tray_choice(self):
-        """用户动了「关闭窗口时缩到托盘」这个勾。"""
-        self._save_settings()
-        if self.tray_var.get():
-            self._start_tray()
-        else:
-            self._stop_tray()
+    def _center_over(self, win):
+        """把一个小对话框摆在本窗口中间。"""
+        try:
+            self.update_idletasks()
+            win.update_idletasks()
+            x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+            y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 2
+            win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        except Exception:
+            pass
+
+    def _ask_close_action(self):
+        """× 被点了、设置还是「每次询问」。返回 "tray" / "quit" / None（取消）。"""
+        top = tk.Toplevel(self)
+        top.title(i18n.t("关闭窗口", "Close the window"))
+        top.transient(self)
+        top.resizable(False, False)
+        body = ttk.Frame(top, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=i18n.t("关闭窗口时想怎样？",
+                                    "What should closing the window do?"),
+                  style="H2.TLabel").pack(anchor="w")
+        ttk.Label(body, text=i18n.t(
+            "最小化到托盘后程序继续在后台跑，投屏不会断；双击托盘图标可以叫回来。",
+            "Minimising keeps the program running in the background, so the stream is not "
+            "interrupted. Double-click the tray icon to bring it back."),
+            style="Dim.TLabel", wraplength=430, justify="left").pack(anchor="w", pady=(6, 14))
+        again = tk.BooleanVar(value=False)
+        result = {"v": None}
+
+        def pick(value):
+            result["v"] = value
+            if again.get():
+                self.close_action = value
+                self._save_settings()
+                self.log("关闭窗口的行为已记住：%s" % self._close_action_label(value))
+            top.destroy()
+
+        row = ttk.Frame(body)
+        row.pack(fill="x")
+        ttk.Button(row, text=i18n.t("最小化到托盘", "Minimise to the tray"),
+                   command=lambda: pick("tray")).pack(side="left")
+        ttk.Button(row, text=i18n.t("直接退出", "Quit"),
+                   command=lambda: pick("quit")).pack(side="left", padx=8)
+        ttk.Button(row, text=i18n.t("取消", "Cancel"),
+                   command=top.destroy).pack(side="right")
+        ttk.Checkbutton(body, text=i18n.t("不再提醒（记住这次的选择）",
+                                          "Do not ask again (remember this choice)"),
+                        variable=again).pack(anchor="w", pady=(14, 0))
+        self._center_over(top)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        top.wait_window()
+        return result["v"]
+
+    def on_close_behavior(self):
+        """工具菜单：改「关闭窗口时的行为」这个默认值。"""
+        top = tk.Toplevel(self)
+        top.title(i18n.t("关闭窗口时的行为", "What closing the window does"))
+        top.transient(self)
+        top.resizable(False, False)
+        body = ttk.Frame(top, padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=i18n.t("点 × 的时候：", "When the close button is pressed:"),
+                  style="H2.TLabel").pack(anchor="w", pady=(0, 8))
+        var = tk.StringVar(value=self.close_action)
+        for value, label in (("ask", i18n.t("每次问我", "Ask me every time")),
+                             ("tray", i18n.t("最小化到托盘", "Minimise to the tray")),
+                             ("quit", i18n.t("直接退出", "Quit"))):
+            ttk.Radiobutton(body, text=label, value=value,
+                            variable=var).pack(anchor="w", pady=2)
+        ttk.Label(body, text=i18n.t(
+            "选「最小化到托盘」时，开机自启也会跟着缩在托盘里开始。",
+            "With \"minimise to the tray\", starting with Windows also starts hidden."),
+            style="Dim.TLabel", wraplength=430, justify="left").pack(anchor="w", pady=(8, 0))
+
+        def ok():
+            self.close_action = var.get()
+            self._save_settings()
+            self.log("关闭窗口的行为改成：%s" % self._close_action_label(self.close_action))
+            if self.close_action == "tray":
+                self._start_tray()
+            elif self.auto_var.get():
+                self._sync_autostart()
+            top.destroy()
+
+        row = ttk.Frame(body)
+        row.pack(fill="x", pady=(14, 0))
+        ttk.Button(row, text=i18n.t("确定", "OK"), command=ok).pack(side="right")
+        ttk.Button(row, text=i18n.t("取消", "Cancel"),
+                   command=top.destroy).pack(side="right", padx=8)
+        self._center_over(top)
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+        top.wait_window()
+
+    def _close_action_label(self, value):
+        for v, label in (("ask", i18n.t("每次问我", "ask me every time")),
+                         ("tray", i18n.t("最小化到托盘", "minimise to the tray")),
+                         ("quit", i18n.t("直接退出", "quit"))):
+            if v == value:
+                return label
+        return str(value)
+
+    def _initial_close_action(self):
+        """读设置；1.6.7 及更早只有 tray_on_close 那个布尔，这里给它换算过来。"""
+        v = str(self.settings.get("close_action") or "").strip().lower()
+        if v in ("ask", "tray", "quit"):
+            return v
+        return "tray" if self.settings.get("tray_on_close", True) else "quit"
 
     def _start_tray(self):
         if self.tray is not None:
@@ -2325,7 +2447,6 @@ class App(tk.Tk):
     def _hide_to_tray(self):
         """收起窗口，只留托盘图标。托盘起不来就老老实实最小化。"""
         if not self._start_tray():
-            self.tray_var.set(False)
             self.iconify()
             return
         self.log("已缩到托盘，双击托盘图标可以叫回来。")
@@ -2345,7 +2466,7 @@ class App(tk.Tk):
             return
         try:
             if self.auto_var.get():
-                cmd = auto.write(["--minimized"] if self.tray_var.get() else [])
+                cmd = auto.write(["--minimized"] if self.close_action == "tray" else [])
                 self.log("已设置开机自动启动：%s" % cmd)
             elif auto.enabled():
                 auto.remove()
@@ -2422,6 +2543,9 @@ class App(tk.Tk):
 # the kernel answers instead of us.  "Local\\" keeps it per logon session, which is
 # what we want: a second user on the same machine is a different matter.
 _INSTANCE_MUTEX = None      # module-level keeps the handle alive for the process
+# Overridable so a test can take a mutex of its own instead of reporting "someone
+# else is already running" whenever the author happens to have the app open.
+MUTEX_NAME = "Local\\DroidExtend.single"
 
 
 def _already_running():
@@ -2437,7 +2561,7 @@ def _already_running():
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateMutexW.restype = ctypes.c_void_p
         k32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
-        handle = k32.CreateMutexW(None, 1, "Local\\DroidExtend.single")
+        handle = k32.CreateMutexW(None, 1, MUTEX_NAME)
         if not handle:
             # Could not create one at all -- better to start than to refuse.
             return False

@@ -67,6 +67,10 @@ EXTRA = (
     # app._apply_vdd_off.  "deep" = no monitor at boot at all (needs UAC);
     # "desktop" = the monitor exists but never sits on the desktop (no UAC).
     "vdd_off_mode",
+    # 1.6.8 -- what the window's close button does: "ask" (default) pops the
+    # question, "tray" hides to the tray, "quit" exits.  Replaces the
+    # tray_on_close check box that used to sit on the main window.
+    "close_action",
 )
 
 _EXTRA_DEFAULTS = {
@@ -81,6 +85,7 @@ _EXTRA_DEFAULTS = {
     "delete_installer": True,
     "animations": True,
     "vdd_off_mode": "deep",
+    "close_action": "ask",
 }
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}

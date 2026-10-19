@@ -144,7 +144,8 @@ DroidExtend 使用说明   v{ver}
        ToDesk / 向日葵这类远程软件也枚举不到它，重启之后它仍然是关着的；
        代价是开始和停止投屏时各弹一次管理员授权。
      · 只移出桌面 —— 不碰驱动、不弹授权，屏还在系统里，只是不在桌面上。
-     想现在就关掉（而不是等下次停止投屏），点工具菜单的「彻底关闭虚拟屏（要授权一次）」。
+     想现在就关掉（而不是等下次停止投屏），点工具菜单的「彻底关闭虚拟屏」。
+     程序本身已经以管理员身份运行，所以这两步都不会再额外弹授权。
      注意不能靠把驱动设置里的 <count> 写成 0 来实现：驱动把 0 当成非法值，照样建一块屏。
 
   Q: 为什么「更新目录」会自己变回默认值？
@@ -158,14 +159,23 @@ DroidExtend 使用说明   v{ver}
      更早的版本确实会留下几个删不掉的文件（tools 目录下的 adb 相关文件最典型），
      重启之后手动删掉就行。
 
+  Q: 浮窗上那个 fps 是我的手机刷新率吗？
+  A: 不是。它是「流帧率」——电脑发了多少帧、手机解出来多少帧。1.6.8 起后面会再跟一句
+     「（屏 120 Hz）」，那个才是屏幕自己的刷新率。60 fps 的画面在 120 Hz 屏上是正常的。
+
+  Q: 点 × 之后窗口去哪了？想改怎么改？
+  A: 1.6.8 起第一次点 × 会问你一次：最小化到托盘（后台继续跑，投屏不断）还是直接退出，
+     旁边有「不再提醒（记住这次的选择）」。以后想改，走 工具 -> 关闭窗口时的行为…，
+     随时能切回「每次问我」。
+
   Q: 电脑上多出来的那块屏找不到鼠标？
   A: 虚拟屏是按「屏幕位置」贴着主屏放的。放在右边时，鼠标一直往右移就过去了。
      也可以按 Win+P 看当前是「扩展」还是「仅电脑屏幕」。
 
 【七、设置、更新与文件位置】
   · 你改过的参数会自动记住，下次打开软件还是上次的配置。
-  · 设置文件： %USERPROFILE%\\.droidextend\\settings.json
-    （菜单 文件 -> 打开配置目录 可以直接打开）
+  · 设置文件： 程序目录里的 settings.json（1.6.6 起所有数据都在安装目录里）
+    （菜单 文件 -> 打开数据目录 可以直接打开）
   · 菜单 工具 -> 检查更新 会去 GitHub 上查有没有新版本。
   · 程序目录里的 README.md 有更完整的说明；开发日志.md 记录了它是怎么做出来的。
 
@@ -359,12 +369,12 @@ DroidExtend manual   v{ver}
      * Switch it off for real (the default) -- stopping the stream disables the
        driver's device node.  The screen is not there at boot, remote-desktop
        tools such as ToDesk or Sunlogin cannot enumerate it, and it stays
-       disabled across a reboot.  The price is one administrator approval when
-       you start and one when you stop.
+       disabled across a reboot.  This program already runs as administrator,
+       so this asks for nothing extra.
      * Just take it off the desktop -- the driver is left alone and nothing asks
        for approval; the screen still exists, it is simply not on the desktop.
      To do it right now instead of waiting for the next stop, use the menu item
-     Tools -> "Shut the virtual display down for real (asks once)".
+     Tools -> "Shut the virtual display down for real".
      Writing <count> 0 into the driver settings does NOT achieve this: the
      driver treats 0 as invalid and creates one monitor anyway.
 
@@ -383,6 +393,19 @@ DroidExtend manual   v{ver}
      did leave a few undeletable files behind (most typically the adb files under
      the tools directory); delete them by hand after a reboot.
 
+  Q: Is the fps on the overlay my phone's refresh rate?
+  A: No. It is the stream frame rate -- how many frames the PC sent and the
+     phone decoded. Since 1.6.8 it is followed by a "screen 120 Hz" figure, which
+     is the panel's own refresh rate. 60 fps of video on a 120 Hz screen is
+     normal.
+
+  Q: Where did the window go after I clicked ×, and how do I change it?
+  A: Since 1.6.8 the first × asks once: minimize to the tray (the program keeps
+     running in the background, the stream stays up) or quit, with a
+     "do not ask again (remember this choice)" box next to them. To change it
+     later use Tools -> Closing behaviour..., where "ask me every time" is always
+     available.
+
   Q: I cannot find the mouse on the extra screen?
   A: The virtual screen is placed against the main one according to "Position".
      When it is on the right, keep moving the mouse right and you will reach it.
@@ -390,11 +413,12 @@ DroidExtend manual   v{ver}
 
 [7] Settings, updates and where the files live
   . Your settings are remembered; the next launch starts where you left off.
-  . Settings file: %USERPROFILE%\\.droidextend\\settings.json
-    (File -> Open config folder opens it for you)
+  . Settings file: settings.json in the program folder (since 1.6.6 every file the
+    program writes lives in the install folder)
+    (File -> Open data folder opens it for you)
   . Tools -> Check for updates asks GitHub whether a newer version exists.
-  . README.md in the program folder has the longer story, and 开发日志.md records
-    how the thing was built.
+  . README.md in the program folder has the longer story, and the development log
+    (Chinese) records how the thing was built.
 
 [8] Other people's work (with thanks)
   . Virtual Display Driver (VDD) -- virtual display driver, MIT licence

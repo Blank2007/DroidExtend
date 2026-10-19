@@ -189,8 +189,25 @@ public class HudView extends View {
     private String line1() {
         String size = stats.width > 0
                 ? String.format(Locale.US, "%d × %d", stats.width, stats.height) : "—";
-        if (stats.streamFps > 0) {
-            size += String.format(Locale.US, " · %.0f fps", stats.streamFps);
+        // The first fps is what is actually on the screen -- frames the decoder
+        // handed to the surface.  When the decoder is saturated it drops units,
+        // so received frames can be higher; that difference is the whole reason
+        // the picture can look choppier than the configured rate suggests, so it
+        // is shown rather than hidden.
+        double shown = stats.shownFps > 0 ? stats.shownFps : stats.streamFps;
+        if (shown > 0) {
+            // "显示" is deliberate: this is the rate frames actually reach the
+            // screen at, not the rate they arrive at.
+            size += String.format(Locale.US, " · 显示 %.0f fps", shown);
+        }
+        if (stats.streamFps > shown + 1.0) {
+            size += String.format(Locale.US, "（收 %.0f）", stats.streamFps);
+        }
+        if (stats.screenHz > 0) {
+            // The stream rate and the panel rate are different numbers on
+            // purpose: 60 fps of video on a 120 Hz screen is normal.  Without
+            // this the overlay's "fps" reads like a claim about the display.
+            size += String.format(Locale.US, "（屏 %.0f Hz）", stats.screenHz);
         }
         return size;
     }

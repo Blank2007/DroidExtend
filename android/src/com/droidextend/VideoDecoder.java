@@ -25,7 +25,22 @@ public class VideoDecoder {
     private int width, height, fps;
     private byte[] csd;
     private long frameIndex;
+    /** Frames actually handed to the surface.  See renderedFrames(). */
+    private long rendered;
     private boolean inputDone;
+
+    /**
+     * How many frames have really been put on screen.
+     *
+     * This is not the same as frames fed in: the decoder drops an access unit
+     * when its input queue is full, and a saturated decoder produces fewer
+     * pictures than it was given.  The overlay reports *this* number, because
+     * "what the phone shows per second" is the question people actually ask --
+     * `streamFps` (frames received) can be higher than what is displayed.
+     */
+    public synchronized long renderedFrames() {
+        return rendered;
+    }
 
     public synchronized void setSurface(Surface s) {
         surface = s;
@@ -52,6 +67,7 @@ public class VideoDecoder {
         configured = false;
         csd = null;
         frameIndex = 0;
+        rendered = 0;
         inputDone = false;
     }
 
@@ -174,6 +190,7 @@ public class VideoDecoder {
             if (idx >= 0) {
                 try {
                     codec.releaseOutputBuffer(idx, true);
+                    rendered++;
                 } catch (Throwable ignored) { }
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 Log.i(TAG, "output format: " + codec.getOutputFormat());

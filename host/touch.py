@@ -297,8 +297,8 @@ class Injector(object):
             # so by returning 0.  Worth one line in the log, not a flood.
             self.rejected += 1
             if self.rejected == 1:
-                self.log("系统拒绝了输入注入（SendInput 返回 0）："
-                         "被控窗口可能以管理员身份运行，试试用管理员身份启动本程序")
+                self.log("系统拒绝了触摸注入（SendInput 返回 0）：前台窗口的权限比本程序高。"
+                         "用管理员身份启动本程序就能解决，否则这个窗口上的触摸会一直没反应")
         else:
             self.rejected = 0
         self._check_frozen(x, y)
@@ -325,6 +325,8 @@ class Injector(object):
         if self.frozen >= 8:
             self.frozen = 0
             if self._down:
+                self.log("触摸被系统吞掉了（SendInput 说成功，光标不动）："
+                         "Windows 可能卡在拖动状态，先松开左键再重试")
                 self.release("输入被系统吞掉，可能卡在拖动状态")
 
     def down(self, nx, ny):
