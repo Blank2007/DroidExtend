@@ -81,6 +81,14 @@ class Session(object):
         self._last_frames = 0
         self._last_bytes = 0
         self._display_applied = None
+        # The adapter the driver last gave us.  Stopping a stream takes the
+        # screen off the desktop but leaves the device node enabled, so the next
+        # start can reuse this name instead of asking the driver twice (two
+        # PowerShell round trips of about three seconds each).
+        self._vdd_ready_name = None
+        # Whether this run ever put the screen on the desktop; quitting uses it
+        # to decide whether the "switch it off for real" step is worth the wait.
+        self._display_used = False
         self._prev_mode = None
         # -- capture watchdog ----------------------------------------------
         # ddagrab dies whenever Windows invalidates the desktop duplication:
@@ -194,7 +202,7 @@ class Session(object):
     def _vdd_off_mode(self):
         """How thoroughly to put the virtual display away when we are not using it.
 
-        "deep"    -- disable the driver's device node when the stream stops, so the
+        "deep"    -- disable the driver's device node when the program exits, so the
                      screen does not exist at all while it is not in use: nothing
                      at boot, nothing for remote-desktop software to list, and
                      Windows keeps a disabled device disabled across reboots.
@@ -237,7 +245,7 @@ class Session(object):
                 "\"just take it off the desktop\"."))
 
     def _shut_vdd_down(self):
-        """用完按档位把虚拟屏收起来。deep 档要提权，可能弹一次 UAC。"""
+        """程序退出时按档位把虚拟屏收起来。deep 档要提权。"""
         import vdd as vd
 
         if getattr(self, "skip_vdd_off", False):
@@ -256,6 +264,7 @@ class Session(object):
                         "device node)..."))
         ok, text = vd.set_enabled(False, log=self.log)
         if ok:
+            self._vdd_ready_name = None
             self.log(i18n.t(
                 "  虚拟屏已彻底关闭：下次开机不会有这块屏，远程软件也看不到它",
                 "  the virtual display is gone: it will not come back at boot and "
@@ -287,14 +296,37 @@ class Session(object):
                 mon["name"], mon["monitor"] or mon["desc"], mon["width"], mon["height"]))
             return self.rect
 
-        self._ensure_vdd_on()
-        st = vd.status()
-        if st["state"] != "ready":
-            raise VddMissing(vd.summary_line(st))
+        # An adapter that still answers needs no interview.  Two cases land here:
+        # the program was just opened again (the screen is still on the desktop
+        # from last time), and 停止 (Stop) a minute ago (the screen is off the
+        # desktop but the driver is still up on purpose).  Asking the driver
+        # costs two PowerShell round trips of about three seconds each
+        # (device_enabled plus status), which is most of a slow start.
+        prev = self._display_applied
+        adapter = None
+        try:
+            adapter = vd.find_vdd_adapter()
+        except Exception:
+            adapter = None
+        known = prev or self._vdd_ready_name
+        fast = bool(adapter is not None and known and adapter.get("name") == known)
+        if fast:
+            st = {"state": "ready", "adapter": adapter}
+        else:
+            self._ensure_vdd_on()
+            st = vd.status()
+            if st["state"] != "ready":
+                raise VddMissing(vd.summary_line(st))
         a = st["adapter"]
         name = a["name"]
-        self.log("虚拟显示器: %s (%s)" % (name, a["desc"]))
+        if fast:
+            self.log("虚拟显示器: %s (%s)（驱动还开着，没再问它）"
+                     % (name, a["desc"]))
+        else:
+            self.log("虚拟显示器: %s (%s)" % (name, a["desc"]))
         self._display_applied = name
+        self._vdd_ready_name = name
+        self._display_used = True
 
         prev = wd.current_mode(name)
         if prev:
@@ -391,6 +423,16 @@ class Session(object):
         conjure one.  Retrying it anyway cost the user nine seconds of a busy UI
         for a change that was never going to happen.
         """
+        # Nothing to do when the screen is already exactly where it should be.
+        # Started from a stopped stream this is the common case now, because
+        # the display is deliberately left in place; skipping the call saves
+        # the one-second settle below and a pointless desktop reconfigure.
+        r0 = wd.desktop_rect(name)
+        if (r0 and r0["width"] == w and r0["height"] == h
+                and int(r0.get("hz") or 0) == int(hz or 0)
+                and r0["left"] == x and r0["top"] == y):
+            self.log("  模式与位置都没变，跳过 ChangeDisplaySettingsEx")
+            return 0
         rc = None
         for attempt in range(attempts):
             try:
@@ -898,7 +940,20 @@ class Session(object):
             except Exception:
                 pass
 
-    def stop(self, restore_display=True):
+    def stop(self, restore_display=True, vdd_off=False):
+        """Stop the stream.
+
+        restore_display takes the virtual screen back off the desktop (the
+        default).  A screen nobody is streaming to is just somewhere for the
+        mouse to wander off to, and it keeps the desktop 4480 px wide.  The
+        driver's device node is left enabled on purpose: pressing 开始投屏 again
+        then only has to re-attach the screen, with no four-second driver
+        switch and no UAC prompt.
+
+        vdd_off is passed only when the program really exits
+        (Session.shutdown): it also disables the device node in "deep" mode, so
+        the screen is not there at the next boot either.
+        """
         self._stop.set()
         if self.touch:
             try:
@@ -927,11 +982,11 @@ class Session(object):
                 pass
         if restore_display and self._display_applied:
             # Take the virtual display back OFF the desktop.  This used to
-            # restore its previous *mode* instead, which left a second screen
+            # restore the previous *mode* instead, which left a second screen
             # attached forever after pressing 停止 -- Windows still listed it
-            # and the desktop stayed 4480 px wide.  The display stays
-            # available to the driver; it just is not part of the desktop any
-            # more, and apply_display() switches it back on next time.
+            # and the desktop stayed 4480 px wide.  The display stays available
+            # to the driver; it just is not part of the desktop any more, and
+            # apply_display() attaches it again in about a second.
             name = self._display_applied
             self._display_applied = None
             try:
@@ -942,9 +997,18 @@ class Session(object):
                     self.log("移除虚拟显示器失败（%s 仍在系统中）" % name)
             except Exception as e:
                 self.log("移除虚拟显示器失败: %s" % e)
-            # deep 档：连驱动里那块屏本身也撤掉，别让它留在系统里等下一次开机。
+        if vdd_off:
+            # 只有程序真的退出时才走到这里：按设置里「退出程序时」那一项，决定要
+            # 不要连驱动里那块屏本身也撤掉，别让它留在系统里等下一次开机。
             try:
                 self._shut_vdd_down()
             except Exception as e:
                 self.log("彻底关闭虚拟屏时出错: %s" % e)
         self.log("会话已停止")
+
+    def shutdown(self):
+        """完全退出程序：先停流、把屏从桌面摘掉，再按设置彻底关掉设备节点。"""
+        if not (self.running or self.server or self._display_applied
+                or self._display_used):
+            return
+        self.stop(restore_display=True, vdd_off=True)

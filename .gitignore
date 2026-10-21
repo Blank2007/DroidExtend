@@ -21,6 +21,9 @@ android/droidextend.keystore
 *.jks
 
 # ───────── 调试与临时文件 / Debugging and temporary files ─────────
+# 程序直接在仓库里跑（测试）时，虚拟屏开关用的 PowerShell 脚本落在这里。 / Scripts the
+# program writes here at runtime when it is run straight from the repository.
+/tmp/
 tools/tmp/
 tools/shots/
 __pycache__/

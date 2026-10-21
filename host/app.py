@@ -68,6 +68,8 @@ from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER, 
 
 # #3: 被开机自启动拉起时不把窗口糊到人家脸上，直接进托盘待命。
 MINIMIZED = "--minimized" in sys.argv
+# 关窗口之后最多等这么久让后台把虚拟屏收干净。deep 档实测 10.65 秒，留一倍余量。
+QUIT_WAIT = 30.0
 
 # Fallback only.  The virtual display driver builds its mode table from the
 # `<resolution>` rows in vdd_settings.xml -- eleven of them on the machine this
@@ -244,6 +246,9 @@ class App(tk.Tk):
         self._tray_q = queue.Queue()
         self._tray_poll = None
         self._quitting = False
+        # 退出时的收尾在窗口消失之后才跑（彻底关闭驱动要十几秒），这里存那个
+        # 线程，好让 main() 在进程真正结束前等它收干净。
+        self._quit_worker = None
 
         # app_title() and not the APP_TITLE constant: the constant was evaluated
         # when version.py was first imported (line 64), which is before the
@@ -838,14 +843,16 @@ class App(tk.Tk):
                                         command=self._anim_choice)
         self.anim_chk.grid(row=13, column=1, sticky="w", pady=3)
 
-        # 1.6.4 -- how thoroughly to put the virtual screen away whenever we are
-        # not streaming.  "deep" disables the driver's device node, which is the
-        # only thing that actually makes the screen disappear (writing a count of
-        # 0 does not: the driver calls that invalid and keeps one monitor), at the
-        # price of one UAC prompt per switch.  "desktop" only takes it off the
-        # desktop and never asks for anything.
+        # 1.6.4 -- how thoroughly to put the virtual screen away.  This used to
+        # run on every 停止 (Stop), which made stopping and starting again slow:
+        # the screen had to be taken off the desktop and, in "deep" mode, the
+        # driver device node had to be disabled and then enabled again.  It now
+        # runs once, when the program exits.  "deep" disables the driver device
+        # node, which is the only thing that actually makes the screen disappear
+        # (writing a count of 0 does not: the driver calls that invalid and keeps
+        # one monitor).  "desktop" only takes it off the desktop.
         self.off_mode_var = tk.StringVar(value=self.settings.get("vdd_off_mode", "deep"))
-        ttk.Label(right, text=i18n.t("不用时：", "When not in use:"),
+        ttk.Label(right, text=i18n.t("退出程序时：", "When the program exits:"),
                   style="Dim.TLabel").grid(row=14, column=0, sticky="w", pady=(6, 3))
         self.off_deep_btn = ttk.Radiobutton(
             right, text=i18n.t("彻底关闭（开机也不出现，远程软件看不到）",
@@ -1296,6 +1303,11 @@ class App(tk.Tk):
             return
         if gone:
             self.log("已关闭 %d 块残留的虚拟屏：%s" % (len(gone), "、".join(gone)))
+            # The session may still remember that screen as "the one I put on the
+            # desktop" (stopping a stream no longer detaches it, 1.7.1).  Forget it
+            # so that quitting later does not try to take down something that is
+            # already gone.
+            self.session._display_applied = None
         else:
             self.log("没有需要清理的虚拟屏")
 
@@ -1304,20 +1316,25 @@ class App(tk.Tk):
         self._save_settings()
         if self.off_mode_var.get() == "deep":
             self.log(i18n.t(
-                "「不用时」已改成彻底关闭：停止投屏后会把虚拟屏的设备节点禁用掉——"
-                "下次开机不会有这块屏，远程软件也看不到它。程序本身已经以管理员身份运行，"
-                "所以这一步不会再额外弹授权。",
-                "\"When not in use\" is now switch it off for real: stopping the stream "
+                "「退出程序时」已改成彻底关闭：退出程序时会把虚拟屏的设备节点禁用掉——"
+                "下次开机不会有这块屏，远程软件也看不到它。平时的「停止」只是把屏从桌面"
+                "上摘掉、不碰驱动，所以再点开始投屏只要一秒多。程序本身已经以管理员"
+                "身份运行，所以这一步不会再额外弹授权。",
+                "\"When the program exits\" is now switch it off for real: exiting "
                 "disables the virtual display's device node, so the screen is not there "
-                "at the next boot and remote software cannot see it.  The program already "
-                "runs as administrator, so this step no longer asks for approval."))
+                "at the next boot and remote software cannot see it.  A plain Stop only "
+                "takes the screen off the desktop and leaves the driver alone, so "
+                "starting again takes about a second.  The program already runs as "
+                "administrator, so this step no longer asks for approval."))
         else:
             self.log(i18n.t(
-                "「不用时」已改成只移出桌面：停止投屏后只是把它从桌面上摘掉，"
-                "驱动不碰、不弹授权，但这块屏仍然存在于系统里。",
-                "\"When not in use\" is now just take it off the desktop: stopping the "
-                "stream only detaches it, the driver is left alone and nothing asks for "
-                "approval, but the screen still exists in the system."))
+                "「退出程序时」已改成只移出桌面：退出程序时只是把它从桌面上摘掉，"
+                "驱动不碰、不弹授权，但这块屏仍然存在于系统里。平时的「停止」也是"
+                "只摘桌面，所以两者在这一档上没有区别。",
+                "\"When the program exits\" is now just take it off the desktop: exiting "
+                "only detaches it, the driver is left alone and nothing asks for "
+                "approval, but the screen still exists in the system.  A plain Stop "
+                "already detaches the screen, so in this mode the two are the same."))
 
     def on_vdd_off(self):
         self.run_bg(self._vdd_off_work)
@@ -1337,6 +1354,7 @@ class App(tk.Tk):
             return
         ok, text = vd.set_enabled(False, log=self.log)
         if ok:
+            self.session._display_applied = None
             self.log(i18n.t(
                 "虚拟屏已彻底关闭：开机不会有这块屏，远程软件也看不到它",
                 "The virtual display is switched off for real: it will not appear at "
@@ -1526,9 +1544,10 @@ class App(tk.Tk):
         if err:
             self.log(err.replace("\n", " "), "err")
             self.stat_var.set(i18n.t("出错", "Error"))
-            # A start that dies half way (phone unplugged, driver refused the
-            # mode) can leave the virtual display sitting on the desktop.  Take
-            # it back off so "断开之后系统里还留着一块屏" cannot happen.
+            # A start that dies half way (phone unplugged, the driver refused
+            # the mode) takes the screen back off the desktop: leaving a screen
+            # nobody is streaming to is how the mouse ends up lost on an empty
+            # 3200 px.  The device node stays enabled, so retrying is quick.
             try:
                 if self.session and self.session.attached_display():
                     self.session.stop()
@@ -1678,8 +1697,14 @@ class App(tk.Tk):
         self._sync_autostart()
 
     def on_stop(self):
+        # 停止 (Stop) stops the stream and takes the screen back off the
+        # desktop, so the mouse cannot wander onto an empty 3200 px and Windows
+        # stops reporting a 4480 px desktop.  The driver's device node stays
+        # enabled, so pressing 开始投屏 again only re-attaches the screen (about
+        # a second, no UAC).  Only exiting the program switches the driver off
+        # for real -- see _quit_now.
         self.btn_stop.configure(state="disabled")
-        self.run_bg(self.session.stop, done=self._stopped)
+        self.run_bg(lambda: self.session.stop(), done=self._stopped)
 
     def _stopped(self):
         self.stat_var.set(i18n.t("已停止", "Stopped"))
@@ -2506,10 +2531,37 @@ class App(tk.Tk):
             self.session.release_input()
         except Exception:
             pass
+        # 窗口先消失：用户按下关闭就该马上看不到它。剩下的收尾（彻底关闭虚拟显示器
+        # 驱动要等 PowerShell 轮询确认，十几秒）放到后台线程，main() 会在进程结束
+        # 前等它跑完，所以设备不会留在「半关」的状态。
         try:
-            # 没在投屏也要走一遍：上次异常退出可能把虚拟屏留在了桌面上。
-            if self.session.running or self.session.server or self.session._display_applied:
-                self.session.stop()
+            self.withdraw()
+        except Exception:
+            pass
+        self._quit_worker = threading.Thread(
+            target=self._release_in_background, name="quit-release", daemon=True)
+        self._quit_worker.start()
+        # 已经排好的定时器（隐私提示、日志刷新、fps 状态）现在都指向一个马上要消失
+        # 的窗口，让它们照常跑就是往日志里扔一串 "application has been destroyed"。
+        try:
+            for aid in self.tk.call("after", "info"):
+                self.after_cancel(aid)
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def _release_in_background(self):
+        """窗口没了之后要做的那些慢活。
+
+        完全退出才做「彻底摘掉」：停流、确认桌面干净，再按设置里「退出程序时」
+        那一项决定要不要禁用设备节点。停止投屏只摘桌面、不碰驱动，所以这里
+        必须再走一遍。跑在后台线程里，因此只用能离开界面的途径（日志文件）。
+        """
+        try:
+            self.session.shutdown()
         except Exception as e:
             self.log("退出时停止会话失败：%s" % e, "err")
         try:
@@ -2524,14 +2576,13 @@ class App(tk.Tk):
                 self.session.adb = None
         except Exception:
             pass
-        try:
-            applog.close()
-        except Exception:
-            pass
-        try:
-            self.destroy()
-        except Exception:
-            pass
+        applog.line("后台收尾结束")
+
+    def wait_quit_work(self, limit=QUIT_WAIT):
+        """等退出时的后台收尾跑完（窗口已经关了，用户看不到这一段）。"""
+        w = self._quit_worker
+        if w is not None and w.is_alive():
+            w.join(limit)
 
 
 # --------------------------------------------------------------- single copy
@@ -2661,6 +2712,12 @@ def main():
     try:
         app.mainloop()
     finally:
+        # 窗口已经关了，用户看不到这一段：等后台的那个线程把虚拟屏真正收干净
+        # 再结束进程，否则进程一退，深档的禁用就做了一半。
+        try:
+            app.wait_quit_work()
+        except Exception:
+            pass
         applog.line("退出")
         applog.close()
     return 0

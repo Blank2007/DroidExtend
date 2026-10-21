@@ -66,6 +66,9 @@ EXTRA = (
     # 1.6.4 -- what "off" means for the virtual display, see vdd.set_count /
     # app._apply_vdd_off.  "deep" = no monitor at boot at all (needs UAC);
     # "desktop" = the monitor exists but never sits on the desktop (no UAC).
+    # Applied once, when the program exits (session.shutdown).  A plain
+    # 停止 (Stop) only detaches the screen and leaves the driver running, so
+    # starting again costs a re-attach instead of a driver switch.
     "vdd_off_mode",
     # 1.6.8 -- what the window's close button does: "ask" (default) pops the
     # question, "tray" hides to the tray, "quit" exits.  Replaces the

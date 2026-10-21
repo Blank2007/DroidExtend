@@ -206,8 +206,10 @@ the display is gone from Windows display settings, and the desktop width goes ba
 > This was the most annoying thing about the early versions — the old code only "restored the virtual display to
 > its original resolution", so the screen stayed attached to the system forever.
 > It now goes through `SetDisplayConfig(SDC_USE_SUPPLIED_DISPLAY_CONFIG)`, which removes only that one virtual
-> display's path and **never touches your real external monitors**. The driver itself stays installed, and the next
-> time you click `开始投屏` (Start casting) it is reattached automatically.
+> display's path and **never touches your real external monitors**. It takes 0.3-0.7 s and does not touch the
+> driver either, so the next `开始投屏` (Start casting) needs no device enable (about 3 seconds to a picture since
+> 1.8.0). Only quitting the program follows the "on exit" setting, and that part happens in the background after
+> the window has already disappeared.
 
 ### Where settings and logs live
 
@@ -351,10 +353,12 @@ mode that never existed**. When the driver's table still has room, the missing s
 
 **Can the extra screen be treated as not existing when it is not in use?** Yes — that is the default.
 "When not in use" has two modes. **Switch it off for real** (the default) disables the driver's device
-node when a stream stops, so the screen is not there at boot and remote-desktop tools such as ToDesk or
-Sunlogin cannot enumerate it either; the program already runs as administrator, so this asks for
-nothing extra. **Just take it off the desktop** leaves the driver alone and asks for nothing — the
-screen still exists, it is simply not on the desktop. There is also a menu item, "Shut the virtual
+node **when the program quits**, so the screen is not there at boot and remote-desktop tools such as
+ToDesk or Sunlogin cannot enumerate it either; the program already runs as administrator, so this asks
+for nothing extra. **Just take it off the desktop** leaves the driver alone and asks for nothing — the
+screen still exists, it is simply not on the desktop. Both modes only affect **quitting**: an ordinary
+`停止` (Stop) just takes the screen off the desktop without touching the driver, which is why starting
+again takes a couple of seconds. There is also a menu item, "Shut the virtual
 display down for real", if you want it gone right now. Note that writing `<count>` 0 into the driver
 settings does **not** achieve this: MttVDD treats 0 as invalid (`Monitor Count is not valid`) and
 creates one monitor anyway.

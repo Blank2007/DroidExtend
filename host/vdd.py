@@ -382,7 +382,10 @@ def add_resolution(width, height, hz=60):
 # the catalog and this XML -- no control tool, no IOCTL.  So the only lever is
 # that file plus a device restart, and a device restart needs admin.
 #
-# That asymmetry is what the two "off" modes in settings.vdd_off_mode are about:
+# That asymmetry is what the two "off" modes in settings.vdd_off_mode are about.
+# Both only apply when the program exits: a plain 停止 (Stop) detaches the
+# screen from the desktop and stops there, which is what keeps stopping and
+# starting again fast.
 #   deep     -- count 0 + restart: nothing exists at boot, remote-desktop tools
 #               cannot offer it, and one UAC prompt is spent each way
 #   desktop  -- count 1, win_display.detach() only: the device exists but is

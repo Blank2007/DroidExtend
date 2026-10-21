@@ -134,18 +134,19 @@ DroidExtend 使用说明   v{ver}
      拒掉，以前点了没反应就是这个原因）。如果某个尺寸不在列表里，就是驱动给不
      出来；日志会说清楚。刷新率同理。
 
-  Q: 停止之后系统里还留着一块屏幕？
-  A: 正常情况下「停止」或拔线都会把虚拟屏摘掉。如果电脑上还留着，
-     再点一次「开始投屏」然后「停止」即可；程序在启动失败时也会自动摘屏。
+  Q: 停止之后那块屏去哪了？为什么鼠标不会滑到右边去了？
+  A: 「停止」会把虚拟屏从桌面上摘掉，所以桌面上不再多出一块空屏，鼠标也不会飘过去。
+     驱动本身没有关，所以再点「开始投屏」时只要把它重新挂上（一秒左右），
+     不用重新启用设备、也不会弹授权。
 
   Q: 不投屏的时候，能不能让这块屏彻底不出现？
-  A: 能，而且默认就是这样。设置里「不用时」有两档：
-     · 彻底关闭（默认）—— 停止投屏后会把驱动的设备节点禁用掉。开机不会有这块屏，
-       ToDesk / 向日葵这类远程软件也枚举不到它，重启之后它仍然是关着的；
-       代价是开始和停止投屏时各弹一次管理员授权。
-     · 只移出桌面 —— 不碰驱动、不弹授权，屏还在系统里，只是不在桌面上。
-     想现在就关掉（而不是等下次停止投屏），点工具菜单的「彻底关闭虚拟屏」。
-     程序本身已经以管理员身份运行，所以这两步都不会再额外弹授权。
+  A: 能。设置里「退出程序时」有两档，管的是「完全退出程序」那一下：
+     · 彻底关闭（默认）—— 退出程序时把驱动的设备节点禁用掉。开机不会有这块屏，
+       ToDesk / 向日葵这类远程软件也枚举不到它，重启之后它仍然是关着的。
+     · 只移出桌面 —— 退出时不碰驱动、不弹授权，屏还在系统里，只是不在桌面上。
+     这两档都只影响退出时；平时的「停止」只摘桌面、不碰驱动。
+     想马上关掉：工具菜单「彻底关闭虚拟屏」。程序本身已经以管理员身份运行，
+     所以这一步不会额外弹授权。
      注意不能靠把驱动设置里的 <count> 写成 0 来实现：驱动把 0 当成非法值，照样建一块屏。
 
   Q: 为什么「更新目录」会自己变回默认值？
@@ -359,22 +360,25 @@ DroidExtend manual   v{ver}
      is not in the list is a size the driver cannot produce, and the log says so.
      The same goes for the refresh rates.
 
-  Q: A screen is still there in Windows after I stopped?
-  A: Normally Stop, or unplugging, removes the virtual screen.  If one is left
-     over, press Start and then Stop once more; a failed start also removes it
-     automatically.
+  Q: Where did that screen go after I stopped, and why does the mouse stop at
+     the right edge now?
+  A: Stop takes the virtual screen back off the desktop, so the desktop does not
+     grow a spare empty screen and the mouse cannot wander onto it.  The driver
+     itself is left running, so pressing Start again only re-attaches the screen
+     (about a second) -- no driver switch, no approval prompt.
 
-  Q: When I am not streaming, can that screen be made to not exist at all?
-  A: Yes -- that is the default.  "When not in use" has two modes:
-     * Switch it off for real (the default) -- stopping the stream disables the
-       driver's device node.  The screen is not there at boot, remote-desktop
-       tools such as ToDesk or Sunlogin cannot enumerate it, and it stays
-       disabled across a reboot.  This program already runs as administrator,
-       so this asks for nothing extra.
+  Q: When the program is not running, can that screen be made to not exist at all?
+  A: Yes.  "When the program exits" has two modes:
+     * Switch it off for real (the default) -- exiting disables the driver's
+       device node.  The screen is not there at boot, remote-desktop tools such
+       as ToDesk or Sunlogin cannot enumerate it, and it stays disabled across
+       a reboot.
      * Just take it off the desktop -- the driver is left alone and nothing asks
        for approval; the screen still exists, it is simply not on the desktop.
-     To do it right now instead of waiting for the next stop, use the menu item
-     Tools -> "Shut the virtual display down for real".
+     Both choices only apply when the program exits; a plain Stop just takes the
+     screen off the desktop and touches neither.  To do it right now, use Tools
+     -> "Shut the virtual display down for real".  The program already runs as
+     administrator, so that step does not ask for approval.
      Writing <count> 0 into the driver settings does NOT achieve this: the
      driver treats 0 as invalid and creates one monitor anyway.
 

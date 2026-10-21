@@ -55,6 +55,7 @@
 | [29](#29-168-three-small-questions-and-a-tidier-window) | 1.6.8: what the fps means / touch diagnosis / closing behaviour | fps is the stream rate; the panel's refresh rate is a different number |
 | [30](#30-169-one-approval-instead-of-two-prompts) | 1.6.9: administrator rights / the shown frame rate | one UAC at launch replaces one UAC per virtual-screen toggle |
 | [31](#31-170-first-make-the-phone-display-at-its-own-refresh-rate) | 1.7.0: phone refresh rate / encoding rate alignment | presentation 50 → 120 Hz, the stalls are gone |
+| [32](#32-180-stop-detaches-the-screen-quitting-puts-the-driver-away) | 1.8.0: stop detaches the screen / quitting releases the driver in the background | stopping takes 0.67 s and the screen is gone; starting again takes 3.13 s |
 
 ---
 
@@ -2869,6 +2870,119 @@ gain, so it did not go into the mainline.**
 4. **One handshake for the whole session is fragile.** Allowing the value to arrive late and self-heal
    is far more robust than a longer timeout -- a longer timeout just makes every old version slower.
 
+## 32. 1.8.0: stop detaches the screen, quitting puts the driver away
+
+### 32.1 One sentence, two events
+
+The request (session record m00673): "fully remove the virtual screen only after the program has
+completely exited, instead of tearing everything down on every disconnect -- save the time".
+
+My first reading was "do not detach on stop, detach only on exit", and the user corrected it on the
+spot (m00900): "while the program is not completely closed you can go ahead and switch that virtual
+screen off -- don't let the mouse drift out there; remove it for good after the program is fully closed".
+
+The difference is not wording, it is **where the line between stopping and quitting sits**:
+
+* Leaving the screen attached lets the mouse slide into a screen nobody is showing -- the user sees it
+  immediately.
+* But the driver must not be switched off either: enabling the device node again takes a measured
+  9.56 s the next time you start casting, and may need a UAC prompt.
+
+So the correct split is: **pressing `停止` (Stop) only takes the screen off the desktop; quitting the
+program takes it off *and* puts the driver away according to the configured setting.**
+
+### 32.2 Two actions, two bills
+
+First, price every step (administrator rights, 3200x2136, measured):
+
+| Action | Cost | Measured |
+| --- | --- | --- |
+| Taking the screen off the desktop (`wd.detach()`) | cheap | 0.32 - 0.68 s |
+| Attaching it back (`attach` + `extend_topology`) | medium | about 2 s |
+| Enabling the device node (after the previous run disabled it) | expensive | about 6 s |
+| Asking the driver for its state (`vd.status()`) | expensive | about 3 s |
+| Launching the phone app + adb forwarding | medium | about 1 s |
+| Disabling the device node (the deep setting on exit) | most expensive | 8 - 11 s |
+
+Everything expensive is in the two "switch the driver" rows, and they are only genuinely needed when
+the process starts and when it exits. That is the numeric basis for the split above.
+
+### 32.3 What the first version got wrong
+
+The version written from the wrong reading did not detach on stop: the desktop stayed at 5760x2136,
+so after stopping the stream the mouse vanished into an empty screen past the right edge of the primary
+one -- which reads as a broken program. The extra screen also confuses software that remembers windows
+on a second display. Detaching costs 0.3 s; there was nothing to save.
+
+### 32.4 Starting again: 9.56 s down to 1.37 s
+
+`apply_display()` asked the driver every time: `vd.device_enabled()` about 3 s and `vd.status()` about
+3 s, two PowerShell round trips for 6 seconds. But those answers cannot change while the driver stays
+on, so the adapter name from the last successful run is remembered instead:
+
+* stopping **does not** clear `_vdd_ready_name` (the driver was not touched)
+* the next `apply_display()` starts with `vd.find_vdd_adapter()` (plain ctypes, essentially free) and
+  uses the cached state when the name still matches
+* only a real disable on exit clears it
+
+Measured: cold start (device disabled by the previous run) took 9.56 s; stopping and starting again
+took 1.37 s. What is left is essentially the cost of putting the screen back on the desktop.
+
+### 32.5 Quitting moved behind a window that is already gone
+
+The last request (m01032): "do it in the background", referring to the 10 seconds of the deep setting.
+
+`_quit_now()` used to do everything on the UI thread: stop the stream, detach, disable the device,
+kill adb. The window froze for over ten seconds after a click on X, which invites the user to end the
+task in Task Manager -- and that really does leave it half closed. The order is now:
+
+```
+save settings -> remove the tray icon -> release input -> withdraw() the window -> start the
+quit-release thread -> cancel every pending after() -> destroy() -> mainloop returns
+       -> main() waits in wait_quit_work() -> the process exits
+```
+
+The window is gone in 0.08 s, the background thread detaches the screen first (the desktop is back to a
+single display within 0.4 s, so the mouse cannot drift), and only then disables the driver.
+
+One pit here: after `destroy()` the timers already sitting in the Tk queue (terms check, log refresh,
+frame-rate readout) still run, and by then `self.winfo_*` raises `application has been destroyed` -- a
+stream of tracebacks in the log that buries anything real. The fix is to list `after info` and
+`after_cancel()` each of them before destroying.
+
+### 32.6 Verification
+
+Real button clicks at the UI layer (`gui_stop_test.py`), administrator rights, 3200x2136/144:
+
+| Action | Time | Desktop |
+| --- | --- | --- |
+| Start casting (cold, the device was disabled by the previous run) | 11.87 s | 2 displays, 5760x2136 |
+| **Stop** | **0.67 s** | **1 display, 2560x1600** |
+| Start casting again | 3.13 s | 2 displays, 5760x2136 |
+| Stop again | 0.68 s | 1 display, 2560x1600 |
+
+Quitting (`gui_quit_test.py`, which goes through `_quit_now()`, the same path as clicking X):
+
+| Time | What happened |
+| --- | --- |
+| 0.00 s | `_quit_now()` called |
+| **0.08 s** | **the window is destroyed and the call has returned** |
+| 2.00 s | the desktop is already a single 2560x1600 display; the mouse cannot drift |
+| 9.72 s | the background release finished; the process exits |
+
+Afterwards `vd.device_enabled()` is `False` and `live_monitors()` holds only `\\.\DISPLAY1`.
+
+### 32.7 Lessons
+
+1. **"Save the time" needs a follow-up question: which stretch of time.** The user cared about how
+   soon casting can start again, not how fast the screen disappears -- so the saving belongs in the
+   driver queries, not in the detach.
+2. **Stopping and quitting are two events; one switch cannot express both.** One switch always
+   compromises on one side: either a ghost screen stays, or every stop costs ten seconds.
+3. **The user decides whether the program is closed by looking at the window.** Let the window go
+   first and finish the rest in the background before the process exits.
+4. **Cancel pending timers before destroying the window.** Otherwise the log fills with
+   "application has been destroyed" and anything real is buried under it.
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*
