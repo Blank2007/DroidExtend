@@ -39,7 +39,7 @@ public class StreamClient extends Thread {
         void onStatus(String text, boolean streaming);
 
         /** Fired once per connection with the geometry from the host handshake. */
-        void onVideoSize(int width, int height);
+        void onVideoSize(int width, int height, int fps);
 
         /** Fired roughly twice a second while video is flowing. */
         void onStats(Stats stats);
@@ -50,6 +50,9 @@ public class StreamClient extends Thread {
 
     private final String host;
     private final int port;
+    // The fastest rate this panel can display, 0 when unknown.  Announced to
+    // the host before the handshake, so it can choose the capture rate.
+    private final int panelMaxHz;
     private final VideoDecoder decoder;
     private final Listener listener;
     private volatile boolean running = true;
@@ -57,11 +60,13 @@ public class StreamClient extends Thread {
     private OutputStream control;
     private long clockSkewUs;
 
-    public StreamClient(String host, int port, VideoDecoder decoder, Listener listener) {
+    public StreamClient(String host, int port, VideoDecoder decoder, Listener listener,
+                        int panelMaxHz) {
         this.host = host;
         this.port = port;
         this.decoder = decoder;
         this.listener = listener;
+        this.panelMaxHz = panelMaxHz;
         setName("droid-extend-stream");
     }
 
@@ -75,8 +80,8 @@ public class StreamClient extends Thread {
         if (listener != null) listener.onStatus(s, streaming);
     }
 
-    private void videoSize(int w, int h) {
-        if (listener != null) listener.onVideoSize(w, h);
+    private void videoSize(int w, int h, int fps) {
+        if (listener != null) listener.onVideoSize(w, h, fps);
     }
 
     private void stats(Stats s) {
@@ -120,6 +125,23 @@ public class StreamClient extends Thread {
         s.connect(new InetSocketAddress(host, port), 3000);
         socket = s;
         control = s.getOutputStream();
+        // Tell the host what this panel can actually show, *before* it starts
+        // encoding.  It used to encode at whatever fps the user picked -- 144
+        // into this 120 Hz panel -- and nothing upstream knew the difference:
+        // the extra frames were decoded and dropped, the socket backlog grew,
+        // the guard below jumped to the next keyframe, and the picture froze
+        // for up to a GOP every few seconds.  Measured: 144 fps froze every
+        // ~4 s, 120 fps never did.
+        //
+        // The line travels in the direction no 1.6.x host ever read, so an old
+        // PC just ignores it; a host that does read it picks the rate before
+        // ffmpeg starts.  Nothing is sent when the rate is unknown.
+        byte[] hello = panelMaxHz > 0
+                ? ("DXH1 " + panelMaxHz + "\n").getBytes("UTF-8") : null;
+        if (hello != null) {
+            control.write(hello);
+            control.flush();
+        }
         InputStream raw = s.getInputStream();
         DataInputStream in = new DataInputStream(raw);
 
@@ -146,8 +168,19 @@ public class StreamClient extends Thread {
         // crossed the cable instantly (<1 ms over adb reverse) and use it to
         // line them up.  Everything after this measures capture -> display.
         clockSkewUs = SystemClock.elapsedRealtimeNanos() / 1000 - hostNowUs;
+        // Send the panel rate a second time, now that the handshake is through.
+        // The first copy can arrive late -- measured: the first connect after
+        // adb reverse was set up took ~1 s to show up, long after the PC's 0.8 s
+        // read window -- and a host that missed it keeps a background listener
+        // waiting for exactly this line (server.StreamServer._hello_watch), so
+        // the second copy lets it restart the encoder at the right rate instead
+        // of running at the wrong one for the whole session.
+        if (hello != null) {
+            control.write(hello);
+            control.flush();
+        }
         decoder.setFormat(w, h, fps);
-        videoSize(w, h);
+        videoSize(w, h, fps);
         if (listener != null) {
             listener.onNote(note);
         }

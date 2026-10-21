@@ -91,17 +91,31 @@ class Session(object):
         self._last_recover = 0.0
         self._recover_tries = 0
         self.fatal = None
+        # -- stream start-up ------------------------------------------------
+        # The encoder is started once we know how fast the phone can actually
+        # present frames, so these track "what ffmpeg was told" separately
+        # from "what the user picked".
+        self._capture_lock = threading.Lock()
+        self._capture_cfg = None
+        self._stream_fps = 0
+        self._stream_t0 = 0.0
+        self._last_boot_try = 0.0
+        self._last_cfg_check = 0.0
 
     # ------------------------------------------------------------------ state
     @property
     def running(self):
-        return self.capture is not None and self.capture.alive()
+        # A session counts as running once the listener is up: the capture now
+        # starts a second or two after the phone connects (it waits for the
+        # panel rate), and reporting "not running" in that window would make
+        # the window decide the stream had stopped.
+        return self.server is not None and not self.fatal
 
     def describe(self):
         r = self.rect or {}
         return "%s  %dx%d@%d  %s" % (
             self.cfg["mode"], r.get("width", 0), r.get("height", 0),
-            self.cfg.get("fps", 0), self.target or "-")
+            self._stream_fps or self.cfg.get("fps", 0), self.target or "-")
 
     # ------------------------------------------------------------- 1. display
     def _position_for(self, primary, w, h):
@@ -553,9 +567,19 @@ class Session(object):
     def start_stream(self, port=HOST_PORT):
         self.server = StreamServer(port=port, log=self.log, on_client=self._on_client)
         self.server.start()
-        self.capture = Capture(self.cfg, self.rect, log=self.log)
-        backend = self.capture.start()
-        self.log("编码器 %s / 采集 %s" % (self.cfg["encoder"], backend))
+        # The encoder is *not* started here.  Its frame rate has to match what
+        # the phone can really show, and only the phone knows that: it sends its
+        # panel rate in a one-line hello the moment it connects (see
+        # server.StreamServer._read_hello).  Starting ffmpeg now at the
+        # configured rate and restarting it 1.5 s later would show the user a
+        # picture, a freeze and a second handshake for no gain, while waiting
+        # for the hello costs nothing -- ffmpeg needs 1.2 s to spin up anyway.
+        # _on_client starts it; the pump thread starts it after
+        # CAPTURE_BOOT_WAIT if no phone ever turns up.
+        self.capture = None
+        self._capture_cfg = None
+        self._stream_fps = 0
+        self._stream_t0 = time.time()
         if self.cfg.get("touch", True):
             # Hand the injector the display *name*, not just its rectangle: it
             # re-reads the real position on a short timer so that dragging the
@@ -568,7 +592,7 @@ class Session(object):
         self._pump = threading.Thread(target=self._pump_loop, name="pump", daemon=True)
         self._pump.start()
         self._last = time.time()
-        return backend
+        return "waiting for the phone"
 
     def _phone_notice(self, code, msg):
         """The phone reported something about itself (screen off/on, app gone).
@@ -608,9 +632,97 @@ class Session(object):
 
     def _on_client(self, addr):
         self.log("客户端接入，发送握手")
+        fps, hz = self._wanted_fps()
+        self._stream_fps = fps or self.cfg["fps"]
         if self.server and self.rect:
             self.server.send_header(self.rect["width"], self.rect["height"],
-                                    self.cfg["fps"], self._quality_note())
+                                    self._stream_fps, self._quality_note())
+        # ffmpeg needs 1.2 s to come up; doing that on the accept thread would
+        # make the app's 700 ms reconnect loop queue behind it.
+        threading.Thread(target=self._ensure_capture, name="capture-boot",
+                         daemon=True).start()
+
+    def _wanted_fps(self):
+        """The frame rate to encode at, and the panel rate it came from.
+
+        The user picks the fps, but the phone is the limit.  Frames the phone
+        cannot decode are not extra smoothness: they pile up in the socket, the
+        app hits its backlog limit after ~77 ms of growth
+        (StreamClient.BACKLOG_DROP_BYTES) and throws away everything until the
+        next keyframe -- up to two seconds at the default GOP -- so the picture
+        freezes.  Measured here on a 3200x2136 desktop into a 120 Hz panel:
+        144 fps froze every ~4 s, 120 fps did not freeze once in four runs
+        (capture managed 131 fps at 144 and 109 fps at 120; the phone decodes
+        about 134 fps, so 144 is over budget no matter how it is sliced).
+
+        So: min(user setting, panel rate).  A phone that stays silent (older
+        app) leaves the configured fps untouched.
+        """
+        want = int(self.cfg.get("fps", 60) or 60)
+        hz = int(getattr(self.server, "client_hz", 0) or 0) if self.server is not None else 0
+        if hz <= 0 or want <= 0:
+            return want, hz
+        return min(want, hz), hz
+
+    CAPTURE_BOOT_WAIT = 6.0   # start ffmpeg anyway if no phone turns up
+    HELLO_GRACE = 2.5         # wait this long for a late panel rate first
+
+    def _ensure_capture(self):
+        """Start the encoder for the phone we are talking to, if it is not up.
+
+        Runs on its own thread (ffmpeg start blocks for 1.2 s) and is safe to
+        call any number of times: the lock keeps one start at a time, and it
+        only touches a running capture when the wanted frame rate changed --
+        which happens when a late hello (server._hello_watch) corrects what the
+        phone first told us.
+        """
+        with self._capture_lock:
+            if self._stop.is_set():
+                return
+            fps, hz = self._wanted_fps()
+            if self.capture is None and hz <= 0 and self.server is not None:
+                # The phone's line can arrive after the handshake window (see
+                # server._hello_watch).  Starting ffmpeg at the user's fps now
+                # and restarting it the moment the real rate lands costs the
+                # user a picture, a freeze and a second encoder start; waiting
+                # here costs a second of "connecting" that ffmpeg needs anyway.
+                self._wait_hello(self.HELLO_GRACE)
+                fps, hz = self._wanted_fps()
+            if self.capture is not None:
+                if fps == self._stream_fps:
+                    return
+                self.log("编码帧率 %d → %d fps（对齐手机面板 %dHz）"
+                         % (self._stream_fps, fps, hz))
+                try:
+                    self.capture.stop()
+                except Exception:
+                    pass
+                self.capture = None
+            elif hz and fps != int(self.cfg.get("fps", 60) or 60):
+                self.log("手机面板 %dHz，编码帧率 %d → %d fps（多出来的帧只会积压成卡顿）"
+                         % (hz, int(self.cfg.get("fps", 60) or 60), fps))
+            cfg = dict(self.cfg)
+            cfg["fps"] = fps
+            cap = Capture(cfg, self.rect, log=self.log)
+            try:
+                backend = cap.start()
+            except Exception as e:
+                # Not fatal: the pump thread tries again on the next tick, and
+                # _watch_capture covers the case where a running capture dies.
+                self.log("采集启动失败: %s" % e)
+                return
+            self.capture = cap
+            self._capture_cfg = cfg
+            self._stream_fps = fps
+            self.log("编码器 %s / 采集 %s" % (cfg["encoder"], backend))
+
+    def _wait_hello(self, limit):
+        """Block until the phone's panel rate is known, but never past limit."""
+        deadline = time.time() + limit
+        while time.time() < deadline and not self._stop.is_set():
+            if int(getattr(self.server, "client_hz", 0) or 0) > 0:
+                return
+            time.sleep(0.05)
 
     def _pump_loop(self):
         while not self._stop.is_set():
@@ -618,7 +730,29 @@ class Session(object):
             # frames from ffmpeg to the phone, and if it dies the picture
             # freezes while the app still says 投屏中.
             try:
-                units = self.capture.get_units(0.4) if self.capture else []
+                if self.capture is None:
+                    # No capture yet: _on_client starts it as soon as the phone
+                    # says how fast its panel is.  If no phone turns up -- or it
+                    # never sends its hello -- start anyway after the grace
+                    # period, so a session is never left with no picture.
+                    now = time.time()
+                    if (now - self._stream_t0 > self.CAPTURE_BOOT_WAIT
+                            and now - self._last_boot_try > 5.0):
+                        self._last_boot_try = now
+                        self._ensure_capture()
+                    time.sleep(0.05)
+                    continue
+                # The panel rate can still change under a running capture: the
+                # phone may send its hello late (server._hello_watch) or come
+                # back from Doze at a different rate.  Check once a second and
+                # let _ensure_capture restart ffmpeg if the answer changed.
+                now = time.time()
+                if now - self._last_cfg_check > 1.0:
+                    self._last_cfg_check = now
+                    if self._wanted_fps()[0] != self._stream_fps:
+                        threading.Thread(target=self._ensure_capture,
+                                         name="capture-boot", daemon=True).start()
+                units = self.capture.get_units(0.4)
                 if units and self.server:
                     self.server.put(units)
                 self._tick()
@@ -682,7 +816,7 @@ class Session(object):
             self.log("采集中断：" + self.fatal)
             return
         try:
-            cap = Capture(self.cfg, self.rect, log=self.log)
+            cap = Capture(self._capture_cfg or self.cfg, self.rect, log=self.log)
             backend = cap.start()
         except Exception as e:
             if not quiet:
@@ -691,7 +825,8 @@ class Session(object):
         self.capture = cap
         self._recover_tries = 0
         self.log("  采集已恢复: %s  %dx%d@%d" % (
-            backend, self.rect["width"], self.rect["height"], self.cfg["fps"]))
+            backend, self.rect["width"], self.rect["height"],
+            self._stream_fps or self.cfg["fps"]))
         if changed and self.server is not None:
             # The phone's decoder was configured for the old size, so the new
             # pictures would be rejected.  Dropping the connection makes the
@@ -777,6 +912,8 @@ class Session(object):
             except Exception:
                 pass
             self.capture = None
+        self._capture_cfg = None
+        self._stream_fps = 0
         if self.server:
             try:
                 self.server.stop()

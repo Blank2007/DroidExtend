@@ -23,6 +23,23 @@ MAGIC = b"DXS3"
 HOST_PORT = 27183
 MAX_UNIT = 8 * 1024 * 1024
 
+# Before it reads the handshake the phone may send one line in the other
+# direction: "DXH1 <panel hz>\n", the fastest rate its screen can actually
+# show.  The host needs it *before* ffmpeg starts, because the capture rate
+# has to be chosen once -- sending more frames than the phone can decode does
+# not make the picture smoother, it makes it freeze (see Session._wanted_fps).
+# A 1.6.x host never reads this direction at all, so a new app on an old PC is
+# harmless; an old app on this host simply times out and the configured fps
+# is used, exactly as before.
+HELLO_MAGIC = b"DXH1"
+# 1.6 s, not 0.8: measured here, the first connect after adb reverse is set
+# up had its line show up about a second late, so a short window started ffmpeg
+# at the wrong rate every time the phone was newly plugged in.  An older app
+# costs this much per connect and nothing else.
+HELLO_TIMEOUT = 1.6      # how long the handshake waits for it
+HELLO_LATE = 3.0         # how long a background thread keeps listening
+HELLO_MAX = 32
+
 
 def _now_us():
     """The frame/​handshake timestamp clock.  Monotonic, see clock.py.
@@ -77,6 +94,8 @@ class StreamServer(object):
         self._queue_bytes = 0
         self.max_queue_bytes = 4 * 1024 * 1024
         self.stats = {"sent": 0, "dropped": 0, "bytes": 0, "clients": 0}
+        # The panel refresh rate the current phone announced, 0 while unknown.
+        self.client_hz = 0
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
@@ -110,6 +129,7 @@ class StreamServer(object):
                 with self._cv:
                     self._queue = []
                     self._queue_bytes = 0
+            self.client_hz, hello_left = self._read_hello(conn)
             self.conn = conn
             self.addr = addr
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -121,8 +141,84 @@ class StreamServer(object):
             self._send_thread.start()
             with self._cv:
                 self._cv.notify_all()
+            if self.client_hz <= 0:
+                # The line can be late -- the very first connect after adb
+                # reverse is set up sometimes loses its inline bytes.  Keep
+                # listening in the background instead of starting the encoder
+                # at the wrong rate for the whole session.
+                threading.Thread(target=self._hello_watch, args=(conn, hello_left),
+                                 name="hello-late", daemon=True).start()
             self.on_client(addr)
         self.log("监听线程退出")
+
+    def _read_hello(self, conn, timeout=HELLO_TIMEOUT):
+        """Read the phone's "DXH1 <hz>" line, if it sends one.
+
+        Returns (hz, buf): the panel refresh rate the phone reports -- 0 when it
+        said nothing (an older app) or something we do not understand -- and
+        whatever bytes arrived.  This runs on the accept thread before the
+        handshake is sent, so a silent phone costs exactly `timeout` and
+        nothing else; the leftovers go to _hello_watch, which keeps listening
+        without holding the handshake up.
+        """
+        buf = b""
+        try:
+            conn.settimeout(timeout)
+            while len(buf) < HELLO_MAX and b"\n" not in buf:
+                chunk = conn.recv(HELLO_MAX - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+        except OSError:
+            return 0, buf
+        finally:
+            try:
+                conn.settimeout(None)
+            except OSError:
+                pass
+        hz = self._parse_hello(buf)
+        if hz:
+            self.log("手机面板刷新率 %dHz" % hz)
+        return hz, buf
+
+    @staticmethod
+    def _parse_hello(buf):
+        line = buf.split(b"\n", 1)[0].strip()
+        if not line.startswith(HELLO_MAGIC):
+            return 0
+        try:
+            hz = int(float(line[len(HELLO_MAGIC):].strip() or b"0"))
+        except ValueError:
+            return 0
+        return hz if 1 <= hz <= 1000 else 0
+
+    def _hello_watch(self, conn, buf):
+        """Pick up a hello that missed the handshake window.
+
+        Only the video protocol travels PC->phone, so the sole thing this can
+        swallow is a second hello from the same app -- the same number anyway.
+        It stops as soon as a line arrives, the phone goes away, the connection
+        is replaced, or HELLO_LATE passes with nothing.
+        """
+        try:
+            conn.settimeout(HELLO_LATE)
+            while self.conn is conn and len(buf) < HELLO_MAX and b"\n" not in buf:
+                chunk = conn.recv(HELLO_MAX - len(buf))
+                if not chunk:
+                    return
+                buf += chunk
+        except OSError:
+            return
+        finally:
+            try:
+                conn.settimeout(None)
+            except OSError:
+                pass
+        hz = self._parse_hello(buf)
+        if hz <= 0 or self.conn is not conn:
+            return
+        self.client_hz = hz
+        self.log("手机面板刷新率 %dHz（握手之后才到）" % hz)
 
     def _drop_client(self, quiet=False):
         conn, self.conn = self.conn, None

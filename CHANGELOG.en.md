@@ -54,6 +54,7 @@
 | [28](#28-167-why-the-latency-creeps-up) | 1.6.7: the latency figure keeps growing | clock drift of 3 ms per minute; the picture never got slower |
 | [29](#29-168-three-small-questions-and-a-tidier-window) | 1.6.8: what the fps means / touch diagnosis / closing behaviour | fps is the stream rate; the panel's refresh rate is a different number |
 | [30](#30-169-one-approval-instead-of-two-prompts) | 1.6.9: administrator rights / the shown frame rate | one UAC at launch replaces one UAC per virtual-screen toggle |
+| [31](#31-170-first-make-the-phone-display-at-its-own-refresh-rate) | 1.7.0: phone refresh rate / encoding rate alignment | presentation 50 → 120 Hz, the stalls are gone |
 
 ---
 
@@ -2732,6 +2733,141 @@ measurement comes first.
    worth it when N > 1 -- here N is "start streaming plus stop streaming".
 3. **Autostart and elevation are natural enemies.** Run key plus requireAdministrator means either a
    UAC at every sign-in or a silent no-op, so it has to become a highest-privilege scheduled task.
+
+## 31. 1.7.0: first make the phone display at its own refresh rate
+
+### 31.1 What the last release left open
+
+Reasons 1 and 2 from 30.5 were "the decoder silently drops frames when saturated" and "there is no
+presentation pacing". This release does not start with the decoder. It starts by measuring the whole
+chain: **PC capture -> encode -> TCP over adb forward -> phone decode -> SurfaceFlinger present**.
+Two problems showed up earlier in the chain than the decoder.
+
+### 31.2 First cut: the phone was not refreshing at 144 at all
+
+`dumpsys display` shows the mode the phone is actually using:
+
+```
+mActiveSfDisplayMode: id=4 ... peakRefreshRate=50.0
+mActiveRenderFrameRate=50.0
+```
+
+`id=4` is 50 Hz. The stream was 144 fps, so **SurfaceFlinger put 50 frames per second on the panel** --
+one out of every three frames was ever seen. `dumpsys SurfaceFlinger --latency` agreed: the vsync period
+was 20000000 ns.
+
+The phone was not slow. **Nobody had told it this picture wanted to be fast.** A plain `SurfaceView`
+inherits the system default policy, and Android picks a mode from power budget and content. So the
+change went into the phone: the PC announces its frame rate in the handshake, and the app asks for a
+matching mode itself --
+
+* `WindowManager.LayoutParams.preferredDisplayModeId` / `preferredRefreshRate` (API 23+)
+* `Surface.setFrameRate(fps, FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)` (API 30+)
+* `pickMode()` chooses the closest entry in `getSupportedModes()`, and on a tie **prefers the faster
+  one** (a dropped frame looks worse than a repeated one)
+* it re-sends from `onWindowFocusChanged` and `surfaceCreated`, because coming back from the background
+  can change the mode underneath us
+
+Measured (logcat): `display 144fps -> mode 2@144 requested, panel now 120Hz`; and
+`mActiveSfDisplayMode` went from `peakRefreshRate=50.0` to `120.00001`. **Presentation rate: 50 -> 120 Hz.**
+
+A side finding: this Xiaomi lists a 144 Hz mode, but even with `settings put system peak_refresh_rate 144`
+SurfaceFlinger stays at `120.00001` -- the 144 tier is not open to ordinary apps. So on this machine a
+144 fps stream is pointless.
+
+### 31.3 Second cut: the PC sends more frames than the phone can decode
+
+Three ceilings, each measured:
+
+| Stage | Ceiling | How it was measured |
+| --- | --- | --- |
+| Phone decode, 3200x2136 | about 134 fps | MediaCodec's own counter, `Render:674/5002ms Drop:0` |
+| NVENC encode, 3200x2136 | p1/p2 ~128-130, p4 ~100, p7 ~75 fps | `testsrc2` high complexity, `-t 4~6` |
+| Real desktop (this run) | 131 fps captured | 14 s bench, ddagrab + h264_nvenc p4 |
+
+The surplus frames are not dropped, they **pile up**. `StreamClient` has one self-defence:
+
+```java
+if (raw.available() > BACKLOG_DROP_BYTES) { skipUntilKey = true; }
+```
+
+`BACKLOG_DROP_BYTES = 384 * 1024`, which at 40 Mbps is only about 77 ms of backlog. Once that trips, the
+app **throws away every frame until the next keyframe**, and the GOP is `fps * 2` -- 288 frames at 144 fps,
+or roughly **2 seconds**. So the picture freezes for two seconds, once every four.
+
+Four alternating runs, 12 s each, everything else identical:
+
+| Target fps | Captured | Phone `perf fps` sequence |
+| --- | --- | --- |
+| 144 | 131.1 | 118, 24, 136, 125, 136 -- with `(dropping to keyframe)` |
+| 120 | 109.5 | 122, 108, 113, 106, 114 -- not once |
+| 144 | 131.4 | 143, 2, 16, 129, 18 -- severe |
+| 120 | 109.1 | 102, 120, 96, 110, 109 -- not once |
+
+Reproduced both rounds. **144 fps bought a bigger number and a worse picture.**
+
+### 31.4 Letting the host know the phone's presentation rate
+
+New protocol line. The phone immediately sends one ASCII line to the PC:
+
+```
+DXH1 120\n
+```
+
+The host never read the phone-to-PC direction in 1.6.x, so a new app against an old PC is harmless, and
+an old app against a new PC simply times out and behaves as before. Host side (`host/server.py`,
+`host/session.py`):
+
+* `_read_hello()` reads that line right after `accept()`, before the video handshake
+* it lands in `client_hz`, logged as "phone panel refresh rate 120Hz"
+* `_wanted_fps()` returns `min(user setting, client_hz)`
+* `start_stream()` **stops starting ffmpeg immediately**; it waits for the phone to connect and announce
+  its rate (6 s fallback for old apps)
+* `_ensure_capture()` re-checks once a second and restarts the encoder if the panel value changes
+
+Three practical problems, all found end to end:
+
+1. **The hello arrives late.** On a freshly plugged phone the first connection through adb reverse delays
+   that line by about a second. There are now three layers: the phone **sends the same line again after
+   the video handshake**; the host starts a `_hello_watch` thread that listens for 3 more seconds; and
+   `_ensure_capture` waits 2.5 s before starting ffmpeg. So whether the line is on time or late, **ffmpeg
+   starts exactly once** (it used to start at 144 and be killed and restarted at 120 two seconds later,
+   which the user sees as a blink).
+2. **Reporting "capability" and reporting "current state" are different things.** The first version sent
+   the maximum of `getSupportedModes()`, which was 144 -- but this machine really only gives 120, so the
+   host pushed 144 into a 120 Hz panel and the backlog path was unchanged. It now reports
+   `getDisplay().getRefreshRate()`: **what is actually being used**.
+3. **One handshake cannot decide for the lifetime of the session.** The mode changes when the app comes
+   back from the background and across Doze, so the phone re-sends from `onWindowFocusChanged`/
+   `surfaceCreated`, and the host re-checks every second.
+
+### 31.5 Verification
+
+```
+bench, 4 alternating runs (12 s)   144: 131/131 fps with dropping   120: 109/109 fps, none
+run_session, 6 end-to-end runs    client_hz=120 stream_fps=120  fps 119.5-122.0  no dropping at all
+phone screenshot (3200x2136)      overlay: 3200 x 2136 - showing 125 fps (panel 120 Hz)
+APK build + install               12 sources, v1/v2/v3 signatures OK, versionCode 20 / versionName 1.7.0
+```
+
+### 31.6 Tried and rejected
+
+"Keep ddagrab at the desktop's 144 Hz and resample with `-vf fps=120` to the panel rate" -- in theory
+that gives the phone a fresh frame every time. Patched a copy and ran it twice: the phone reported
+`perf fps` 120.9 / 120.4, indistinguishable from running without resampling (119.5-120.7), and
+`Capture.fps()` on the host was 96.6 / 98.2, the same band as without it (98.3 / 101.4). **No measurable
+gain, so it did not go into the mainline.**
+
+### 31.7 Lessons
+
+1. **Measure the last hop first.** Before optimising, find out how many frames actually reach the panel.
+   Running 144 fps into a SurfaceFlinger giving 50 Hz made everything upstream pointless.
+2. **The smallest number in the chain is the bottleneck.** NVENC 134, phone decode 134, SurfaceFlinger
+   120 -- what the eye sees is decided by the last one, not the first.
+3. **Reporting capability and reporting state are not the same.** A mode table that lists 144 does not
+   mean you will get 144; reporting capability makes the next hop compute the wrong thing.
+4. **One handshake for the whole session is fragile.** Allowing the value to arrive late and self-heal
+   is far more robust than a longer timeout -- a longer timeout just makes every old version slower.
 
 ---
 

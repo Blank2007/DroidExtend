@@ -11,6 +11,7 @@ import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.util.TypedValue;
@@ -81,6 +82,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private View sheet;
     private boolean started;
     private BroadcastReceiver screenReceiver;
+    /** The frame rate the host announced, 0 until the first handshake. */
+    private int streamFps;
     /** #1: true while the terms dialog is up, so a second surface cannot stack two. */
     private boolean privacyAsking;
 
@@ -254,6 +257,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             hideSystemUi();
+            // Coming back from the background, the system may have picked a
+            // different panel mode while we were gone; say it again.
+            if (streamFps > 0) {
+                requestFrameRate(streamFps);
+            }
         }
     }
 
@@ -820,6 +828,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     public void surfaceCreated(SurfaceHolder holder) {
         decoder.setSurface(holder.getSurface());
         startClientOnce();
+        if (streamFps > 0) {
+            requestFrameRate(streamFps);
+        }
     }
 
     @Override
@@ -894,12 +905,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 });
             }
 
-            @Override public void onVideoSize(final int w, final int h) {
+            @Override public void onVideoSize(final int w, final int h, final int fps) {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         if (surfaceView != null && w > 0 && h > 0) {
                             surfaceView.setAspect(w / (float) h);
                         }
+                        requestFrameRate(fps);
                     }
                 });
             }
@@ -928,9 +940,114 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 });
             }
-        });
+        }, currentPanelHz());
         client.start();
         AppLog.i("client started");
+    }
+
+    /**
+     * Ask the panel to run at the rate the stream is produced at.
+     *
+     * Nothing else does, and the default is not "the fastest": measured on a
+     * 144 Hz phone fed a 144 fps stream, this app declared no frame rate, so
+     * SurfaceFlinger settled on 50 Hz and two frames out of three were decoded
+     * and never composited -- the overlay reported 143 rendered frames while
+     * the panel updated 50 times a second.  Declaring the rate, together with
+     * the matching display mode, is what makes the compositor pick a faster
+     * panel mode.
+     */
+    private void requestFrameRate(int fps) {
+        if (fps <= 0) {
+            return;
+        }
+        streamFps = fps;
+        try {
+            Display d = getWindowManager().getDefaultDisplay();
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            Display.Mode want = pickMode(d, fps);
+            boolean changed = false;
+            if (want != null) {
+                if (Build.VERSION.SDK_INT >= 23 && lp.preferredDisplayModeId != want.getModeId()) {
+                    lp.preferredDisplayModeId = want.getModeId();
+                    changed = true;
+                }
+                if (Math.abs(lp.preferredRefreshRate - want.getRefreshRate()) > 0.01f) {
+                    lp.preferredRefreshRate = want.getRefreshRate();
+                    changed = true;
+                }
+            }
+            if (changed) {
+                getWindow().setAttributes(lp);
+            }
+            // Android 11+ can also declare the content rate on the surface
+            // itself.  The window hint above is what picks the mode; this one
+            // keeps the layer's frame-rate override right while the stream
+            // runs, and it still works on ROMs that ignore the window hint.
+            if (Build.VERSION.SDK_INT >= 30 && surfaceView != null) {
+                Surface s = surfaceView.getHolder().getSurface();
+                if (s != null && s.isValid()) {
+                    s.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
+                }
+            }
+            AppLog.i("display " + fps + "fps -> mode "
+                    + (want == null ? "?"
+                    : want.getModeId() + "@" + Math.round(want.getRefreshRate())
+                    + (changed ? " requested" : " already set"))
+                    + ", panel now " + Math.round(d.getRefreshRate()) + "Hz");
+        } catch (Throwable t) {
+            AppLog.w("request frame rate failed: " + t);
+        }
+    }
+
+    /**
+     * The display mode closest to `fps`, preferring the faster one on a tie.
+     *
+     * A mode faster than the stream repeats a frame now and then; a slower one
+     * drops frames, which is the one that looks bad.  Either is better than the
+     * system's own choice for an app that declares nothing.
+     */
+    private Display.Mode pickMode(Display d, int fps) {
+        if (Build.VERSION.SDK_INT < 23) {
+            return null;
+        }
+        Display.Mode[] modes = d.getSupportedModes();
+        if (modes == null || modes.length == 0) {
+            return null;
+        }
+        Display.Mode best = modes[0];
+        for (int i = 1; i < modes.length; i++) {
+            float a = Math.abs(modes[i].getRefreshRate() - fps);
+            float b = Math.abs(best.getRefreshRate() - fps);
+            if (a < b - 0.01f
+                    || (Math.abs(a - b) <= 0.01f && modes[i].getRefreshRate() > best.getRefreshRate())) {
+                best = modes[i];
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The refresh rate this panel is really running at, or 0 when it cannot be
+     * read.
+     *
+     * This is what the host is told in the hello, so it can match the capture
+     * rate to the screen instead of to the fps the user happened to pick.
+     *
+     * The mode table is the wrong source: it advertises a 144 Hz mode on this
+     * panel, but MIUI never selects it for an ordinary app -- measured, dumpsys
+     * display stays pinned at peakRefreshRate=120 while getSupportedModes()
+     * still lists 144.  Reporting the table maximum makes the PC encode 144
+     * fps into a 120 Hz panel, which is the stutter this handshake exists to
+     * remove: the decoder runs out of throughput, the socket backlogs, and the
+     * app jumps from keyframe to keyframe every few seconds.
+     */
+    private int currentPanelHz() {
+        try {
+            int hz = (int) Math.round(panelHz());
+            return hz >= 24 && hz <= 300 ? hz : 0;
+        } catch (Throwable t) {
+            return 0;
+        }
     }
 
     /**

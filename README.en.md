@@ -147,7 +147,7 @@ frame rate.
 | --- | --- |
 | **Mode** | `拓展屏` (extend): create a new virtual display and grow the desktop; `镜像` (mirror): duplicate an existing display as-is |
 | **Resolution / refresh rate** | The virtual display's real mode. **The menu lists exactly the modes the virtual display driver has** — the driver builds its mode table from every `<resolution>` row in `vdd_settings.xml` (11 of them here, × 30/60/90/120/144 Hz), and Windows rejects anything outside that table with `DISP_CHANGE_BADMODE`. Custom width and height still work |
-| **Frame rate fps** | Encoding frame rate, 24 ~ 144 |
+| **Frame rate fps** | Encoding frame rate, 24 ~ 144. **What actually gets used is the smaller of your setting and the phone's panel rate**: when the phone can only present 120 frames a second, sending 144 just piles up into stutter. From 1.7.0 on this is aligned automatically, and the log says "编码帧率 144 → 120 fps" |
 | **Bitrate cap Mbps** | Upper bound on the encoding bitrate; under VBR it's a ceiling, not a constant |
 | **Rate control** | `VBR` (quality first — a static desktop uses almost no bandwidth) / `CBR` (constant bitrate, steadier on fast-moving content) |
 | **Quality Q** | Lower is better quality and higher bitrate. `18~20` is essentially visually lossless; from `24` up you can see blocking |
