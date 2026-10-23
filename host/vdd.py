@@ -374,6 +374,97 @@ def add_resolution(width, height, hz=60):
     return True
 
 
+# Restart the node so the driver rebuilds its mode table from the file.
+#
+# Why disable/enable and not "pnputil /restart-device": pnputil answers 0 but
+# leaves the node in a not-OK state for several seconds, and _RESTART_PS then
+# reports "node not OK afterwards" for a restart that did happen.  A plain
+# disable/enable pair is what the app already does when it turns the screen off
+# and on again, and it is reliable.  Measured 2026-10-24 on MttVDD 25.7.23:
+# the adapter is back 3.7 s later and a size appended to the file a moment
+# before is in its mode table.
+_RELOAD_PS = r"""$ErrorActionPreference = 'Continue'
+$log = __LOG__
+function Say($m) { if ($log) { try { Add-Content -LiteralPath $log -Value $m -Encoding UTF8 } catch { } } }
+Say 'begin'
+$ids = @()
+Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object {
+    $h = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue
+    $j = ''
+    if ($h -and $h.Data) { $j = ($h.Data -join ';') }
+    if ($j -match 'MttVDD') { $ids += $_.InstanceId }
+}
+if (-not $ids) { Say 'no-node'; exit 4 }
+foreach ($id in $ids) {
+    Say ('node ' + $id)
+    Disable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 700
+    Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction SilentlyContinue
+}
+Say 'done'
+exit 0
+"""
+
+
+def reload_modes(want=None, log=None, timeout=30.0):
+    """Restart the driver's device node so it re-reads vdd_settings.xml.
+
+    Returns (ok, name); *name* is the adapter's new display name (a restart
+    always hands out a new \\.\\DISPLAYnn number), or None when the adapter did
+    not come back at all.
+
+    Why this exists: the driver builds its whole target-mode list once, while
+    its device node starts, so a size written into
+    C:\\VirtualDisplayDriver\\vdd_settings.xml stays invisible until that node
+    starts again.  The program used to tell the user to reinstall the driver or
+    reboot for that -- a lot to ask for what is really one disable/enable pair,
+    especially since the program is already elevated (--uac-admin) and needs no
+    prompt of its own.
+
+    *want* is (width, height); when given, the wait continues until that size is
+    really enumerable, so the caller can go straight on to its own
+    EnumDisplaySettingsEx / ChangeDisplaySettingsEx calls.
+    """
+    import win_display
+
+    log = log or (lambda m: None)
+    t0 = time.time()
+    code, _text = _run_ps1(_RELOAD_PS, "reload", log=log)
+    if code == 1223:
+        return False, None
+    if code == 4:
+        log(i18n.t("找不到虚拟屏的设备节点，驱动可能没装好",
+                   "cannot find the virtual display's device node -- the driver "
+                   "may not be installed properly"))
+        return False, None
+    a = wait_adapter(timeout=timeout)
+    if a is None:
+        return False, None
+    name = a.get("name")
+    if want is None:
+        log(i18n.t("驱动已重启，模式表重新读过了（%.1f 秒）",
+                   "the driver was restarted and re-read its mode table (%.1f s)")
+            % (time.time() - t0))
+        return True, name
+    w, h = int(want[0]), int(want[1])
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            modes = win_display.available_modes(name)
+        except Exception:
+            modes = []
+        if any(m[0] == w and m[1] == h for m in modes):
+            log(i18n.t("驱动已重启，现在真的能给出 %dx%d（%.1f 秒）",
+                       "the driver restarted and now really offers %dx%d (%.1f s)")
+                % (w, h, time.time() - t0))
+            return True, name
+        a2 = find_vdd_adapter()
+        if a2 and a2.get("name") and a2.get("name") != name:
+            name = a2["name"]
+        time.sleep(0.5)
+    return False, name
+
+
 # --- turning the monitor off for real ---------------------------------------
 #
 # The driver builds its monitors while its device node starts, from

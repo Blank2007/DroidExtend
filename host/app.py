@@ -1686,6 +1686,15 @@ class App(tk.Tk):
                 raise RuntimeError(i18n.t("自定义位置的 X / Y 必须是整数",
                                           "A custom position needs whole numbers for X and Y"))
         cfg["draw_mouse"] = bool(self.mouse_var.get())
+        # 1.8.1 -- the one setting this function used to forget.  "match the
+        # phone's panel" is remembered in settings.json and shown on the form,
+        # but session.cfg kept the DEFAULTS value (True) no matter what the box
+        # said, because nothing ever copied it across.  The result looked like a
+        # broken resolution menu: the dropdown was enabled with the box unticked,
+        # a new size went into cfg, and apply_display()/retarget() then replaced
+        # it with the phone's panel size -- "切换分辨率无效" (the size never
+        # changed, and nothing in the log said why).
+        cfg["match_phone"] = bool(self.match_var.get())
         cfg["mode"] = self.mode_var.get()
         cfg["install_apk"] = bool(self.inst_var.get())
         cfg["tray_on_close"] = bool(self.close_action != "quit")

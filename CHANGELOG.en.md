@@ -56,6 +56,8 @@
 | [30](#30-169-one-approval-instead-of-two-prompts) | 1.6.9: administrator rights / the shown frame rate | one UAC at launch replaces one UAC per virtual-screen toggle |
 | [31](#31-170-first-make-the-phone-display-at-its-own-refresh-rate) | 1.7.0: phone refresh rate / encoding rate alignment | presentation 50 → 120 Hz, the stalls are gone |
 | [32](#32-180-stop-detaches-the-screen-quitting-puts-the-driver-away) | 1.8.0: stop detaches the screen / quitting releases the driver in the background | stopping takes 0.67 s and the screen is gone; starting again takes 3.13 s |
+| [33](#33-181-a-resolution-menu-that-did-nothing) | 1.8.1: why the resolution menu did nothing | one missing line let a default override the user's choice |
+| [34](#34-182-why-a-custom-resolution-would-not-stick) | 1.8.2: why a custom resolution would not stick | the driver reads its mode table once, at device start; writing the file is not enough |
 
 ---
 
@@ -2983,6 +2985,202 @@ Afterwards `vd.device_enabled()` is `False` and `live_monitors()` holds only `\\
    first and finish the rest in the background before the process exits.
 4. **Cancel pending timers before destroying the window.** Otherwise the log fills with
    "application has been destroyed" and anything real is buried under it.
+
+## 33. 1.8.1: a resolution menu that did nothing
+
+### 33.1 The request
+
+"Sort out why switching the resolution does nothing" (session record m01184).
+
+### 33.2 The symptom
+
+The "fill the phone's panel" box was unticked, the resolution dropdown could be opened and 1920x1080
+picked, and the virtual screen stayed at 3200x2136. Changing the size or the refresh rate moved
+nothing, and the log did not contain a single failed step. It looked like a broken menu; in fact every
+step of the program reported success.
+
+### 33.3 Reproduction
+
+Real button clicks at the UI layer (administrator rights, a 3200x2136 phone panel), before the fix:
+
+| Action | Dropdown said | The virtual screen was | Log |
+| --- | --- | --- | --- |
+| Start casting | 2560x1600 | **3200x2136** | nothing unusual |
+| Pick 1920x1080 | 1920x1080 | **3200x2136** | "the display mode did not change, no switch needed" |
+| Pick 1280x720 | 1280x720 | **3200x2136** | the same line |
+
+### 33.4 The cause: one setting that never made the trip
+
+`App._apply_form()` copies every item on the form into `session.cfg`: size, refresh rate, encoding
+frame rate, bitrate, encoder, preset, rate control, position, draw mouse -- more than twenty of them,
+**and it forgot `match_phone`**.
+
+The default in `host/session.py:52` is `"match_phone": True`. `Session.cfg = dict(DEFAULTS)`, and no
+line of code ever changed it again -- so whether that box was ticked or not, the session always acted
+as "match the phone's panel".
+
+Everything after that is automatic:
+
+1. `apply_display()` (`host/session.py:371`) and `retarget()` (`host/session.py:523`) both contain
+   `if self.cfg.get("match_phone", True): w, h, hz = self._match_phone(name, w, h, hz)` -- which
+   replaces the chosen size with the phone panel's size (3200x2136 here).
+2. `retarget()` then compares the "current size" with the "size just computed": both are 3200x2136,
+   the comparison holds, it logs "the display mode did not change, no switch needed"
+   (`host/session.py:540`) and returns `False`.
+3. No `ChangeDisplaySettingsEx`, no capture restart, no phone re-handshake -- everything is quiet.
+
+The "fill the phone's panel" checkbox was still sitting there, unticked, so the user had every reason
+to believe the choice applied.
+
+### 33.5 Why it went unnoticed for three months
+
+* The default is `True`, and `True` looks like a sensible "automatic fit" feature rather than a bug.
+* The "the display mode did not change" line also shows up in normal runs; nothing marks it as a lie.
+* The checkbox and the dropdown did not talk to each other: the box was empty while the dropdown
+  stayed usable, so no part of the window said "the phone decides".
+
+### 33.6 The fix
+
+One line in `_apply_form()` in `host/app.py`, right after `cfg["draw_mouse"]`:
+
+```python
+cfg["match_phone"] = bool(self.match_var.get())
+```
+
+It fixes two related things at once: the resolution is no longer overridden, and neither is the
+refresh rate chosen in the `hz` dropdown.
+
+### 33.7 Verification
+
+The same GUI clicks, after the fix:
+
+| Action | The virtual screen was | Result |
+| --- | --- | --- |
+| Start casting (2560x1600) | **2560x1600@120** | pass |
+| Pick 1920x1080 | **1920x1080@120** | pass (about 2 s: capture restart plus a phone re-handshake) |
+| Pick 3200x1440 | **3200x1440@120** | pass |
+| Stop, pick 1280x720, start again | **1280x720@120** | pass (no screen exists while stopped, so it applies on the next start) |
+| Tick "fill the phone's panel" | **3200x2136** and the dropdown greys out | pass |
+
+`retarget()` itself was also tested on its own (talking to the session directly, bypassing the UI):
+four consecutive switches to 1920x1080 / 1280x720 / 3200x2136 / 2560x1600 all returned
+`SUCCESSFUL` -- the switching logic was always fine; only the size fed into it was wrong.
+
+`tools\smoke.py` passes in full.
+
+### 33.8 Lessons
+
+1. **When a change does nothing, check that the value arrives before checking the code that uses it.**
+   This time the consumer (`retarget`, the driver) was perfectly healthy; the break was in the UI to
+   session hand-over, where no amount of staring at the driver layer shows anything.
+2. **One forgotten assignment lets a default override the user's choice for good.** The more the
+   default resembles a smart feature, the longer it survives -- it behaves like a feature, not a fault.
+3. **Controls that interact must say the same thing.** If the box means "the phone decides", then the
+   dropdown should be greyed while it is ticked (it was) and actually apply while it is not (which
+   this bug made untrue). Only then can the user trust the window.
+
+## 34. 1.8.2: why a custom resolution would not stick
+
+### 34.1 The user's words
+
+"那自定义选项呢 我用了自定义结果你用3200x2136？" -- "What about the custom option? I used custom and you gave me 3200x2136?"
+(session record m01354).
+
+The single line fixed in section 33 (the missing `match_phone` hand-over) only explains "I picked 1920x1080 and nothing happened".
+With "fill the phone's panel" unticked, a size the user typed in was *still* replaced by 3200x2136. That is a second chain.
+
+### 34.2 Symptom
+
+Resolution dropdown set to "Custom" (自定义), width 2560, height 1700, press Start casting: the virtual screen is
+still 3200x2136. No "switch failed" in the log -- only "falling back to a size the driver really has: 3200x2136".
+
+### 34.3 The second cause: the driver reads its mode table once, at device start
+
+The sizes a virtual display can offer come from `C:\VirtualDisplayDriver\vdd_settings.xml`.
+The driver **reads that file once, when the device starts**, then keeps the table in memory.
+Editing the file does not re-read it.
+
+The old logic, when the size was not in the table, did this: `add_resolution()` wrote it into the file,
+returned "not usable", logged "install the driver again (or restart the PC) and then it can switch",
+and `apply_display()` fell back to the *closest* mode via `wd.best_mode()`.
+
+`best_mode()` scores candidates as `(|aspect difference|, |area difference|)`, aspect first.
+2560x1700 is 1.5059; 3200x2136 is 1.498 -- the closest in the whole table, so that is what came out.
+"I used custom and you gave me 3200x2136" is exactly those two steps together.
+
+### 34.4 The decisive experiment: does a device restart re-read the file
+
+With the device in the ready state (not disabled):
+
+1. `add_resolution(2600, 1300, 120)` -> file written; `available_modes()` does **not** contain 2600x1300 yet.
+2. `Disable-PnpDevice` -> wait 700 ms -> `Enable-PnpDevice` (rc=0).
+3. `wait_adapter()` returns the new adapter `\\.\DISPLAY76` after 3.71 s; `available_modes()` now
+   **does** contain 2600x1300, and the mode count went 65 -> 70.
+
+So **restarting the device node re-reads the mode table**: 3-10 seconds, no PC restart, no driver reinstall.
+
+One dead end worth recording: `pnputil /restart-device` returns rc=0, but the node's `Status` is not OK for
+the next few seconds, so the old `_RESTART_PS` in `vdd.py` reported `node not OK afterwards`.
+The new `_RELOAD_PS` therefore uses `Disable-PnpDevice` + 700 ms + `Enable-PnpDevice`.
+
+### 34.5 The fix
+
+`host/vdd.py` gains `reload_modes(want=None, log=None, timeout=30.0) -> (ok, name)`:
+run `_RELOAD_PS` -> `wait_adapter()` -> if `want=(w, h)` was given, keep polling `available_modes()`
+until that size really appears (re-resolving `find_vdd_adapter()` each round, because the display number changes).
+
+`host/session.py`:
+
+* `_resolve_mode()` now returns a 6-tuple with an extra `added` flag:
+  `True` = just written into the file, `False` = already in the file but the driver has not read it,
+  `None` = could not be written at all (a restart would not help either).
+* New `_fit_size(name, w, h, hz)`: when `_resolve_mode` says "not usable", call `vd.reload_modes((w, h))`,
+  look again, and only fall back if it still fails. **The display number changes, so callers must use the
+  returned name.**
+* `apply_display()` reordered: resolve the size first (restarting the driver if needed), *then* attach /
+  `extend_topology`, then set the mode. A driver restart takes the screen off the desktop and changes its
+  number, so it has to happen before the screen goes on the desktop.
+* `retarget()` (changing the size mid-stream) deliberately does **not** restart: that would pull the screen
+  out from under a running stream and the phone would drop. It explains itself instead:
+  "the driver has not read this size yet. Press Stop and then Start casting; the program will restart the
+  driver once and use it (about 4 seconds)".
+
+### 34.6 Verification
+
+Real button presses in the window (administrator, this machine's 3200x2136 phone panel, 13 sizes in the driver table):
+
+| Action | Virtual screen actually | Time |
+| --- | --- | --- |
+| Pick "Custom 2560x1700" -> Start casting | **2560x1700@120** | 13.4 s (includes cold start) |
+| Change to "Custom 2304x1440" while casting | unchanged; the log says stop and start | -- |
+| Stop -> Start again | **2304x1440@120**, new display number `\\.\DISPLAY80` | 12.1 s (7.6 s of it the driver restart) |
+| Stop | desktop back to a single 2560x1600 screen | 0.3 s |
+
+The same two cases were also driven at the session level (2560x1700 = "in the file, never read by the driver",
+2304x1440 = a brand new size): 12.39 s and 11.49 s respectively, both ending on the requested size.
+
+Section 4 of `tools\tmp\mode_menu_test.py` was rewritten for the new contract (6-tuple, three values of
+`added`) -> 79 PASS / 0 FAIL; `tools\smoke.py` passes in full.
+
+### 34.7 Cost and trade-off
+
+* The first time a size that is not in the driver table is used, it costs 4-10 s (one device node restart).
+  After that the size is in the table and switching is instant.
+* Changing the size while casting does not apply immediately -- on purpose. A forced restart would take the
+  streaming screen off the desktop and change its number; the phone would drop and reconnect, which is worse
+  than pressing Stop and Start again.
+
+### 34.8 Lessons
+
+1. **"It is in the file" does not mean "the driver can use it".** Writing the file and having the driver read
+   it are separated by a whole device start-up. Reporting success after only writing the file pushes the
+   failure onto the next PC restart.
+2. **A function that returns "not usable" and only prints advice hands the work back to the user.** This time
+   the work was "disable one device, wait 700 ms, enable it again": 3-10 s, no UAC. The program can do that.
+3. **Falling back to the "closest" size is worse than an error.** An error at least says "this size is not
+   supported"; quietly substituting 3200x2136 feels like "you picked something and it ignored you", so the
+   user stops trusting the whole menu instead of that one size.
+
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

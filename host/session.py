@@ -151,10 +151,13 @@ class Session(object):
 
         A 3200x2136 phone letterboxed into 1920x1080 throws away most of the
         screen; matching the panel means the picture reaches all four edges.
-        The driver can only offer what is in its mode table, so when the exact
-        size is missing we take the closest aspect ratio and append the missing
-        size to vdd_settings.xml -- the driver reads that file while its device
-        node starts, so it goes live on the next reboot or driver reinstall.
+
+        The panel size is returned even when the driver does not list it yet:
+        _fit_size() then appends it to vdd_settings.xml and restarts the driver
+        once (about 4 s).  It used to fall back to the closest size the driver
+        happened to have and suggest reinstalling the driver -- which is why a
+        panel size outside the stock table looked like "it picked 3200x2136
+        again".
         """
         try:
             if self.adb is None:
@@ -180,24 +183,8 @@ class Session(object):
             self.log("  虚拟屏按手机分辨率 %dx%d@%d 撑满" % (bw, bh, bhz))
             return bw, bh, bhz
 
-        self.log("  驱动模式表里没有 %dx%d，先用最接近的 %dx%d@%d（会有黑边）"
-                 % (pw, ph, bw, bh, bhz))
-        try:
-            import vdd as vd
-            added = vd.add_resolution(pw, ph, hz)
-        except Exception:
-            added = None
-        if added:
-            self.log("  已把 %dx%d 写进驱动模式表：点「安装虚拟显示器驱动」重装一次"
-                     "（或重启电脑）就能完全撑满" % (pw, ph))
-        elif added is False:
-            # The file already lists it; the driver still does not offer it,
-            # because it only reads that file while its device node starts.
-            self.log("  驱动暂时给不出 %dx%d（文件里已有，但驱动要重装一次或重启"
-                     "电脑才会读到）" % (pw, ph))
-        else:
-            self.log("  想完全撑满：点「安装虚拟显示器驱动」重装一次驱动")
-        return bw, bh, bhz
+        self.log("  驱动模式表里还没有 %dx%d，先加进去再重启一次驱动" % (pw, ph))
+        return pw, ph, hz
 
     def _vdd_off_mode(self):
         """How thoroughly to put the virtual display away when we are not using it.
@@ -328,6 +315,20 @@ class Session(object):
         self._vdd_ready_name = name
         self._display_used = True
 
+        # Work out the size *before* the screen reaches the desktop.  Learning a
+        # new size may need the driver restarted (_fit_size does that, about
+        # 4 s), and such a restart must not happen while the screen is in use --
+        # it also hands the adapter a new display number, so the attach below
+        # has to be aimed at whatever name comes back.
+        w = int(self.cfg["width"])
+        h = int(self.cfg["height"])
+        hz = int(self.cfg["hz"])
+        if self.cfg.get("match_phone", True):
+            w, h, hz = self._match_phone(name, w, h, hz)
+        name, w, h, hz, note = self._fit_size(name, w, h, hz)
+        if note:
+            self.log("  " + note)
+
         prev = wd.current_mode(name)
         if prev:
             self._prev_mode = dict(prev)
@@ -364,25 +365,6 @@ class Session(object):
         primary = next((m for m in mons if m["primary"]), mons[0] if mons else None)
         if primary is None:
             raise RuntimeError(i18n.t("找不到主显示器", "No primary monitor was found"))
-
-        w = int(self.cfg["width"])
-        h = int(self.cfg["height"])
-        hz = int(self.cfg["hz"])
-        if self.cfg.get("match_phone", True):
-            w, h, hz = self._match_phone(name, w, h, hz)
-
-        w, h, hz, note, usable = self._resolve_mode(name, w, h, hz)
-        if note:
-            self.log("  " + note)
-        if not usable:
-            # Getting a picture up matters more than the exact size, so fall back
-            # to one the driver really has instead of failing outright.  The note
-            # above already told the user what was asked for and what is on offer.
-            fb = wd.best_mode(name, w, h, hz)
-            if not fb:
-                raise RuntimeError(note)
-            self.log("  改用驱动确实有的 %dx%d@%d" % (fb[0], fb[1], fb[2]))
-            w, h, hz = fb[0], fb[1], fb[2]
 
         x, y = self._position_for(primary, w, h)
 
@@ -454,32 +436,36 @@ class Session(object):
     def _resolve_mode(self, name, w, h, hz):
         """Fit a wanted mode onto what the display actually offers.
 
-        Returns ``(w, h, hz, note, usable)``.  *note* is None when the request is
-        available exactly as asked, and a sentence for the user otherwise;
-        *usable* is False when Windows would answer DISP_CHANGE_BADMODE.
+        Returns ``(w, h, hz, note, usable, added)``.  *note* is None when the
+        request is available exactly as asked, and a sentence for the user
+        otherwise; *usable* is False when Windows would answer
+        DISP_CHANGE_BADMODE; *added* says whether the size was just appended to
+        the driver's settings file (True), was already in it (False), or could
+        not be written (None) -- _fit_size() needs that to know whether a
+        driver restart is worth its four seconds.
 
         This is the other half of "改了分辨率还是没变化".  The form offered
-        twenty-two sizes while the driver builds its mode table from eleven rows
-        in vdd_settings.xml, so half the menu could never work -- and nothing
-        said so.  A missing size is now reported, and offered to the driver
-        (which still has room for a few more rows), so reinstalling the driver or
-        rebooting makes it real instead of silently dropping it.
+        twenty-two sizes while the driver builds its mode table from a handful
+        of rows in vdd_settings.xml, so half the menu could never work -- and
+        nothing said so.  A missing size is now reported and offered to the
+        driver, and _fit_size() restarts the driver so it becomes real in one
+        go instead of silently dropping it or waiting for a reboot.
         """
         import vdd as vd
 
         modes = wd.available_modes(name)
         if not modes:
             # Nothing to compare against: let Windows have the final word.
-            return w, h, hz, None, True
+            return w, h, hz, None, True, None
         if (w, h, hz) in modes:
-            return w, h, hz, None, True
+            return w, h, hz, None, True, None
 
         rates = sorted({m[2] for m in modes if m[0] == w and m[1] == h})
         if rates:
             best = min(rates, key=lambda r: abs(r - hz))
             return w, h, best, i18n.t(
                 "%dx%d 没有 %d Hz，改用 %d Hz" % (w, h, hz, best),
-                "%dx%d does not offer %d Hz; using %d Hz" % (w, h, hz, best)), True
+                "%dx%d does not offer %d Hz; using %d Hz" % (w, h, hz, best)), True, None
 
         sizes = sorted({(m[0], m[1]) for m in modes})
         sep = ", " if i18n.en() else "、"
@@ -490,15 +476,70 @@ class Session(object):
             added = None
         if added:
             return w, h, hz, i18n.t(
-                "驱动模式表里原本没有 %dx%d，已经写进去了 —— 点「安装虚拟显示器驱动」"
-                "重装一次（或重启电脑）之后才切得过去。现在这张表里有：%s" % (w, h, near),
+                "驱动模式表里原本没有 %dx%d，已经写进去了。现在这张表里有：%s"
+                % (w, h, near),
                 "The driver had no %dx%d; it has been added to the mode table. "
-                "Reinstall the driver (or reboot) before it can be used. "
-                "Available now: %s" % (w, h, near)), False
+                "Available now: %s" % (w, h, near)), False, True
+        if added is False:
+            return w, h, hz, i18n.t(
+                "驱动还没读过 %dx%d（文件里已有，但它只在设备启动时读一次）。"
+                "现在能用的：%s" % (w, h, near),
+                "The driver has not read %dx%d yet (it is in the settings file, "
+                "but the driver only reads that while its device starts). "
+                "Available now: %s" % (w, h, near)), False, False
         return w, h, hz, i18n.t(
             "驱动给不出 %dx%d（模式表里没有，也没能写进去）。现在能用的：%s" % (w, h, near),
             "The driver cannot offer %dx%d (not in its mode table, and it could "
-            "not be added). Available now: %s" % (w, h, near)), False
+            "not be added). Available now: %s" % (w, h, near)), False, None
+
+    def _fit_size(self, name, w, h, hz):
+        """Resolve a wanted mode, restarting the driver once when it has to.
+
+        Returns ``(name, w, h, hz, note)``.  *name* changes when the driver was
+        restarted, because Windows then hands the adapter a new display number
+        and every later call has to be aimed at the new one.
+
+        The driver builds its mode table once, while its device node starts, so
+        a size that was just appended to vdd_settings.xml is not in it yet.
+        Restarting the node (about 4 s, no prompt -- the program is already
+        elevated with --uac-admin) makes it real straight away, which is what
+        this project used to ask the user to do by reinstalling the driver or
+        rebooting.
+        """
+        import vdd as vd
+
+        w, h, hz, note, usable, added = self._resolve_mode(name, w, h, hz)
+        if usable or added is None:
+            # Either it is there, or the file could not be written at all: in
+            # both cases restarting the driver cannot help.
+            return name, w, h, hz, note
+
+        self.log(i18n.t(
+            "  重启一次驱动，让它读到刚写进模式表的 %dx%d（约 4 秒，不会弹窗）"
+            % (w, h),
+            "  restarting the driver once so it reads the %dx%d that was just "
+            "added to its mode table (about 4 s, no prompt)" % (w, h)))
+        ok, new = vd.reload_modes((w, h), log=self.log)
+        if not ok or not new:
+            self.log(i18n.t(
+                "  驱动没能重启成功，先用这张模式表里有的尺寸",
+                "  the driver did not come back, so a size it does have is used "
+                "instead"))
+            fb = wd.best_mode(name, w, h, hz)
+            if fb:
+                return name, fb[0], fb[1], fb[2], note
+            return name, w, h, hz, note
+        self._display_applied = new
+        self._vdd_ready_name = new
+        w2, h2, hz2, note2, usable2, _added = self._resolve_mode(new, w, h, hz)
+        if usable2:
+            return new, w2, h2, hz2, note2
+        self.log(i18n.t("  驱动重启后还是给不出 %dx%d", 
+                        "  the driver still cannot offer %dx%d") % (w, h))
+        fb = wd.best_mode(new, w, h, hz)
+        if fb:
+            return new, fb[0], fb[1], fb[2], note2
+        return new, w2, h2, hz2, note2
 
     def retarget(self):
         """Apply the current size / refresh / position to a running session.
@@ -522,14 +563,26 @@ class Session(object):
         hz = int(self.cfg["hz"])
         if self.cfg.get("match_phone", True):
             w, h, hz = self._match_phone(name, w, h, hz)
-        w, h, hz, note, usable = self._resolve_mode(name, w, h, hz)
+        w, h, hz, note, usable, added = self._resolve_mode(name, w, h, hz)
         if note:
             self.log("  " + note)
         if not usable:
             # Stop here and say why.  Restarting the capture for a mode Windows
             # never accepted is what made "没有变化" look like "something
             # happened": the picture blinked and came back the same size.
-            self.log("显示模式未更改")
+            if added is not None:
+                # A driver restart would make this size real, but it would also
+                # yank the screen that is streaming right now and hand it back
+                # under a new display number.  apply_display() does that cleanly,
+                # before the screen is attached, so point the user there.
+                self.log(i18n.t(
+                    "显示模式未更改：驱动还没读过这个尺寸。点「停止」再「开始投屏」，"
+                    "程序会自动重启一次驱动把它用上（约 4 秒）",
+                    "Display mode unchanged: the driver has not read this size "
+                    "yet. Stop and start casting again and the program restarts "
+                    "the driver once to pick it up (about 4 s)."))
+            else:
+                self.log("显示模式未更改")
             return False
         x, y = self._position_for(primary, w, h)
 
