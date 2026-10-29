@@ -58,7 +58,7 @@
 | [32](#32-180-stop-detaches-the-screen-quitting-puts-the-driver-away) | 1.8.0: stop detaches the screen / quitting releases the driver in the background | stopping takes 0.67 s and the screen is gone; starting again takes 3.13 s |
 | [33](#33-181-a-resolution-menu-that-did-nothing) | 1.8.1: why the resolution menu did nothing | one missing line let a default override the user's choice |
 | [34](#34-182-why-a-custom-resolution-would-not-stick) | 1.8.2: why a custom resolution would not stick | the driver reads its mode table once, at device start; writing the file is not enough |
-| [35](#35-183-huawei-devices-would-not-connect-so-first-the-diagnostics-and-the-docs) | 1.8.3: Huawei diagnostics / documents / thanks | for a device we cannot touch, hand out the diagnostics and the checklist |
+| [35](#35-183-huawei-devices-would-not-connect-so-first-the-diagnostics-and-the-docs) | 1.8.3: Huawei diagnostics / documents | for a device we cannot touch, hand out the diagnostics and the checklist |
 
 ---
 
@@ -3281,21 +3281,12 @@ troubleshooting document.  When a real Huawei log arrives, we change the right l
 * `README.md:492` and `README.en.md:577` get a short section at the end of "Frequently asked questions"
   linking to those two documents.
 
-### 35.7 Thanks
+One more thing worth stating: we still do not own a Huawei device.  Everything confirmed in that
+document (the USB mode, hdc grabbing port 8710, pure mode) comes from public sources and user
+descriptions; everything unconfirmed (MediaCodec, SurfaceView, the lost cursor) is listed under known
+limitations.  When there is a device and a log, we go further.
 
-These two problems were not found by us -- users hit them with their own devices:
-
-* **酷安 @Scymore**
-* **抖音 @废紙箱**
-
-Their reports ("HarmonyOS 4.x Huawei device is not recognised / mirror mode does nothing / no mouse pointer
-in extend mode") are what produced the diagnostics in this release, `docs/HUAWEI.md`, and the Help menu link.
-We still do not own a Huawei device; everything confirmed in that document (the USB mode, hdc grabbing
-port 8710, pure mode) comes from their descriptions and public sources, and everything unconfirmed
-(MediaCodec, SurfaceView, the lost cursor) is listed plainly under known limitations.  When there is a
-device and a log, we go further.
-
-### 35.8 Verification
+### 35.7 Verification
 
 | Item | Result |
 | --- | --- |
@@ -3307,7 +3298,7 @@ device and a log, we go further.
 
 A Huawei device itself cannot be verified -- which is exactly what the release notes have to say out loud.
 
-### 35.9 Lessons
+### 35.8 Lessons
 
 1. **"No phone detected" is a sentence that leaves the user nowhere to go.** The device is plugged in and
    Device Manager sees it, and the program says there is nothing; on top of that `devices()` used to throw
