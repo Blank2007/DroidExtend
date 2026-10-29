@@ -3286,7 +3286,19 @@ document (the USB mode, hdc grabbing port 8710, pure mode) comes from public sou
 descriptions; everything unconfirmed (MediaCodec, SurfaceView, the lost cursor) is listed under known
 limitations.  When there is a device and a log, we go further.
 
-### 35.7 Verification
+### 35.7 Thanks
+
+We could not have found these two problems ourselves (no Huawei device here); users hit them with their
+own devices:
+
+* **KuAn: Scymore**
+* **Douyin: 废紙箱**
+
+Those are their nicknames on KuAn / Douyin, not GitHub accounts.  Their reports ("HarmonyOS 4.x Huawei
+device is not recognised / mirror mode does nothing / no mouse pointer in extend mode") are what produced
+the diagnostics in this release, `docs/HUAWEI.md` and the Help menu link.
+
+### 35.8 Verification
 
 | Item | Result |
 | --- | --- |
@@ -3298,7 +3310,7 @@ limitations.  When there is a device and a log, we go further.
 
 A Huawei device itself cannot be verified -- which is exactly what the release notes have to say out loud.
 
-### 35.8 Lessons
+### 35.9 Lessons
 
 1. **"No phone detected" is a sentence that leaves the user nowhere to go.** The device is plugged in and
    Device Manager sees it, and the program says there is nothing; on top of that `devices()` used to throw
