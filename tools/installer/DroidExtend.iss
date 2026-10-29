@@ -1,4 +1,4 @@
-﻿; DroidExtend 安装程序（Inno Setup 6） / DroidExtend installer (Inno Setup 6)
+; DroidExtend 安装程序（Inno Setup 6） / DroidExtend installer (Inno Setup 6)
 ; 编译 / Compile:
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" DroidExtend.iss
 ;   （或者 winget install JRSoftware.InnoSetup，装到 %LOCALAPPDATA%\Programs）
@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.8.2"
+#define AppVer "1.8.3"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -178,6 +178,11 @@ Source: "{#P}\tools\vdd_install.ps1"; DestDir: "{app}\tools"; Flags: ignoreversi
 Source: "{#P}\tools\vdd\nefcon\x64\nefconw.exe"; DestDir: "{app}\tools\vdd\nefcon\x64"; Flags: ignoreversion
 Source: "{#P}\tools\vdd\vdd25\VirtualDisplayDriver\*"; DestDir: "{app}\tools\vdd\vdd25\VirtualDisplayDriver"; Flags: ignoreversion
 Source: "{#P}\dist\DroidExtend.apk"; DestDir: "{app}\dist"; Flags: ignoreversion
+; 1.8.3 赞赏码 / the two tip QR codes: 帮助 -> 请作者喝杯奶茶 reads them from here.
+; 程序目录就是 ROOT（见 paths.py），所以这里必须和 assets\donate 同名同层 /
+; ROOT is the install folder, so these have to keep the assets\donate layout.
+Source: "{#P}\assets\donate\wechat.png"; DestDir: "{app}\assets\donate"; Flags: ignoreversion
+Source: "{#P}\assets\donate\alipay.png"; DestDir: "{app}\assets\donate"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\DroidExtend.exe"; IconFilename: "{app}\DroidExtend.ico"; Comment: "用数据线把安卓手机变成拓展屏"; Languages: cn

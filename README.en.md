@@ -574,6 +574,18 @@ rebuilds both tunnels.
 A: No. The protocol and the resolution are both negotiated at runtime, and any Android 5.0+ arm64/arm phone can
 install it.
 
+### Huawei / HarmonyOS devices
+
+Huawei devices need three extra things done first, or you will most likely get "no device detected" or
+"clicked start casting and nothing happened": enable **「仅充电时允许 ADB 调试」** (Allow ADB debugging when
+charging only) in Developer options and set the USB preference to "File transfer" (do not leave it on
+"Charge only"); if DevEco Studio or Huawei PC Manager is installed, **hdc steals the device** (adb and hdc
+both use port 8710) — end `hdc.exe`, quit both programs, then replug; if the phone-side app will not install,
+HarmonyOS **Pure mode** is blocking it — turn it off under `设置 → 系统和更新 → 纯净模式` (Settings → System &
+updates → Pure mode). The symptom-by-symptom table, the known limitations (HarmonyOS 4.x is still an
+AOSP-compatible layer and works; pure HarmonyOS NEXT / 6.0 does not), and what to put in an issue are in
+**[docs/HUAWEI.en.md](docs/HUAWEI.en.md)**.
+
 ---
 
 ## 7. Rebuilding the phone side (optional)

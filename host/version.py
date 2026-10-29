@@ -27,14 +27,18 @@ def app_title():
 # dialogs print.  Prefer app_title() wherever the title is actually rendered.
 APP_TITLE = app_title()
 
-APP_VERSION = "1.8.2"
-APP_DATE = "2026-10-24"
+APP_VERSION = "1.8.3"
+APP_DATE = "2026-10-29"
 
 REPO = "Blank2007/DroidExtend"
 REPO_URL = "https://github.com/" + REPO
 RELEASES_URL = REPO_URL + "/releases"
 ISSUES_URL = REPO_URL + "/issues"
 LATEST_RELEASE_API = "https://api.github.com/repos/%s/releases/latest" % REPO
+# 1.8.3: the Huawei/HarmonyOS checklist lives in the repo, not in the program --
+# it is long, it changes with each vendor firmware, and it is the one document a
+# user with a broken device actually needs to read on a phone screen.
+HUAWEI_DOC_URL = REPO_URL + "/blob/main/docs/HUAWEI.md"
 
 # Shown in 关于 and in the README, in this order.
 AUTHOR = "AI 编码代理（DeepSeek Harness / deepseek-flash）"

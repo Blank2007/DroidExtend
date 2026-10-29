@@ -648,8 +648,15 @@ class Session(object):
                 ok, out = self.adb.install(s, apk)
                 self.log("  安装%s: %s" % ("成功" if ok else "失败", out.strip().splitlines()[-1] if out.strip() else ""))
                 if not ok:
+                    # 1.8.3: Huawei's 纯净模式 refuses the APK with an error code
+                    # nobody can read, and the user is left thinking the cable is
+                    # broken.  install_hint() names the switch to turn off.
+                    from adb import install_hint
+                    hint = install_hint(out)
+                    if hint:
+                        self.log("  " + hint, "err")
                     raise RuntimeError(i18n.t("APK 安装失败：%s",
-                                      "APK install failed: %s") % out.strip())
+                                      "APK install failed: %s") % (hint or out.strip()))
 
         if self.cfg.get("auto_launch"):
             self.adb.force_stop(s)

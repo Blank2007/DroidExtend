@@ -58,6 +58,7 @@
 | [32](#32-180-stop-detaches-the-screen-quitting-puts-the-driver-away) | 1.8.0: stop detaches the screen / quitting releases the driver in the background | stopping takes 0.67 s and the screen is gone; starting again takes 3.13 s |
 | [33](#33-181-a-resolution-menu-that-did-nothing) | 1.8.1: why the resolution menu did nothing | one missing line let a default override the user's choice |
 | [34](#34-182-why-a-custom-resolution-would-not-stick) | 1.8.2: why a custom resolution would not stick | the driver reads its mode table once, at device start; writing the file is not enough |
+| [35](#35-183-huawei-devices-would-not-connect-so-first-the-diagnostics-and-the-docs) | 1.8.3: Huawei diagnostics / documents / thanks | for a device we cannot touch, hand out the diagnostics and the checklist |
 
 ---
 
@@ -3180,6 +3181,140 @@ Section 4 of `tools\tmp\mode_menu_test.py` was rewritten for the new contract (6
 3. **Falling back to the "closest" size is worse than an error.** An error at least says "this size is not
    supported"; quietly substituting 3200x2136 feels like "you picked something and it ignored you", so the
    user stops trusting the whole menu instead of that one size.
+
+## 35. 1.8.3: Huawei devices would not connect, so first the diagnostics and the docs
+
+### 35.1 What the user asked for
+
+"现在有个比较严重的问题 搭载鸿蒙4.x系统的华为设备没办法正常使用 ... 注意：以上问题均为华为的鸿蒙系统设备
+我目前无法提供相关设备给你研究 你尽量去查找相关的信息" (session record m01603).  Three symptoms on
+HarmonyOS 4.x Huawei tablets such as the MatePad Pro: the device is not recognised; mirror mode does
+nothing and "cannot find the corresponding output"; extend mode works but the mouse pointer is missing.
+
+After the research we offered three routes (diagnostics only / speculative compatibility changes / send us
+live data).  The user chose the first (session record m01670): add the diagnostics, write a Huawei document
+in the repo and link it from README.md, add a link to it in the program, fix what can be fixed.
+
+### 35.2 Three symptoms, three separate causes
+
+1. **Device not recognised** -- nothing to do with the video code.  When `adb devices` shows no row at all,
+   the window only said "未检测到手机" (no phone detected) and the user had no next step.
+2. **Mirror mode does nothing / no output** -- mirror mode captures the primary screen directly and never
+   touches the virtual display driver (`host/session.py:270`).  The phrase "no corresponding output" only
+   comes from one place: `host/capture.py:383`, "ddagrab: could not find the output for the virtual screen",
+   after which capture falls back to gdigrab.
+3. **No mouse pointer in extend mode** -- the host composites the cursor into the picture with ffmpeg's
+   `draw_mouse=1`; the phone draws no cursor of its own (`android/src/com/droidextend/` has no pointer
+   rendering at all).  So "no white arrow" means either capture did not composite it or the Huawei decode
+   path dropped it.
+
+### 35.3 First prove that mirror mode itself works
+
+We have no Huawei device, but we can at least rule out "mirror mode is broken".  On this machine
+(Xiaomi 16 / Android 16) mirror mode ran with `mode=mirror`, 120 fps, 50 Mbps, h264_nvenc, auto capture:
+
+* capturing `\\.\DISPLAY1` 2560x1600 (primary, NVIDIA RTX 5070 Laptop), device `24091RPADC[d1de99c4]`;
+* both adb reverse tunnels rc=0, the phone shook hands at 2560x1600@120;
+* `ddagrab 输出: #0=2560x1600` -> "采集已开始" (capture started); capture fps climbed 32 -> 96 over 14 s
+  (static desktop, normal).
+
+So mirror mode is fine on AOSP phones.  The problem sits on the HarmonyOS side: its environment (hdc
+grabbing the device, the pure-mode install filter, the USB mode) and its system differences (MediaCodec
+and SurfaceView implementations), not in our mirror code.
+
+### 35.4 Why this release only adds diagnostics
+
+Every public source we found says HarmonyOS' MediaCodec implementation differs from AOSP and that Kirin
+hardware decoders need vendor adaptation, and that HarmonyOS' SurfaceView is stricter about changing the
+size mid-stream.  None of that is verified, and we cannot verify any change on a Huawei machine.  So:
+
+* Changing the decoder (dropping `KEY_LOW_LATENCY`, forcing software decode, changing the Surface
+  lifecycle) affects **every** phone, including AOSP devices that work today.  Betting with unevidenced
+  changes on a machine we cannot touch is a bad trade.
+* Changing capture (forcing gdigrab, drawing our own cursor) has costs too, and "no mouse pointer" has a
+  much more mundane explanation: the "显示鼠标指针" (show the mouse pointer) box is unticked --
+  `draw_mouse` defaults to False at `host/capture.py:637`.
+
+So this release fills the gap that both the user and we are missing: diagnostic output and one readable
+troubleshooting document.  When a real Huawei log arrives, we change the right line.
+
+### 35.5 What the diagnostics now cover
+
+`host/adb.py`:
+
+* `devices()` used to keep only the states it knew (`device` / `offline` / `unauthorized` ...) and silently
+  drop every other row -- which turned the most typical Huawei case, "the device shows up in Device Manager
+  but `adb devices` is empty", into "no phone detected" in the window.  Unknown states are now kept
+  (`state="?"`) and the raw output is stored in `last_devices_out` (`host/adb.py:90`).  Everything
+  downstream still only looks for `state == "device"`, so behaviour is unchanged.
+* `HDC_PORT = 8710` (`host/adb.py:250`) -- adb and Huawei's hdc share it.  New `hdc_processes()`,
+  `hdc_holder()`, and `hdc_conflict()` (`host/adb.py:272`), which returns one sentence with the fix.
+* `phone_info()` (`host/adb.py:291`) reads model, system version, API level,
+  `ro.build.version.harmonyos` / `emui`, and `hw_sc.build.platform.version` in one `getprop`;
+  `is_huawei()` and `describe_phone()` (`host/adb.py:322`) turn that into one line such as
+  "HUAWEI MatePad Pro . HarmonyOS 4.0.0 (API 12)".
+* `huawei_hints()` (`host/adb.py:339`): three checks in order (allow ADB debugging while charging +
+  Transfer files / close hdc / turn off pure mode), ending with the document URL.
+* `install_hint()` (`host/adb.py:381`) translates `adb install` failures into plain words
+  (`INSTALL_FAILED_VERIFICATION_FAILURE` -> pure mode is blocking it, `USER_RESTRICTED` -> a phone-side
+  switch is off, `INSUFFICIENT_STORAGE` -> not enough space).
+
+`host/app.py`:
+
+* `_diagnose_work()` (`host/app.py:1395`) rewritten: adb version, a row per device, model and system for
+  every connected device (plus the three Huawei hints for Huawei hardware); when nothing is there it prints
+  the raw `adb devices -l` output, the USB-mode hint, problem devices from Device Manager, the driver
+  download link and the Huawei hints; then it reports hdc conflicts and ports 27183 / 27184.
+* New Help menu entry "Huawei / HarmonyOS device will not connect?" (`host/app.py:395`) that opens
+  `version.HUAWEI_DOC_URL`.
+* `host/session.py` now logs `install_hint()` in red when the APK install fails -- before this the log held
+  a single line like `Failure [INSTALL_FAILED_VERIFICATION_FAILURE]`, which tells nobody anything.
+
+### 35.6 Documents
+
+* New `docs/HUAWEI.md` (Chinese) and `docs/HUAWEI.en.md` (English), six sections: the three steps in order;
+  a symptom table (8 rows, columns = symptom / most likely cause / how to confirm / what to do); what the
+  program can tell you; known limitations (decode, mid-stream resolution change, the mouse pointer,
+  HarmonyOS 4.x works while pure HarmonyOS does not); what to include when it still fails; sources.
+  The document opens by saying out loud that **most of it comes from Huawei's own documentation and public
+  troubleshooting posts, not from our own tests**, and marks which parts are unverified.
+* `README.md:492` and `README.en.md:577` get a short section at the end of "Frequently asked questions"
+  linking to those two documents.
+
+### 35.7 Thanks
+
+These two problems were not found by us -- users hit them with their own devices:
+
+* **酷安 @Scymore**
+* **抖音 @废紙箱**
+
+Their reports ("HarmonyOS 4.x Huawei device is not recognised / mirror mode does nothing / no mouse pointer
+in extend mode") are what produced the diagnostics in this release, `docs/HUAWEI.md`, and the Help menu link.
+We still do not own a Huawei device; everything confirmed in that document (the USB mode, hdc grabbing
+port 8710, pure mode) comes from their descriptions and public sources, and everything unconfirmed
+(MediaCodec, SurfaceView, the lost cursor) is listed plainly under known limitations.  When there is a
+device and a log, we go further.
+
+### 35.8 Verification
+
+| Item | Result |
+| --- | --- |
+| `python -m py_compile host\app.py host\adb.py host\session.py` | passes |
+| Tools -> Diagnose connection problems... (with a Xiaomi 16 attached) | adb 1.0.41; `Xiaomi 24091RPADC . Android 16 (API 36)`; ports 27183 / 27184 idle |
+| Relative links in the documents | 27 across four files, 0 broken |
+| `docs/HUAWEI.md` / `docs/HUAWEI.en.md` | sections correspond one to one, both LF, both end with a newline |
+| `tools\smoke.py` | all pass |
+
+A Huawei device itself cannot be verified -- which is exactly what the release notes have to say out loud.
+
+### 35.9 Lessons
+
+1. **"No phone detected" is a sentence that leaves the user nowhere to go.** The device is plugged in and
+   Device Manager sees it, and the program says there is nothing; on top of that `devices()` used to throw
+   away the state rows it did not recognise.  Half the value of diagnostics is showing the raw output back.
+2. **Do not change the decode path without the device.** An AOSP machine can prove our code is fine; it
+   cannot prove that a change will help on HarmonyOS.  The risk of breaking every phone is not the same
+   size as the risk of failing to fix one.
 
 ---
 

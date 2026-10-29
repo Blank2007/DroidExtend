@@ -64,7 +64,8 @@ import touch as tu                                                              
 import tray as tray_mod                                                           # noqa: E402
 import update as upd                                                              # noqa: E402
 from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER,   # noqa: E402
-                     EMAILS, REPO_URL, RELEASES_URL, ISSUES_URL, app_title)
+                     EMAILS, REPO_URL, RELEASES_URL, ISSUES_URL, HUAWEI_DOC_URL,
+                     app_title)
 
 # #3: 被开机自启动拉起时不把窗口糊到人家脸上，直接进托盘待命。
 MINIMIZED = "--minimized" in sys.argv
@@ -232,6 +233,10 @@ class App(tk.Tk):
         self.upd_busy = False
         self._manual_win = None
         self._manual_txt = None
+        # 赞赏窗口（1.8.3）和图对象一起留在这里：Tk 不会自己保管 PhotoImage
+        # 的引用，局部变量一回收图片就变白。
+        self._donate_win = None
+        self._donate_photos = []
         self._retarget_job = None
         # _build() arms the 700ms performance tick, and _build() runs again on
         # every language switch -- so the job id is kept here and cancelled
@@ -382,11 +387,21 @@ class App(tk.Tk):
                            command=lambda: self.open_url(ISSUES_URL))
         m_help.add_command(label=i18n.t("检查更新…", "Check for updates..."),
                            command=lambda: self.on_check_updates(manual=True))
+        # 1.8.3: the Huawei checklist is the one document a user with a device
+        # that will not connect actually needs, and it is too long to print in
+        # the log window.  This opens docs/HUAWEI.md on GitHub.
+        m_help.add_command(
+            label=i18n.t("华为 / 鸿蒙设备连不上？", "Huawei / HarmonyOS device will not connect?"),
+            command=lambda: self.open_url(HUAWEI_DOC_URL))
         m_help.add_separator()
         m_help.add_command(label=i18n.t("使用条款与隐私说明", "Terms and privacy"),
                            command=self.on_show_privacy)
         m_help.add_command(label=i18n.t("第三方组件许可", "Third-party licences"),
                            command=self.on_licenses)
+        # 1.8.3: the only place the program ever asks for money, and it is only
+        # reachable from 帮助 -- no pop-up, no timer, nothing in the stream path.
+        m_help.add_command(label=i18n.t("请作者喝杯奶茶…", "Buy the author a milk tea..."),
+                           command=self.on_donate)
         m_help.add_command(label=i18n.t("关于 ", "About ") + APP_NAME, command=self.on_about)
         bar.add_cascade(label=i18n.t("帮助", "Help"), menu=m_help)
 
@@ -453,6 +468,8 @@ class App(tk.Tk):
         try:
             self._manual_win = None
             self._manual_txt = None
+            self._donate_win = None
+            self._donate_photos = []
             for w in list(self.winfo_children()):
                 w.destroy()
             self._build_menu()
@@ -1386,6 +1403,7 @@ class App(tk.Tk):
         import adb
         self.log("—— 连接诊断 ——")
         devs = []
+        a = None
         try:
             a = adb.Adb()
             self.log("  adb %s" % a.version())
@@ -1394,14 +1412,46 @@ class App(tk.Tk):
             self.log("  adb 不可用：%s" % e, "err")
         for d in devs:
             self.log("  手机：%s" % d["label"])
+        # 1.8.3: who the phone is, and -- for Huawei/HarmonyOS -- the three
+        # things that make a perfectly good cable look like a dead one.  The
+        # properties cost one adb round trip per device, not one per question.
+        huawei = False
+        for d in devs:
+            if d["state"] != "device":
+                continue
+            info = adb.phone_info(a, d["serial"])
+            self.log("    %s" % adb.describe_phone(info, d["serial"]))
+            if adb.is_huawei(info):
+                huawei = True
+        if huawei:
+            for line in adb.huawei_hints():
+                self.log("  " + line)
         if not devs:
             self.log("  没有检测到手机", "err")
+            # The raw text is the only evidence left when the list is empty, and
+            # it is exactly what an issue report needs -- so print it whole.
+            raw = getattr(a, "last_devices_out", "") if a is not None else ""
+            body = [l.strip() for l in raw.splitlines()[1:] if l.strip()]
+            if body:
+                self.log("  adb devices -l 原始输出：")
+                for line in body:
+                    self.log("    " + line)
             h = adb.usb_mode_hint(devs)
             if h:
                 self.log("  " + h)
             for status, cls, name in adb.android_problem_devices():
                 self.log("  设备管理器：%s（%s）" % (name, status))
             self.log("  驱动下载：%s" % adb.DRIVER_URL)
+            # A Huawei user with DevEco Studio installed has a perfect driver
+            # and still no device, so this comes last and says what to quit.
+            for line in adb.huawei_hints():
+                self.log("  " + line)
+        elif not any(d["state"] == "device" for d in devs):
+            self.log("  手机在，但 adb 不能对它下命令（看上面的状态）", "err")
+            self.log("  unauthorized = 手机上没点「允许 USB 调试」；offline / no permissions = 授权或驱动有问题")
+        hdc = adb.hdc_conflict()
+        if hdc:
+            self.log("  " + hdc, "err")
         busy = adb.port_listeners()
         for port in adb.PORTS:
             who = busy.get(port)
@@ -1918,6 +1968,88 @@ class App(tk.Tk):
                              "Full licences and sources: Help -> Third-party licences")]
         lines += [i18n.t("（程序目录下的《%s》）", "(the file %s in the program folder)") % LICENSES]
         messagebox.showinfo(i18n.t("关于 %s", "About %s") % APP_NAME, "\n".join(lines), parent=self)
+
+    def on_donate(self):
+        """Two QR codes in one window -- the only place this program asks for money.
+
+        1.8.3: kept behind 帮助 (Help) on purpose.  No nag screen, no timer and
+        nothing in the streaming path -- a free tool that interrupts its own work
+        to ask is worse than one that never asks at all.  The text says out loud
+        that donating is optional, because it is.
+        """
+        if self._donate_win is not None and self._donate_win.winfo_exists():
+            win = self._donate_win
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            return
+        win = tk.Toplevel(self)
+        self._donate_win = win
+        win.title(i18n.t("请作者喝杯奶茶", "Buy the author a milk tea"))
+        win.configure(bg=BG)
+        win.geometry("700x680")
+        win.minsize(560, 520)
+        win.transient(self)
+        head = tk.Label(
+            win, bg=BG, fg=FG, justify="left", anchor="w", wraplength=640,
+            font=("Microsoft YaHei UI", 10),
+            text=i18n.t(
+                "DroidExtend 免费、没有广告、没有内购、没有功能锁，代码全在 GitHub 上。\n"
+                "如果它帮你省下了一块便携屏，或者只是觉得好用，可以请作者喝一杯奶茶，" ""
+                "或者资助一点 token —— 这个项目确实是 AI 写的，token 就是它的电费。\n"
+                "不捐也完全没问题，功能一个都不会少。",
+                "DroidExtend is free: no ads, no in-app purchases, no locked "" "
+                "features, and all of the code is on GitHub.\n"
+                "If it saved you the price of a portable monitor -- or you just "" "
+                "like it -- you can buy the author a milk tea, or sponsor a few "" "
+                "tokens: the project really is written by an AI, and tokens are "" "
+                "its electricity bill.\n"
+                "Not donating is completely fine.  Nothing is behind a paywall."))
+        head.pack(fill="x", padx=18, pady=(16, 10))
+        row = ttk.Frame(win)
+        row.pack(fill="both", expand=True, padx=12, pady=6)
+        photos = []
+        # grid, not pack: the two source images have different aspect ratios
+        # (1200x1459 vs 1080x1620), so packed captions end up at different
+        # heights.  Put every code in row 0 and every caption in row 1 and the
+        # two captions line up with each other.
+        for col_i, (name, caption) in enumerate((
+                ("wechat.png", i18n.t("微信支付", "WeChat Pay")),
+                ("alipay.png", i18n.t("支付宝", "Alipay")))):
+            path = os.path.join(ROOT, "assets", "donate", name)
+            if not os.path.exists(path):
+                continue
+            try:
+                img = tk.PhotoImage(file=path)
+            except Exception:
+                continue
+            # 1200 px is wider than the window and Tk can only scale by an
+            # integer factor -- nearest is fine for a QR code as long as the
+            # factor divides evenly, and 1200 = 4 x 300 does.
+            factor = max(1, int(round(img.width() / 300.0)))
+            if factor > 1:
+                img = img.subsample(factor, factor)
+            tk.Label(row, image=img, bg=BG, bd=0).grid(
+                row=0, column=col_i, padx=10, sticky="n")
+            tk.Label(row, text=caption, bg=BG, fg=FG,
+                     font=("Microsoft YaHei UI", 10)).grid(
+                row=1, column=col_i, pady=(6, 0))
+            photos.append(img)
+        # Tk keeps no reference to a PhotoImage of its own; the list is what
+        # stops the garbage collector from blanking both codes.
+        self._donate_photos = photos
+        if not photos:
+            tk.Label(row, bg=BG, fg="#9aa4b2", wraplength=600,
+                     text=i18n.t(
+                         "这个安装包里没有带赞赏码，可以到项目主页看：%s",
+                         "This build does not carry the QR codes -- see the "" "
+                         "project page: %s") % REPO_URL).pack(padx=18, pady=20)
+        foot = ttk.Frame(win, padding=(12, 8))
+        foot.pack(fill="x", side="bottom")
+        ttk.Button(foot, text=i18n.t("项目主页", "Project home"),
+                   command=lambda: self.open_url(REPO_URL)).pack(side="left")
+        ttk.Button(foot, text=i18n.t("关闭", "Close"),
+                   command=win.destroy).pack(side="right")
 
     def on_reset_settings(self):
         if not messagebox.askyesno(

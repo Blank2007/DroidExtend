@@ -7,6 +7,7 @@ import time
 import i18n
 
 from paths import TOOLS, adb_exe, popen
+from version import REPO_URL
 
 # adb's forked daemon always opens "<temp>\adb.log" before it does anything
 # else.  Inside a sandboxed shell the inherited TEMP is a directory the daemon
@@ -83,6 +84,10 @@ class Adb(object):
     def devices(self):
         """[{'serial','state','model','product','device','transport'}]"""
         rc, out = self.run("devices", "-l", timeout=25)
+        # Kept verbatim for 工具 -> 诊断连接问题…: when the list is empty the
+        # raw text is the only thing that says *why* (an hdc takeover writes
+        # nothing at all here, a driver problem writes a "no permissions" line).
+        self.last_devices_out = out
         rows = []
         for line in out.splitlines()[1:]:
             line = line.strip()
@@ -90,11 +95,16 @@ class Adb(object):
                 continue
             parts = line.split()
             # stderr is merged into stdout, so the daemon's chatter and the
-            # "List of devices attached" banner arrive here too - only a real
-            # device line carries a known state in column two.
-            if len(parts) < 2 or parts[1] not in _DEVICE_STATES:
+            # "List of devices attached" banner arrive here too.  1.8.3: a line
+            # whose second column is not a state we know (a Windows "no
+            # permissions" variant, a half-plugged device, a newer adb's state)
+            # used to be dropped, which turned every odd case into the same
+            # "no phone detected".  Keep it as state "?" instead; callers only
+            # ever look for state == "device", so nothing else changes.
+            if len(parts) < 2:
                 continue
-            rec = {"serial": parts[0], "state": parts[1], "raw": line}
+            state = parts[1] if parts[1] in _DEVICE_STATES else "?"
+            rec = {"serial": parts[0], "state": state, "raw": line}
             for tok in parts[2:]:
                 if ":" in tok:
                     k, v = tok.split(":", 1)
@@ -226,6 +236,164 @@ def port_listeners(ports=_PORTS):
             found[int(parts[0])] = "%s (pid %s)" % (parts[2] or "?", parts[1])
     return found
 
+
+# --------------------------------------------------- Huawei / HarmonyOS (1.8.3)
+# Huawei phones and tablets on HarmonyOS have one failure mode no other vendor
+# has: Huawei's own hdc bridge takes the USB device and listens on port 8710,
+# and adb then reports an empty device list even though the cable, the driver,
+# the USB mode and the debugging switch are all exactly right.  DevEco Studio,
+# Huawei PC Manager and HiSuite each start hdc, and the user usually does not
+# know it is running.  Nothing here changes behaviour -- it lets the diagnosis
+# name the cause instead of repeating "no phone detected" (the reason 1.8.3
+# exists at all; see docs/HUAWEI.md).
+
+HDC_PORT = 8710              # hdc's server port, shared with nothing else of ours
+_HUAWEI_VENDORS = ("huawei", "honor", "harmony")
+
+
+def hdc_processes():
+    """["hdc (pid 1234)"] for Huawei's hdc bridge processes running right now."""
+    script = ("Get-Process -ErrorAction SilentlyContinue | "
+              "Where-Object { $_.ProcessName -match '^(hdc|hdb)' } | "
+              "ForEach-Object { " + chr(34) + "$($_.ProcessName)|$($_.Id)" + chr(34) + " }")
+    rows = []
+    for line in _powershell(script).splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 2 and parts[0]:
+            rows.append("%s (pid %s)" % (parts[0], parts[1]))
+    return rows
+
+
+def hdc_holder():
+    """Who listens on 8710 -- the hdc server -- or "" when the port is free."""
+    return port_listeners((HDC_PORT,)).get(HDC_PORT, "")
+
+
+def hdc_conflict():
+    """A sentence naming an hdc takeover, or "" when nothing suggests one.
+
+    Returned text goes straight into the log, so it carries the fix with it.
+    """
+    procs = hdc_processes()
+    holder = hdc_holder()
+    if not procs and not holder:
+        return ""
+    who = "、".join(procs) if procs else holder
+    return i18n.t(
+        "检测到华为的 hdc（%s），并且端口 %d 被占：hdc 会把设备从 adb 手里抢走，"
+        "插着线也看不到手机。先退出 DevEco Studio / 华为电脑管家 / HiSuite，"
+        "结束 hdc 进程，再重新插拔数据线。",
+        "Huawei's hdc bridge is running (%s) and port %d is taken: hdc takes the "
+        "device away from adb, so a plugged-in phone stays invisible.  Quit DevEco "
+        "Studio / Huawei PC Manager / HiSuite, end the hdc process, then unplug and "
+        "replug the cable.") % (who, HDC_PORT)
+
+def phone_info(adb, serial):
+    """Who the phone is: {manufacturer, model, release, sdk, harmony, emui}.
+
+    One `getprop` for the whole list -- a diagnosis that costs ten adb calls per
+    device is a diagnosis users stop running.
+    """
+    info = {}
+    try:
+        rc, out = adb.run("-s", serial, "shell", "getprop", timeout=25)
+    except Exception:
+        return info
+    want = ("ro.product.manufacturer", "ro.product.model", "ro.product.brand",
+            "ro.build.version.release", "ro.build.version.sdk",
+            "ro.build.version.harmonyos", "ro.build.version.emui",
+            "hw_sc.build.platform.version")
+    for line in out.splitlines():
+        m = re.match(r"\[(.+?)\]\s*:\s*\[(.*?)\]", line.strip())
+        if m and m.group(1) in want and m.group(2):
+            info[m.group(1)] = m.group(2)
+    return info
+
+
+def is_huawei(info):
+    """True when the properties say Huawei, Honor or HarmonyOS."""
+    blob = " ".join((info.get("ro.product.manufacturer", ""),
+                     info.get("ro.product.brand", ""),
+                     info.get("ro.build.version.harmonyos", ""),
+                     info.get("hw_sc.build.platform.version", ""))).lower()
+    return any(v in blob for v in _HUAWEI_VENDORS)
+
+
+def describe_phone(info, serial=""):
+    """One line: model, vendor, OS version.  Empty dicts still print something."""
+    if not info:
+        return serial
+    name = " ".join(b for b in (info.get("ro.product.manufacturer", ""),
+                                info.get("ro.product.model", "")) if b) or serial
+    # Huawei hides the HarmonyOS version under two different properties
+    # depending on the model (ro.build.version.harmonyos on some, the vendor
+    # one on others), so either counts as "this is HarmonyOS".
+    os_name = (info.get("ro.build.version.harmonyos")
+               or info.get("hw_sc.build.platform.version") or "")
+    if os_name:
+        os_bit = os_name if os_name.lower().startswith("harmony") else ("HarmonyOS %s" % os_name)
+    elif info.get("ro.build.version.emui"):
+        os_bit = "EMUI %s" % info["ro.build.version.emui"]
+    else:
+        os_bit = "Android %s" % info.get("ro.build.version.release", "?")
+    sdk = info.get("ro.build.version.sdk", "")
+    return "%s · %s%s" % (name, os_bit, (" (API %s)" % sdk) if sdk else "")
+
+
+def huawei_hints():
+    """The three Huawei-specific things to check, as log lines."""
+    return [
+        i18n.t("华为设备请先确认三件事：",
+               "Huawei devices: three things to check first:"),
+        i18n.t("  1. 开发者选项里打开「仅充电时允许 ADB 调试」；插线后通知栏把 USB 用途"
+               "改成「传输文件」，停在「仅充电」时 adb 看不到手机。",
+               "  1. In Developer options turn on 'Allow ADB debugging in charge only "
+               "mode'; then set USB preferences to 'File transfer', because adb "
+               "cannot see a phone that stayed in charge-only mode."),
+        i18n.t("  2. 关掉 hdc：DevEco Studio、华为电脑管家、HiSuite 都会启动 hdc，"
+               "它和 adb 共用 %d 端口，会把设备抢走。",
+               "  2. Get hdc out of the way: DevEco Studio, Huawei PC Manager and "
+               "HiSuite all start hdc, which shares port %d with adb and takes the "
+               "device away.") % HDC_PORT,
+        i18n.t("  3. 手机端 App 装不上时，检查「设置 → 系统和更新 → 纯净模式」，它"
+               "会拦截应用市场以外来源的安装包。",
+               "  3. If the phone-side app will not install, check Settings -> System "
+               "and updates -> Pure mode: it blocks APKs from outside AppGallery."),
+        i18n.t("  详细排查：%s", "  Full checklist: %s")
+        % (REPO_URL + "/blob/main/docs/HUAWEI.md"),
+    ]
+
+
+_INSTALL_CAUSES = (
+    ("INSTALL_FAILED_VERIFICATION_FAILURE",
+     i18n.t("华为/鸿蒙的「纯净模式」拦下了安装：到 设置 → 系统和更新 → 纯净模式 里"
+            "关掉（或允许本次安装），再试一次。",
+            "Huawei/HarmonyOS 'Pure mode' blocked the install.  Turn it off under "
+            "Settings -> System and updates -> Pure mode (or allow this one "
+            "install) and try again.")),
+    ("INSTALL_FAILED_USER_RESTRICTED",
+     i18n.t("手机上的安装限制（纯净模式 / 家长控制 / 应用锁）拦下了安装，"
+            "先解除限制再试。",
+            "An install restriction on the phone (Pure mode, parental controls, "
+            "app lock) blocked it -- lift the restriction and try again.")),
+    ("INSTALL_FAILED_INSUFFICIENT_STORAGE",
+     i18n.t("手机存储空间不够，清出几百 MB 再试。",
+            "The phone is out of storage -- free a few hundred MB and try again.")),
+)
+
+
+def install_hint(out):
+    """A plain-language cause for a failed `adb install`, or "".
+
+    1.8.3: a Huawei phone can refuse the install through no fault of the cable,
+    and "Failure [INSTALL_FAILED_VERIFICATION_FAILURE]" means nothing to anyone
+    who has not read Android's package manager source.
+    """
+    text = (out or "").upper()
+    for key, msg in _INSTALL_CAUSES:
+        if key in text:
+            return msg
+    return ""
 
 def problem_devices():
     """[(status, class, name)] for every present PnP device Windows dislikes."""
