@@ -156,6 +156,23 @@ class Adb(object):
         rc, out = self.run("-s", serial, "shell", "pm", "path", package, timeout=20)
         return "package:" in out
 
+    def installed_version(self, serial, package="com.droidextend"):
+        """(versionCode, versionName) of the app already on the phone.
+
+        dumpsys prints "versionCode=25 minSdk=..." and "versionName=1.8.4" on
+        separate lines, and some ROMs drop one of them, so each is optional:
+        None means "could not find out" and the caller then says so instead of
+        guessing that an update is needed.
+        """
+        rc, out = self.run("-s", serial, "shell", "dumpsys", "package", package,
+                           timeout=30)
+        if rc != 0:
+            return None, None
+        m = re.search(r"versionCode=(\d+)", out)
+        code = int(m.group(1)) if m else None
+        m = re.search(r"versionName=([^\s]+)", out)
+        return code, (m.group(1) if m else None)
+
     def start_app(self, serial, component="com.droidextend/.MainActivity"):
         return self.run("-s", serial, "shell", "am", "start", "-n", component, timeout=25)
 

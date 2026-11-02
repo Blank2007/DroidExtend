@@ -220,6 +220,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         setContentView(root);
         decoder = new VideoDecoder();
+        // Anything the decoder finds worth saying goes up the wire into the
+        // PC's log.  The phone has no log file a user can go and find, and
+        // "black picture, no idea why" is exactly the report that needs one:
+        // measured on a Huawei tablet, the same build streamed perfectly to a
+        // Xiaomi phone and showed nothing there, with the PC log claiming
+        // everything was fine.
+        decoder.setSink(new VideoDecoder.Sink() {
+            @Override public void onEvent(String msg) {
+                StreamClient c = client;
+                if (c != null) {
+                    c.note(msg);
+                }
+            }
+        });
         input = new InputClient("127.0.0.1", InputClient.PORT);
         registerScreenReceiver();
 
@@ -827,6 +841,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         decoder.setSurface(holder.getSurface());
+        noteSurface(holder, "created");
         startClientOnce();
         if (streamFps > 0) {
             requestFrameRate(streamFps);
@@ -836,12 +851,35 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         decoder.setSurface(holder.getSurface());
+        // A changed aspect ratio (the mirror stream is 16:9, the extended
+        // screen 3:2) makes the SurfaceView relayout, and on some vendor ROMs
+        // that replaces the Surface under the decoder.  Saying so out loud is
+        // the difference between "we cannot reproduce it" and "there it is".
+        noteSurface(holder, "changed to " + width + "x" + height);
         startClientOnce();
     }
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
+        noteSurface(holder, "destroyed");
         decoder.setSurface((Surface) null);
+    }
+
+    /** Log a SurfaceHolder transition to both logcat and the PC's log. */
+    private void noteSurface(SurfaceHolder holder, String what) {
+        String msg = "surface " + what;
+        try {
+            android.graphics.Rect f = holder.getSurfaceFrame();
+            if (f != null) {
+                msg += " frame=" + f.width() + "x" + f.height();
+            }
+            Surface s = holder.getSurface();
+            msg += " valid=" + (s != null && s.isValid());
+        } catch (Throwable ignored) { }
+        AppLog.i(msg);
+        if (decoder != null) {
+            decoder.logEvent(msg);
+        }
     }
 
     /**

@@ -232,51 +232,218 @@ def best_encoder(cfg, ffmpeg=None, log=None):
 # ---------------------------------------------------------------------------
 
 _DDA_OUTPUTS = None
+# Why the last sweep could not open each (adapter, output), so a log can say it
+# out loud.  Empty when everything the machine has was openable; missing
+# indexes simply were openable.
+_DDA_ERRORS = {}
+# adapter index -> "NVIDIA GeForce RTX 5070 Laptop GPU" (as DXGI names it)
+_DDA_ADAPTERS = {}
 _THUMB = 16               # thumbnail edge, in pixels, used to compare outputs
 _THUMB_MAX_DIFF = 12.0    # 0..255 mean absolute difference that still counts as "same picture"
 _THUMB_MARGIN = 4.0       # how far the winner must beat the runner-up
 
+# ddagrab has no adapter argument: which GPU it duplicates is decided by
+# -init_hw_device alone, and without one it always takes adapter 0.  On a
+# laptop with both an integrated and a discrete GPU the panel and a virtual
+# display can sit on different adapters, so "ddagrab 输出: 未发现" is usually
+# "looked at the wrong GPU", not "there is nothing to capture".  Measured on
+# this machine: adapter 0 (NVIDIA) and adapter 1 (AMD) both enumerate the
+# built-in panel, and an adapter index that does not exist is silently
+# answered with the default GPU instead of an error -- so a repeated device id
+# is the only way to tell "no such adapter".
+# Five outputs per adapter is more than any desktop: a machine with four
+# monitors and a virtual display is already unusual, and every extra index is
+# another 0.34 s ffmpeg probe on the path to the first frame.
+_MAX_ADAPTERS = 4
+_MAX_OUTPUTS = 5
+_ADAPTER_RE = re.compile(r"Using device ([0-9a-fA-F]{4}:[0-9a-fA-F]{4}) \((.*)$", re.M)
 
-def detect_ddagrab_outputs(ffmpeg=None, limit=8, timeout=25):
-    """Return [(output_idx, width, height)] for every DXGI output ddagrab can open."""
+
+def _dda_reason(stderr):
+    """The one line of a failed ddagrab probe that explains it."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    for ln in lines:
+        if "ddagrab" in ln and ("ailed" in ln or "rror" in ln or "not" in ln):
+            return ln[:160]
+    for ln in lines:
+        if "iled" in ln or "rror" in ln:
+            return ln[:160]
+    return lines[-1][:160] if lines else ""
+
+
+def _adapter_of(stderr):
+    """Which GPU ffmpeg really opened: (vendor:device, name) or None.
+
+    ffmpeg answers -init_hw_device with a line of the form
+    "Using device 10de:2d18 (NVIDIA GeForce RTX 5070 Laptop GPU)", and that
+    line is the only proof that adapter N exists: for an index past the end
+    of the list ffmpeg quietly falls back to the default adapter.
+    """
+    m = _ADAPTER_RE.search(stderr or "")
+    if not m:
+        return None
+    name = m.group(2)
+    k = name.rfind(")")
+    if k >= 0:
+        name = name[:k]
+    return m.group(1).lower(), name.strip()
+
+
+def _gpu_probe(ff, adapter, idx, timeout):
+    """One one-frame ddagrab grab on *adapter*, output *idx*."""
+    # framerate=30, not 1: ddagrab paces its output, so at 1 fps the first
+    # frame costs a whole second (measured: 2.25 s at 1, 0.31 s at 30).
+    cmd = [ff, "-hide_banner", "-loglevel", "verbose", "-nostdin",
+           "-init_hw_device", "d3d11va=gpu:%d" % adapter,
+           "-filter_hw_device", "gpu",
+           "-f", "lavfi", "-i",
+           "ddagrab=output_idx=%d:framerate=30:draw_mouse=0" % idx,
+           "-vf", "hwdownload,format=bgra,showinfo",
+           "-frames:v", "1", "-f", "null", "-"]
+    return subprocess.run(cmd, capture_output=True, timeout=timeout,
+                          encoding="utf-8", errors="replace",
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def detect_ddagrab_outputs(ffmpeg=None, limit=None, timeout=25):
+    """Return [(adapter, output_idx, width, height)] for every DXGI output.
+
+    All adapters are swept, not just the default one -- see _MAX_ADAPTERS for
+    the machine that made this necessary.  Failures are kept in _DDA_ERRORS
+    ((adapter, output) -> one line) instead of being swallowed.
+
+    The sweeps run side by side (four ffmpeg probes at a time) because each one
+    costs ~0.34 s of startup and this runs every time the capture is restarted:
+    sweeping four adapters one after another took 2.7 s, in parallel it takes
+    ~0.7 s.  Phase one asks every adapter for output 0, which is also how an
+    adapter index past the end of the list is detected; phase two fills in the
+    remaining outputs of the adapters that answered.
+    """
+    global _DDA_ERRORS, _DDA_ADAPTERS
     ff = ffmpeg or ffmpeg_exe()
     if not ff:
         return []
+    _DDA_ERRORS = {}
+    _DDA_ADAPTERS = {}
     found = []
-    misses = 0
-    for idx in range(limit):
-        # framerate=30, not 1: ddagrab paces its output, so at 1 fps the first
-        # frame costs a whole second and the sweep took 5 s -- five seconds of
-        # frozen picture every time the capture had to be restarted, which is
-        # exactly what a UAC prompt or a display-mode change forces.  Measured
-        # on this machine: 2.25 s at framerate=1, 0.31 s at 30, 0.29 s at 60.
-        cmd = [ff, "-hide_banner", "-loglevel", "info", "-nostdin",
-               "-init_hw_device", "d3d11va=gpu", "-filter_hw_device", "gpu",
-               "-f", "lavfi", "-i",
-               "ddagrab=output_idx=%d:framerate=30:draw_mouse=0" % idx,
-               "-vf", "hwdownload,format=bgra,showinfo",
-               "-frames:v", "1", "-f", "null", "-"]
-        try:
-            p = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                               encoding="utf-8", errors="replace",
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except Exception:
+    limit = limit or _MAX_OUTPUTS
+    workers = 4
+
+    def run(pairs):
+        out = {}
+        if not pairs:
+            return out
+        lock = threading.Lock()
+
+        def one(pair):
+            adapter, idx = pair
+            try:
+                p = _gpu_probe(ff, adapter, idx, timeout)
+            except Exception:
+                return
+            with lock:
+                out[pair] = p
+
+        threads = []
+        for pair in pairs:
+            if len(threads) >= workers:
+                threads.pop(0).join()
+            t = threading.Thread(target=one, args=(pair,), name="dda-probe", daemon=True)
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        return out
+
+    # -- phase 1: does each adapter exist, and does its output 0 work? ------
+    first = run([(a, 0) for a in range(_MAX_ADAPTERS)])
+    alive = []
+    seen = {}                 # "10de:2d18" -> the adapter index that first had it
+    for adapter in range(_MAX_ADAPTERS):
+        p = first.get((adapter, 0))
+        if p is None:
             break
-        if p.returncode != 0:
-            # A gap does not mean the list ended: an unavailable output simply
-            # disappears and the next index can still be live.  (Measured here:
-            # #0 = 2560x1600 panel, #1 = 1920x1080 virtual display, #2+ fail
-            # with "Failed to enumerate DXGI output".)
-            misses += 1
-            if misses >= 3:
-                break
-            continue
+        who = _adapter_of(p.stderr)
+        if not who:
+            break
+        if who[0] in seen:
+            # ffmpeg answers an index past the end of the adapter list with the
+            # default GPU instead of an error, so a repeated device id is the
+            # only sign that this adapter does not exist.
+            break
+        seen[who[0]] = adapter
+        _DDA_ADAPTERS[adapter] = who[1]
+        alive.append(adapter)
+
+    # -- phase 2: the remaining outputs -------------------------------------
+    rest = [(a, i) for a in alive for i in range(1, limit)]
+    later = run(rest)
+
+    for adapter in alive:
         misses = 0
-        m = re.search(r"s:(\d+)x(\d+)", p.stderr or "")
-        if not m:
-            break
-        found.append((idx, int(m.group(1)), int(m.group(2))))
+        for idx in range(limit):
+            p = first.get((adapter, 0)) if idx == 0 else later.get((adapter, idx))
+            if p is None:
+                break
+            if p.returncode != 0:
+                # A gap does not mean the list ended: an unavailable output
+                # simply disappears and the next index can still be live.
+                _DDA_ERRORS[(adapter, idx)] = _dda_reason(p.stderr)
+                misses += 1
+                if misses >= 3:
+                    break
+                continue
+            misses = 0
+            m = re.search(r"s:(\d+)x(\d+)", p.stderr or "")
+            if not m:
+                break
+            found.append((adapter, idx, int(m.group(1)), int(m.group(2))))
     return found
+
+
+def _norm_gpu(name):
+    """A card name reduced to what two sources can agree on.
+
+    The monitor enumerator and the ddagrab device log write the same card
+    differently -- "AMD Radeon(TM) 610M" against "AMD Radeon 610M" -- so the
+    comparison strips the trademark marks, the case and the spacing.
+    """
+    n = (name or "").lower()
+    for junk in ("(tm)", "(r)", chr(174), chr(8482), "graphics", "inc.", "corp."):
+        n = n.replace(junk, " ")
+    return " ".join(n.split())
+
+
+def _label(adapter, idx):
+    """How to name an (adapter, output) pair in a log line."""
+    if adapter == 0:
+        return "#%d" % idx
+    return "显卡%d 的 #%d" % (adapter, idx)
+
+
+def describe_outputs(outs=None):
+    """One readable line about a sweep: which GPU, which outputs, what sizes."""
+    outs = ddagrab_outputs() if outs is None else outs
+    if not outs:
+        if not _DDA_ADAPTERS:
+            return "无"
+        return "、".join('显卡%d "%s"' % (a, n) for a, n in sorted(_DDA_ADAPTERS.items()))
+    order = []
+    for adapter, _, _, _ in outs:
+        if adapter not in order:
+            order.append(adapter)
+    parts = []
+    for adapter in order:
+        items = ["#%d=%dx%d" % (i, w, h) for a, i, w, h in outs if a == adapter]
+        name = _DDA_ADAPTERS.get(adapter)
+        head = "显卡%d" % adapter + (' "%s"' % name if name else "")
+        parts.append(head + " " + ", ".join(items))
+    return " | ".join(parts)
+
+
+def ddagrab_adapter_names():
+    """adapter index -> GPU name, from the last sweep."""
+    return dict(_DDA_ADAPTERS)
 
 
 def ddagrab_outputs(ffmpeg=None, refresh=False):
@@ -284,6 +451,11 @@ def ddagrab_outputs(ffmpeg=None, refresh=False):
     if _DDA_OUTPUTS is None or refresh:
         _DDA_OUTPUTS = detect_ddagrab_outputs(ffmpeg)
     return _DDA_OUTPUTS
+
+
+def ddagrab_errors():
+    """output index -> why the last sweep could not open it (may be empty)."""
+    return dict(_DDA_ERRORS)
 
 
 def _run_thumb(cmd, size, timeout=8):
@@ -305,10 +477,11 @@ def _run_thumb(cmd, size, timeout=8):
 _THUMB_FPS = 30
 
 
-def _thumb_output(idx, ff, size=_THUMB):
-    """size x size grayscale thumbnail of one DXGI output."""
+def _thumb_output(adapter, idx, ff, size=_THUMB):
+    """size x size grayscale thumbnail of one DXGI output on *adapter*."""
     return _run_thumb([ff, "-hide_banner", "-loglevel", "error", "-nostdin",
-                       "-init_hw_device", "d3d11va=gpu", "-filter_hw_device", "gpu",
+                       "-init_hw_device", "d3d11va=gpu:%d" % adapter,
+                       "-filter_hw_device", "gpu",
                        "-f", "lavfi", "-i",
                        "ddagrab=output_idx=%d:framerate=%d:draw_mouse=0" % (idx, _THUMB_FPS),
                        "-vf", r"hwdownload,format=bgra,select=gt(n\,0),"
@@ -333,40 +506,72 @@ def _meandiff(a, b):
 
 
 def identify_output(rect, outs, ff, log=None):
-    """Which of *outs* really shows the monitor described by *rect*?  None if unsure."""
+    """Which of *outs* really shows the monitor described by *rect*?
+
+    *outs* entries are (adapter, output, width, height); the answer is
+    (adapter, output), or None when the sweep cannot decide.
+    """
     log = log or (lambda m: None)
     w, h = int(rect["width"]), int(rect["height"])
-    same = [o for o in outs if (o[1], o[2]) == (w, h)]
+    same = [o for o in outs if (o[2], o[3]) == (w, h)]
     if not same:
         return None
     if len(same) == 1:
-        return same[0][0]
+        return same[0][0], same[0][1]
+    # The monitor itself knows which card drives it (DeviceString is the
+    # adapter name) and the sweep knows which card each output lives on.
+    # When those two agree on one candidate there is nothing left to guess;
+    # that is what settles a laptop exposing the same panel through both its
+    # integrated and its discrete GPU.
+    want = _norm_gpu(rect.get("desc"))
+    if want:
+        by_gpu = [o for o in same if _norm_gpu(_DDA_ADAPTERS.get(o[0])) == want]
+        if len(by_gpu) == 1:
+            log("ddagrab: 这块屏在 %s（显示器报告的显卡名对上了）"
+                % _label(by_gpu[0][0], by_gpu[0][1]))
+            return by_gpu[0][0], by_gpu[0][1]
+        if by_gpu:
+            same = by_gpu
+            if len(same) == 1:
+                return same[0][0], same[0][1]
+            log("ddagrab: 同一张显卡上有 %d 个同尺寸输出，按画面比对" % len(same))
+    else:
+        log("ddagrab: 显示器没报告显卡名，按画面比对（待选 %d 个）" % len(same))
+
     ref = _thumb_desktop(rect, ff)
     if ref is None:
         return None
     scored = []
-    for idx, _, _ in same:
-        t = _thumb_output(idx, ff)
+    for adapter, idx, _, _ in same:
+        t = _thumb_output(adapter, idx, ff)
         if t is not None:
-            scored.append((_meandiff(ref, t), idx))
+            scored.append((_meandiff(ref, t), adapter, idx))
     if not scored:
         return None
     scored.sort()
     log("ddagrab: %d 个输出都是 %dx%d，按画面比对 %s" % (
-        len(same), w, h, ", ".join("#%d=%.1f" % (i, d) for d, i in scored)))
-    best_d, best = scored[0]
+        len(same), w, h,
+        ", ".join(_label(a, i) + "=%.1f" % d for d, a, i in scored)))
+    best_d, best_a, best_i = scored[0]
     if best_d > _THUMB_MAX_DIFF:
-        log("ddagrab: 画面差异过大（%.1f），不猜哪个是虚拟屏" % best_d)
+        log("ddagrab: 画面差异过大（%.1f），不猜哪个是这块屏" % best_d)
         return None
     if len(scored) > 1 and scored[1][0] - best_d < _THUMB_MARGIN:
-        log("ddagrab: 两个输出画面太像（%.1f vs %.1f），无法区分" % (best_d, scored[1][0]))
-        return None
-    log("ddagrab: 虚拟屏是 output #%d（画面差异 %.1f）" % (best, best_d))
-    return best
+        # Two outputs showing the same picture to within a couple of grey
+        # levels: on a laptop with an integrated and a discrete GPU the same
+        # panel is enumerated on both, and either answer is right because both
+        # are the same picture.  Refusing to choose here used to push every
+        # extend-mode session onto gdigrab, so pick the first candidate -- the
+        # lowest adapter and output index, which is the old, known-good default.
+        log("ddagrab: 两个输出画面几乎一样（%.1f vs %.1f），选 %s"
+            % (best_d, scored[1][0], _label(best_a, best_i)))
+        return best_a, best_i
+    log("ddagrab: 这块屏是 %s（画面差异 %.1f）" % (_label(best_a, best_i), best_d))
+    return best_a, best_i
 
 
 def pick_ddagrab_output(rect, ffmpeg=None, log=None):
-    """The DXGI output index showing the monitor in *rect*, or None if unsure.
+    """The (adapter, output) showing the monitor in *rect*, or None if unsure.
 
     None is a real answer, not a failure: the caller must then capture with
     gdigrab, which addresses the desktop by offset and is therefore always the
@@ -378,11 +583,10 @@ def pick_ddagrab_output(rect, ffmpeg=None, log=None):
     if not ff:
         return None
     outs = ddagrab_outputs(ff)
-    idx = identify_output(rect, outs, ff, log)
-    if idx is None:
-        log("ddagrab: 找不到虚拟屏对应的输出（可用 %s）" %
-            (", ".join("#%d=%dx%d" % o for o in outs) if outs else "无"))
-    return idx
+    pick = identify_output(rect, outs, ff, log)
+    if pick is None:
+        log("ddagrab: 找不到这块屏对应的输出（探测到 %s）" % describe_outputs(outs))
+    return pick
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +782,10 @@ class Capture(object):
         self.stats = {"frames": 0, "bytes": 0, "dropped": 0, "t": time.time()}
         self.error = None
         self.backend_used = None
+        # Which GPU / output ddagrab ended up duplicating (None for gdigrab).
+        self.dda_adapter = None
+        self.dda_output = None
+        self.dda_gpu = None
         # -- liveness -------------------------------------------------------
         # ffmpeg's ddagrab gives up as soon as Windows invalidates the desktop
         # duplication: AcquireNextFrame returns 887a0026 (DXGI_ERROR_ACCESS_LOST)
@@ -643,22 +851,33 @@ class Capture(object):
             # what the virtual display was just set to.  ddagrab knows nothing
             # about desktop offsets - the monitor *is* the output.
             override = int(c.get("dda_output_idx", -1))
-            idx = override if override >= 0 else pick_ddagrab_output(self.rect, ff, self.log)
-            if idx is None:
-                # Refusing here is the whole point: assuming output 0 would
-                # stream the laptop's own screen whenever it happens to share
-                # the virtual display's resolution.  start() turns this into a
-                # gdigrab attempt, which is exact.
-                raise RuntimeError(
-                    i18n.t("无法确定虚拟显示器对应哪个 ddagrab 输出（%s）",
-                           "Cannot tell which ddagrab output is the virtual display "
-                           "(%s)") %
-                    (", ".join("#%d=%dx%d" % o for o in ddagrab_outputs(ff)) or "一个都没有"))
-            native = dict((o[0], (o[1], o[2])) for o in ddagrab_outputs(ff)).get(idx)
+            if override >= 0:
+                adapter = int(c.get("dda_adapter", 0))
+                idx = override
+            else:
+                pick = pick_ddagrab_output(self.rect, ff, self.log)
+                if pick is None:
+                    # Refusing here is the whole point: assuming output 0 would
+                    # stream the laptop's own screen whenever it happens to share
+                    # the screen's resolution.  start() turns this into a
+                    # gdigrab attempt, which is exact.
+                    raise RuntimeError(
+                        i18n.t("无法确定这块屏对应哪个 ddagrab 输出（%s）",
+                               "Cannot tell which ddagrab output is this screen "
+                               "(%s)") % describe_outputs(ddagrab_outputs(ff)))
+                adapter, idx = pick
+            self.dda_adapter = adapter
+            self.dda_output = idx
+            self.dda_gpu = ddagrab_adapter_names().get(adapter)
+            native = None
+            for a, i, ww, hh in ddagrab_outputs(ff):
+                if (a, i) == (adapter, idx):
+                    native = (ww, hh)
             if native and native != (w, h):
-                self.log("ddagrab: output #%d 是 %dx%d，缩放到 %dx%d" %
-                         (idx, native[0], native[1], w, h))
-            cmd += ["-init_hw_device", "d3d11va=gpu", "-filter_hw_device", "gpu"]
+                self.log("ddagrab: %s 是 %dx%d，缩放到 %dx%d" %
+                         (_label(adapter, idx), native[0], native[1], w, h))
+            cmd += ["-init_hw_device", "d3d11va=gpu:%d" % adapter,
+                    "-filter_hw_device", "gpu"]
             cmd += ["-f", "lavfi", "-i",
                     "ddagrab=output_idx=%d:framerate=%d:draw_mouse=%s"
                     % (idx, fps, mouse)]
@@ -670,11 +889,19 @@ class Capture(object):
                 drops = "hwdownload,format=bgra,scale=%d:%d,format=nv12,%s" % (w, h, drops)
             cmd += ["-vf", drops]
         else:
+            self.dda_adapter = self.dda_output = self.dda_gpu = None
             cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", mouse,
                     "-offset_x", str(int(self.rect["left"])),
                     "-offset_y", str(int(self.rect["top"])),
                     "-video_size", "%dx%d" % (w, h),
                     "-i", "desktop"]
+            # gdigrab's -framerate only asks Windows how often to look, and it
+            # does not cap the answer: measured here, asking for 90 fps on a
+            # 300 Hz desktop produced 183 fps.  Sending more frames than the
+            # phone can show is the exact failure the panel-rate work removed
+            # (the decoder saturates, the socket backlogs, the app jumps from
+            # keyframe to keyframe), so the rate is enforced downstream too.
+            cmd += ["-vf", "fps=%d" % fps]
 
         cmd += ["-c:v", enc]
         codec = self.codec or codec_of(enc)
@@ -782,8 +1009,20 @@ class Capture(object):
                 # virtual display only exists once the session has attached it,
                 # and a list collected before that cannot contain it.
                 outs = ddagrab_outputs(ff, refresh=True)
-                self.log("ddagrab 输出: " +
-                         (", ".join("#%d=%dx%d" % o for o in outs) if outs else "未发现"))
+                # Name the GPU, always: "which graphics card is being used" was
+                # a question the log could not answer, and on a hybrid laptop it
+                # is the difference between working and a black screen.
+                known = ddagrab_adapter_names()
+                if known:
+                    self.log("ddagrab 显卡: " + "、".join(
+                        '显卡%d "%s"' % (a, n) for a, n in sorted(known.items())))
+                self.log("ddagrab 输出: " + describe_outputs(outs))
+                if not outs:
+                    self.log("  ddagrab 一个输出也打不开，只能改用 gdigrab 抓桌面（画质与"
+                             "延迟会差一些）。原因如下，把这段日志发出来就能定位:")
+                    errs = ddagrab_errors()
+                    for key in sorted(errs)[:6]:
+                        self.log("    显卡%d #%d: %s" % (key[0], key[1], errs[key] or "?"))
             try:
                 cmd = self.command(backend)
             except Exception as e:

@@ -40,6 +40,22 @@ HELLO_TIMEOUT = 1.6      # how long the handshake waits for it
 HELLO_LATE = 3.0         # how long a background thread keeps listening
 HELLO_MAX = 32
 
+# After the handshake the phone keeps the same socket open and reports back on
+# it.  Video only ever travels PC->phone, so this direction used to be read by
+# nobody: when the picture stopped on the phone, the host log could not tell
+# whether the frames never arrived, were decoded but never shown, or were never
+# produced in the first place.  Two line kinds close that gap.
+#
+#   DXU1 <recv_fps> <shown_fps> <kbps> <latency_ms>\n   every 2 s
+#   DXL1 <free text>\n                                 when something matters
+#
+# Both are one short line, both are optional: an old app that sends nothing
+# costs one background thread that never sees a byte.
+UP_MAGIC = b"DXU1"
+EVENT_MAGIC = b"DXL1"
+UPLINK_LINE_MAX = 400    # a line longer than this is garbage; drop the buffer
+UPLINK_POLL = 0.5        # how often the reader wakes up to notice a stop
+
 
 def _now_us():
     """The frame/​handshake timestamp clock.  Monotonic, see clock.py.
@@ -96,6 +112,10 @@ class StreamServer(object):
         self.stats = {"sent": 0, "dropped": 0, "bytes": 0, "clients": 0}
         # The panel refresh rate the current phone announced, 0 while unknown.
         self.client_hz = 0
+        # The last "how is it going" line from the phone, and when it arrived.
+        # None until the phone says something (an old app never does).
+        self.client_stats = None
+        self.client_stats_at = 0.0
 
     # -- lifecycle ---------------------------------------------------------
     def start(self):
@@ -141,13 +161,12 @@ class StreamServer(object):
             self._send_thread.start()
             with self._cv:
                 self._cv.notify_all()
-            if self.client_hz <= 0:
-                # The line can be late -- the very first connect after adb
-                # reverse is set up sometimes loses its inline bytes.  Keep
-                # listening in the background instead of starting the encoder
-                # at the wrong rate for the whole session.
-                threading.Thread(target=self._hello_watch, args=(conn, hello_left),
-                                 name="hello-late", daemon=True).start()
+            # Whatever the phone still has to say arrives here: a hello that
+            # missed the handshake window, and then the running commentary.
+            # One thread does both; it lives as long as the connection.
+            threading.Thread(target=self._read_uplink,
+                             args=(conn, hello_left, self.client_hz <= 0),
+                             name="uplink", daemon=True).start()
             self.on_client(addr)
         self.log("监听线程退出")
 
@@ -192,33 +211,83 @@ class StreamServer(object):
             return 0
         return hz if 1 <= hz <= 1000 else 0
 
-    def _hello_watch(self, conn, buf):
-        """Pick up a hello that missed the handshake window.
+    def _read_uplink(self, conn, buf, need_hello):
+        """Read everything the phone sends after the handshake.
 
-        Only the video protocol travels PC->phone, so the sole thing this can
-        swallow is a second hello from the same app -- the same number anyway.
-        It stops as soon as a line arrives, the phone goes away, the connection
-        is replaced, or HELLO_LATE passes with nothing.
+        Three line kinds can show up: the hello again (it is sent twice, so a
+        late first copy is normal), the 2-second DXU1 statistics, and DXL1
+        notes about anything the phone thinks is worth a log line.  A silent
+        phone -- every 1.8.x app -- just leaves this thread parked on recv().
+
+        It ends when the connection is replaced, the server stops, or the phone
+        closes the socket; nothing else in the protocol is read here, so it can
+        never swallow video data.
         """
         try:
-            conn.settimeout(HELLO_LATE)
-            while self.conn is conn and len(buf) < HELLO_MAX and b"\n" not in buf:
-                chunk = conn.recv(HELLO_MAX - len(buf))
+            conn.settimeout(HELLO_LATE if need_hello else UPLINK_POLL)
+            while self.conn is conn and not self._stop.is_set():
+                try:
+                    chunk = conn.recv(1024)
+                except socket.timeout:
+                    if need_hello:
+                        # The late-hello window is over.  Keep listening, just
+                        # without sitting on a 3-second timeout: the phone may
+                        # still start reporting stats later.
+                        need_hello = False
+                        conn.settimeout(UPLINK_POLL)
+                    continue
+                except OSError:
+                    return
                 if not chunk:
                     return
                 buf += chunk
-        except OSError:
-            return
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    self._handle_uplink_line(line.strip())
+                if len(buf) > UPLINK_LINE_MAX:
+                    buf = b""
         finally:
             try:
                 conn.settimeout(None)
             except OSError:
                 pass
-        hz = self._parse_hello(buf)
-        if hz <= 0 or self.conn is not conn:
+
+    def _handle_uplink_line(self, line):
+        if not line:
             return
-        self.client_hz = hz
-        self.log("手机面板刷新率 %dHz（握手之后才到）" % hz)
+        if line.startswith(UP_MAGIC):
+            st = self._parse_stats(line)
+            if st is not None:
+                self.client_stats = st
+                self.client_stats_at = time.time()
+            return
+        if line.startswith(EVENT_MAGIC):
+            text = line[len(EVENT_MAGIC):].strip().decode("utf-8", "replace")
+            if text:
+                self.log("手机: " + text[:200])
+            return
+        if line.startswith(HELLO_MAGIC):
+            if self.client_hz > 0:
+                return
+            hz = self._parse_hello(line + b"\n")
+            if hz:
+                self.client_hz = hz
+                self.log("手机面板刷新率 %dHz（握手之后才到）" % hz)
+
+    @staticmethod
+    def _parse_stats(line):
+        """DXU1 <recv_fps> <shown_fps> <kbps> <latency_ms> -> dict, or None."""
+        parts = line[len(UP_MAGIC):].split()
+        if len(parts) < 4:
+            return None
+        try:
+            recv, shown, kbps, lat = [int(float(p)) for p in parts[:4]]
+        except ValueError:
+            return None
+        if recv < 0 or shown < 0 or kbps < 0 or lat < 0:
+            return None
+        return {"recv_fps": recv, "shown_fps": shown,
+                "kbps": kbps, "latency_ms": lat}
 
     def _drop_client(self, quiet=False):
         conn, self.conn = self.conn, None

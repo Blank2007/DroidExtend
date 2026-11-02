@@ -69,6 +69,9 @@ from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER, 
 
 # #3: 被开机自启动拉起时不把窗口糊到人家脸上，直接进托盘待命。
 MINIMIZED = "--minimized" in sys.argv
+# A real newline in a dialog needs to be spelled out: a two-newline
+# escape inside a wrapped i18n string is a syntax error waiting to happen.
+NL = chr(10)
 # 关窗口之后最多等这么久让后台把虚拟屏收干净。deep 档实测 10.65 秒，留一倍余量。
 QUIT_WAIT = 30.0
 
@@ -269,6 +272,8 @@ class App(tk.Tk):
         # to come back with its colours intact.
         self._log_lines = []
         self.session = Session(log=self.log, on_notice=self._phone_notice)
+        self.session.gpu_cb = self._on_gpu
+        self.session.ask_install = self._ask_install_apk
         self.busy = False
         self.refr_busy = False
         self._build_menu()
@@ -544,7 +549,7 @@ class App(tk.Tk):
         self.be_var.set(_label_for(BACKENDS, s.get("backend", "auto"), BACKENDS[0][1]))
         self.pos_var.set(_label_for(POSITIONS, s.get("position", "right"), POSITIONS[0][1]))
         self.mouse_var.set(bool(s.get("draw_mouse", False)))
-        self.inst_var.set(bool(s.get("install_apk", True)))
+        self.inst_var.set(bool(s.get("reinstall_apk", False)))
         self.match_var.set(bool(s.get("match_phone", True)))
         if hasattr(self, "chk_var"):
             self.chk_var.set(bool(s.get("check_updates", True)))
@@ -586,7 +591,12 @@ class App(tk.Tk):
                 except Exception:
                     pass
         s["draw_mouse"] = bool(self.mouse_var.get())
-        s["install_apk"] = bool(self.inst_var.get())
+        # 1.8.5 -- the box on the form has always been labelled "每次重新安装
+        # APK" (reinstall every time), which is what it now actually controls;
+        # installing and updating is no longer optional, because a phone left on
+        # an old app looks like a broken program rather than an old one.
+        s["install_apk"] = True
+        s["reinstall_apk"] = bool(self.inst_var.get())
         s["match_phone"] = bool(self.match_var.get())
         s["mode"] = self.mode_var.get()
         if hasattr(self, "close_action"):
@@ -707,6 +717,13 @@ class App(tk.Tk):
         self.mon_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.mon_var, style="Mono.TLabel", justify="left",
                   wraplength=430).grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+        # Which graphics card is doing the capture.  On a laptop with two GPUs
+        # the answer decides whether a mode shows a picture at all, so it is
+        # shown here and written to the log rather than left to guesswork.
+        self.gpu_var = tk.StringVar(value=i18n.t("采集显卡: ——", "Capture GPU: -"))
+        ttk.Label(left, textvariable=self.gpu_var, style="Dim.TLabel", justify="left",
+                  wraplength=430).grid(row=5, column=0, sticky="w", pady=(8, 0))
 
         # -- right: quality --------------------------------------------------
         right = ttk.Labelframe(outer, text=i18n.t(" 画质与帧率 ", " Quality and frame rate "),
@@ -969,6 +986,46 @@ class App(tk.Tk):
         self._perf_job = self.after(900, self._poll_perf)
 
     # ------------------------------------------------------------------ utils
+    def _ask_install_apk(self, had, want, name):
+        """Ask whether to update the app on the phone, on the UI thread.
+
+        Reached from the session's worker thread, so the question is handed to
+        the event loop and this waits for the answer.  Waiting is fine: nothing
+        else is happening yet, and the alternative -- installing silently --
+        restarts the app under the user without a word.
+        """
+        box = {}
+        done = threading.Event()
+
+        def ask():
+            try:
+                box["yes"] = messagebox.askyesno(
+                    i18n.t("手机上是 versionCode %d，这个版本带的是 %d（%s）。" + NL + NL +
+                           "现在更新手机端 App 吗？不更新也能继续投屏，但新功能用不上。",
+                           "The phone has versionCode %d, this build ships %d (%s)." + NL + NL +
+                           "Update the app on the phone now?  Streaming works either "
+                           "way, but the new features will not.") % (had, want, name),
+                    parent=self)
+            except Exception:
+                box["yes"] = False
+            finally:
+                done.set()
+
+        try:
+            self.after(0, ask)
+        except Exception:
+            return False
+        done.wait(300)
+        return bool(box.get("yes"))
+
+    def _on_gpu(self, text):
+        """Show which GPU the capture is using (called from a worker thread)."""
+        if text is None:
+            text = i18n.t("采集显卡: ——", "Capture GPU: -")
+        else:
+            text = i18n.t("采集显卡: ", "Capture GPU: ") + text
+        self._later(lambda: self.gpu_var.set(text))
+
     def log(self, msg, tag=None):
         stamped = time.strftime("%H:%M:%S ") + str(msg)
         self.logq.put((stamped, tag))
@@ -1680,7 +1737,10 @@ class App(tk.Tk):
 
     def _install_apk_work(self):
         self._later(lambda: self.stat_var.set(i18n.t("安装 APK…", "Installing the APK...")))
-        self.session.cfg["install_apk"] = self.inst_var.get()
+        # 仅安装 APK 并启动 (install only): that button is the manual "do it
+        # now" and always installs, whatever the update prompt would say.
+        self.session.cfg["install_apk"] = True
+        self.session.cfg["reinstall_apk"] = True
         self.session.find_device()
         self.session.prepare_device()
         self._later(lambda: self.stat_var.set(i18n.t("APK 已就绪", "APK ready")))
@@ -1746,7 +1806,8 @@ class App(tk.Tk):
         # changed, and nothing in the log said why).
         cfg["match_phone"] = bool(self.match_var.get())
         cfg["mode"] = self.mode_var.get()
-        cfg["install_apk"] = bool(self.inst_var.get())
+        cfg["install_apk"] = True
+        cfg["reinstall_apk"] = bool(self.inst_var.get())
         cfg["tray_on_close"] = bool(self.close_action != "quit")
         cfg["autostart"] = bool(self.auto_var.get())
         cfg["vdd_off_mode"] = self.off_mode_var.get()

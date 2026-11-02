@@ -19,6 +19,18 @@ public class VideoDecoder {
     private static final String TAG = "DroidExtend";
     private static final long DEQ_TIMEOUT_US = 10000L;
 
+    /**
+     * Where decoder events go so the host can write them into its own log.
+     *
+     * The phone has no way to hand a log file to the user, and the log is the
+     * only thing that says why a Huawei tablet showed nothing but a black
+     * rectangle while the same app on a Xiaomi phone was fine.  Implemented by
+     * StreamClient, which puts the text on the uplink.
+     */
+    public interface Sink {
+        void onEvent(String msg);
+    }
+
     private MediaCodec codec;
     private Surface surface;
     private boolean configured;
@@ -28,6 +40,10 @@ public class VideoDecoder {
     /** Frames actually handed to the surface.  See renderedFrames(). */
     private long rendered;
     private boolean inputDone;
+    private volatile Sink sink;
+    // Only said once per decoder, so a stream that never resynchronises does
+    // not turn the uplink into a flood.
+    private boolean warnedNoCsd, warnedNoSurface, warnedFirstFrame;
 
     /**
      * How many frames have really been put on screen.
@@ -42,13 +58,35 @@ public class VideoDecoder {
         return rendered;
     }
 
+    /** Route decoder events to the host's log (null to stop). */
+    public void setSink(Sink s) {
+        sink = s;
+    }
+
+    public void logEvent(String msg) {
+        event(msg);
+    }
+
+    private void event(String msg) {
+        Log.i(TAG, msg);
+        Sink s = sink;
+        if (s != null) {
+            try {
+                s.onEvent(msg);
+            } catch (Throwable ignored) {
+                // The uplink is a diagnostic, never a reason to fail.
+            }
+        }
+    }
+
     public synchronized void setSurface(Surface s) {
         surface = s;
         if (configured && codec != null && s != null) {
             try {
                 codec.setOutputSurface(s);
+                event("decoder surface replaced, still " + width + "x" + height);
             } catch (Throwable t) {
-                Log.w(TAG, "setOutputSurface failed, reconfiguring: " + t);
+                event("setOutputSurface failed, reconfiguring: " + oneLine(t));
                 reset();
             }
         }
@@ -95,7 +133,7 @@ public class VideoDecoder {
                 c.start();
                 codec = c;
                 configured = true;
-                Log.i(TAG, "decoder configured " + width + "x" + height
+                event("decoder configured " + width + "x" + height
                         + " lowLatency=" + (attempt == 0)
                         + " csd=" + (csdData == null ? 0 : csdData.length));
                 return;
@@ -104,6 +142,8 @@ public class VideoDecoder {
                     Log.w(TAG, "configure with low latency failed, retrying plain: " + t);
                 } else {
                     Log.e(TAG, "configure failed", t);
+                    event("decoder configure FAILED for " + width + "x" + height
+                            + ": " + oneLine(t));
                     reset();
                     throw new RuntimeException(t);
                 }
@@ -130,10 +170,21 @@ public class VideoDecoder {
             if (!configured) {
                 byte[] found = scanCsd(data, offset, length);
                 if (found == null) {
+                    if (!warnedNoCsd) {
+                        warnedNoCsd = true;
+                        event("first access unit has no SPS/PPS yet, waiting for a keyframe");
+                    }
                     return false;
                 }
                 csd = found;
                 if (surface == null) {
+                    // Silent before: a decoder that never got a surface simply
+                    // threw every frame away and said nothing, which looks
+                    // exactly like a broken link from the PC.
+                    if (!warnedNoSurface) {
+                        warnedNoSurface = true;
+                        event("no surface yet, dropping frames");
+                    }
                     return false;
                 }
                 configure(csd);
@@ -191,13 +242,24 @@ public class VideoDecoder {
                 try {
                     codec.releaseOutputBuffer(idx, true);
                     rendered++;
+                    if (rendered == 1 && !warnedFirstFrame) {
+                        warnedFirstFrame = true;
+                        event("first frame rendered to the surface");
+                    }
                 } catch (Throwable ignored) { }
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                Log.i(TAG, "output format: " + codec.getOutputFormat());
+                event("decoder output format: " + codec.getOutputFormat());
             } else {
                 return;
             }
         }
+    }
+
+    /** One line of an exception, for a log the user can actually send us. */
+    private static String oneLine(Throwable t) {
+        String m = t.getClass().getSimpleName() + ": " + t.getMessage();
+        m = m.replace('\n', ' ').replace('\r', ' ');
+        return m.length() > 120 ? m.substring(0, 120) : m;
     }
 
     /** Walk the Annex-B unit looking for SPS(7)+PPS(8) to build csd-0. */

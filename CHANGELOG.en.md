@@ -59,6 +59,8 @@
 | [33](#33-181-a-resolution-menu-that-did-nothing) | 1.8.1: why the resolution menu did nothing | one missing line let a default override the user's choice |
 | [34](#34-182-why-a-custom-resolution-would-not-stick) | 1.8.2: why a custom resolution would not stick | the driver reads its mode table once, at device start; writing the file is not enough |
 | [35](#35-183-huawei-devices-would-not-connect-so-first-the-diagnostics-and-the-docs) | 1.8.3: Huawei diagnostics / documents | for a device we cannot touch, hand out the diagnostics and the checklist |
+| [36](#36-184-let-the-phone-report-back-so-a-black-screen-leaves-a-trail) | 1.8.4: three ways a mirror can be black / the phone reports back | the phone answers every 2 s, so a black screen leaves a trail |
+| [37](#37-185-on-a-dual-gpu-machine-ddagrab-could-only-see-one-graphics-card) | 1.8.5: dual GPU / which card / APK version check | one screen belongs to two cards; only the right one shows |
 
 ---
 
@@ -3318,6 +3320,285 @@ A Huawei device itself cannot be verified -- which is exactly what the release n
 2. **Do not change the decode path without the device.** An AOSP machine can prove our code is fine; it
    cannot prove that a change will help on HarmonyOS.  The risk of breaking every phone is not the same
    size as the risk of failing to fix one.
+
+## 36. 1.8.4: let the phone report back, so a black screen leaves a trail
+
+### 36.1 What the user said
+
+The user sent the host log (session record m02050, `D:\Download\DroidExtend.log`, 710 lines) and asked
+us to fix mirror mode on Huawei tablets; at the same time they told us our test device is not Huawei:
+
+"设备给你连上了 但是注意 这不是华为设备" (The device is connected for you, but note this is not a Huawei
+device) (session record m02095).
+
+So this release can only do two things: make "where exactly does the black screen break" answerable, and fix
+the bugs that can be proven on this machine.
+
+### 36.2 What those 710 lines already told us
+
+* Install directory `D:\废紙箱\DroidExtend-副屏连接工具\DroidExtend`, log written to
+  `D:\Download\DroidExtend.log`.
+* One real monitor, `\\.\DISPLAY1` 2560x1440 (Generic PnP Monitor), with both `h264_nvenc` and
+  `h264_amf` available -- an NVIDIA + AMD dual-GPU machine.  On top of that, MuMu Virtual Display
+  Adapter (`ROOT\DISPLAY\0000`) and Parsec Virtual Display Adapter (`ROOT\DISPLAY\0001`) are both
+  installed; ours is `ROOT\DISPLAY\0002`.  **Three virtual display adapters on one machine.**
+* Tablet `PCE_W30 [device] 3YL0224703000364`, 2880x1920, 120 Hz panel.
+* **Extend mode succeeded every single time**: `ddagrab 输出: #1=2880x1920` ->
+  `ddagrab 采集已开始 2880x1920@90`.
+* **Mirror mode failed every single time**, always in the same way.
+
+One detail is easy to miss: the ddagrab output list **never contained the real monitor**.  In extend mode it
+was `#1=2880x1920` (sometimes `#1=2880x1920, #2=1920x2880`) and `#0` never opened.  So the
+adapter picked by `-init_hw_device d3d11va=gpu` is not the one the real screen hangs off -- on a dual-GPU
+machine ddagrab sees only one of them.
+
+### 36.3 What the mirror half of the log looks like
+
+A complete mirror failure:
+
+```
+ddagrab 输出: 未发现
+ddagrab: 找不到虚拟屏对应的输出（可用 无）
+  ddagrab 命令构造失败: 无法确定虚拟显示器对应哪个 ddagrab 输出（一个都没有）
+  gdigrab 采集已开始 2560x1440@90
+```
+
+After that there is not a single "capture interrupted" line for 60 seconds (`STALL_LIMIT = 3.0` never
+fired, so gdigrab was producing frames), the user closed it, the log ended.  **On the host everything looked
+fine; on the phone the picture was black.**
+
+The same log has a sharper example: `采集中断：采集进程已退出（DXGI 报 887a0026 ACCESS_LOST…）` ->
+ddagrab rediscovered as "not found" -> fell back to gdigrab -> `gdigrab 启动失败: [gdigrab @ …] Capture area
+(2560,-1920),(5440,0) extends outside window area (0,0),(2560,1440)` -- with the virtual screen parked
+outside the desktop rectangle, gdigrab cannot even start; it retried six times and the session stopped.
+
+### 36.4 Three kinds of black, and the old log could not tell them apart
+
+At that point a black screen could only be one of three things:
+
+1. the host is sending, but what it captures is already black (or nothing);
+2. the host sends, the phone never receives (connection is up, data never reaches the decoder);
+3. the phone decodes, but nothing reaches the Surface (Surface replaced, wrong size, decoder still bound to
+   the old Surface).
+
+The old log **could not separate those three**, because the host never learned anything about the phone side:
+the channel was one-way (1.7.0 had added only the single panel-refresh-rate line).  Whatever the phone knew
+stayed on the phone -- invisible to the user, and to us.
+
+This release adds that reverse channel.
+
+### 36.5 What changed
+
+**Protocol (phone -> host, one line each, newline-terminated)**
+
+| Line | Meaning | Frequency |
+| --- | --- | --- |
+| `DXH1 <panel Hz>` | panel refresh rate (since 1.7.0) | on connect, twice |
+| `DXU1 <recv> <shown> <kbps> <latency_ms>` | what the phone actually got and showed | every 2 s |
+| `DXL1 <one line>` | decoder events (configured, surface replaced, first frame shown...) | when they happen |
+
+**Host side**: `host/server.py` starts a resident reader thread `_read_uplink` after accepting a
+connection and dispatches by line prefix; `client_stats` plus a timestamp stay on the server.
+`host/session.py` writes one log line every 5 seconds:
+
+```
+采集 123 fps · 发送 13.7 Mbps · 手机 收 120 fps / 显示 120 fps · 0 ms
+```
+
+When the phone has not answered yet it says "手机暂无回报（1.8.4 之前的 App 不会回话）", so an older APK is
+never mistaken for a fault.
+
+**Phone side**: `StreamClient` gains `up()` (a locked write of one line) and `note()`;
+`VideoDecoder` gains a `Sink` event interface that reports configure / setSurface / first frame shown
+/ output format changes; `MainActivity` wires that Sink to `StreamClient.note()`, so those events land
+in the host log behind the "手机: " prefix.
+
+**The three black screens now look completely different in the log:**
+
+| Log | Meaning |
+| --- | --- |
+| 采集 N fps · 发送 X Mbps · **手机暂无回报** | phone not connected, or App too old / crashed |
+| sending fine but **手机 收 0 fps** | data arrives but will not decode: no decoder configured, no SPS/PPS, Surface unusable |
+| **手机 收 90 / 显示 0** | decoded but not shown: Surface replaced, SurfaceView size 0, or presentation blocked |
+| **采集 0 fps** | nothing on the host side either (monitor asleep, capture itself is black) |
+
+**Three bugs fixed on the way (all provable here)**
+
+1. **gdigrab's `-framerate` is not a frame-rate cap.**  It is only "how often to look"; on a 300 Hz
+   desktop we asked for 90 and measured 183 fps -- double the bandwidth and encoder load for nothing.  The
+   gdigrab branch now adds `-vf fps=N`; measured 183 -> 88-90.
+2. **ddagrab detection failed silently.**  It only printed "ddagrab 输出: 未发现" and threw away the reason
+   (no output? permission? wrong adapter?).  Now the first stderr line of every index is kept and the first
+   four are printed when falling back to gdigrab -- so the next Huawei log will say which GPU that dual-GPU
+   machine could actually see.
+3. **Wording follows the branch.**  Mirror mode has no virtual screen at all, yet the log kept saying
+   "虚拟屏 / 虚拟显示器", pointing readers in the wrong direction.  It now says "这块屏 / 这台显示器".
+
+### 36.6 Verification
+
+| Case | Result |
+| --- | --- |
+| mirror + gdigrab (this machine, Xiaomi 16, 10 s) | `手机: decoder configured 2560x1600 lowLatency=true csd=51` -> `手机: first frame rendered to the surface` -> `采集 90 fps · 发送 15.2 Mbps · 手机 收 94 fps / 显示 94 fps · 8 ms` |
+| gdigrab frame rate | 183 fps before `-vf fps=90`, a steady 88-90 after |
+| ddagrab failure reasons | here `OUTS [(0, 2560, 1600)]`, `ERR 1 Failed to enumerate DXGI output 1` (same for 2 and 3) |
+| extend mode regression (ddagrab, 2560x1600@120) | `ddagrab 输出: #0=2560x1600, #1=2560x1600` -> `这块屏是 output #1` -> `采集 123 fps · 发送 13.7 Mbps · 手机 收 120 fps / 显示 120 fps · 0 ms`; HUD showed 119 fps of 120 Hz |
+| after stop | desktop back to one screen 2560x1600, virtual screen detached |
+| mirror mode on an AOSP phone here | picture correct -- the mirror code path itself is not broken |
+
+### 36.7 How to read the next black screen
+
+Run mirror mode once, then look for two kinds of lines in the log:
+
+* `手机: …` -- how far the decoder got;
+* `采集 … 手机 收 …` -- what the host sent versus what the phone received.
+
+Send those two blocks (with a few lines of context) and the failing layer becomes obvious.  **This release
+does not promise to fix the Huawei black screen**; it promises that the next black screen will say where it
+breaks.
+
+### 36.8 Lessons
+
+1. **With half a link's logs, do not guess the other half.** A host log saying "I am sending" can never say
+   whether the phone received it.
+2. **A fallback must explain itself.** ddagrab detection threw the reason away and left the user and us in
+   the same place.
+3. **`-framerate` is not a frame-rate cap.** Inside gdigrab it is a polling interval.
+4. **Wording has to follow the branch.** Mirror mode has no virtual screen; saying "virtual screen" sends
+   people looking in the wrong direction.
+
+## 37. 1.8.5: on a dual-GPU machine ddagrab could only see one graphics card
+
+### 37.1 What the user asked for
+
+Three requests, in one sentence (session record m02316):
+
+> I now want that Huawei user to be able to use it.  If you say it is a graphics-card problem, then write out
+> which card is being used.  Then check it again on every app update and, when the Android side has an update,
+> let the user confirm for themselves whether to install it.
+
+So: (1) Huawei has to actually work; (2) if the cause is the GPU, say which GPU the capture is using;
+(3) re-detect on every run, and let the user decide whether the phone app gets updated.
+
+### 37.2 The cause is the GPU, and this machine can reproduce it
+
+The clue 1.8.4 left behind: in that Huawei log the `ddagrab 输出` list **only ever contained the virtual
+screen -- the real 2560x1440 main screen never appeared once**.  Mechanically that means `ddagrab` only sees
+outputs on one GPU, and that user's main screen hangs off the other one.
+
+Before touching anything, the question was measured on this machine (a dual-GPU laptop: NVIDIA RTX 5070
+Laptop + AMD Radeon 610M):
+
+| GPU index | device ffmpeg actually opened | idx 0 | idx 1 |
+| --- | --- | --- | --- |
+| 0 | `10de:2d18 (NVIDIA GeForce RTX 5070 Laptop GPU)` | 2560x1600 | Failed to enumerate DXGI output |
+| 1 | `1002:164e (AMD Radeon(TM) 610M)` | 2560x1600 | Failed to enumerate DXGI output |
+| 2 | `10de:2d18 (NVIDIA...)` | 2560x1600 | same |
+| 3 | `10de:2d18 (NVIDIA...)` | 2560x1600 | same |
+
+Two facts fell out at once:
+
+* **the same screen can be enumerated on both GPUs** (that is simply how a hybrid laptop is wired), so
+  "find it by size" always yields two candidates -- and the old code, once the pictures also looked alike,
+  gave up.  That is exactly why extend mode here kept falling back to gdigrab;
+* **a nonexistent GPU index does not fail**, ffmpeg silently falls back to the default adapter (indices 2
+  and 3 still report the NVIDIA device).  So "does GPU N exist" cannot be answered from the return code,
+  only from whether the device name repeats.
+
+Also: the `ddagrab` filter has no adapter parameter; the GPU can only be chosen with
+`-init_hw_device d3d11va=gpu:N`.
+
+### 37.3 The fix: probe every card, then match on the card name the monitor reports
+
+Detection in `host/capture.py` changed from "one adapter, idx 0..7" to two parallel stages (4 threads
+each):
+
+1. probe idx 0 on GPU 0..3, de-duplicating by `Using device <ven:dev>` -- a repeated device name means
+   that index does not exist;
+2. probe idx 1..4 on the GPUs that survived.
+
+It no longer returns `(idx, w, h)` but `(adapter, idx, w, h)`, and the log line becomes
+`显卡0 "NVIDIA GeForce RTX 5070 Laptop GPU" #0=2560x1600 | 显卡1 "AMD Radeon(TM) 610M" #0=2560x1600`.
+
+Picking an output now prefers **the card name the monitor itself reports** (`DeviceString` is the adapter
+name), normalised (lower case, `(TM)` and spacing removed) and compared with the probed names:
+
+```
+ddagrab: 这块屏在 #0（显示器报告的显卡名对上了）
+```
+
+Only when that fails (a virtual screen has no real adapter name) does it fall back to size + thumbnail
+comparison; and when the pictures are too alike it no longer gives up but takes the first candidate -- two
+identical pictures mean the same screen, so either choice is right.  The old "refuse to guess" decision was
+what pushed every extend session back to gdigrab here.
+
+The ddagrab branch in `Capture.command` now passes `-init_hw_device d3d11va=gpu:<adapter>`, and
+`Capture` remembers `dda_adapter` / `dda_output` / `dda_gpu` for the log and the window.
+
+### 37.4 "The card in use" goes into the log and into the window
+
+Capture and encode are two separate GPU decisions (gdigrab copies from the desktop, but NVENC still runs on
+the NVIDIA card), so the log says both:
+
+```
+采集显卡: 显卡0 "NVIDIA GeForce RTX 5070 Laptop GPU"（输出 #1） ／ 编码: NVIDIA 显卡的 NVENC
+采集显卡: 桌面拷贝（gdigrab，不经过显卡） ／ 编码: NVIDIA 显卡的 NVENC
+```
+
+The "device and display" box on the left gains a `采集显卡` line that follows the session: the card
+actually used while streaming, "——" after a stop.
+
+### 37.5 The APK: checked on every run, installed only on the user's word
+
+The old rule was "installed once, never again": 1.6.9 on the phone, 1.8.4 on the PC, and the symptom was
+"some feature does nothing".
+
+`_prepare_apk()` now does four things on every run:
+
+1. reads `versionCode` / `versionName` straight out of the bundled `DroidExtend.apk` (new file
+   `host/apkver.py`, which decodes the binary `AndroidManifest.xml` by hand -- no aapt dependency);
+2. reads the version already installed on the phone with `dumpsys package` (`adb.installed_version()`);
+3. nothing installed -> install;
+4. installed but older -> **ask in a dialog**; if the user says no, streaming continues and the log says
+   "这次不更新".
+
+The "reinstall the APK every time" checkbox now means literally that: install unconditionally.  Previously it
+was really an "install or not" switch.
+
+### 37.6 Verification
+
+| Case | Result |
+| --- | --- |
+| detection time (two GPUs here) | 1.49 s (the serial version took 2.71 s) |
+| detection result | `显卡0 "NVIDIA GeForce RTX 5070 Laptop GPU" #0=2560x1600`, `显卡1 "AMD Radeon(TM) 610M" #0=2560x1600` |
+| mirror mode (2560x1600) | `ddagrab: 这块屏在 #0（显示器报告的显卡名对上了）` -> `采集显卡: 显卡0 "NVIDIA..."（输出 #0）` -> `启动采集: ddagrab` (before this change it fell back to gdigrab) |
+| extend mode (2560x1600@120) | four candidates `显卡0 #0 / #1，显卡1 #0 / #1` -> `两个输出画面几乎一样（0.4 vs 0.4），选 #1` -> `采集显卡: 显卡0 "NVIDIA..."（输出 #1）` -> `启动采集: ddagrab` |
+| APK already current | `APK 已是最新（手机 1.8.4 / versionCode 25，这里 1.8.4）` |
+| phone has an old build, user says no | `手机上的 App 是旧的：手机 1.8.4（versionCode 25），这里是 1.8.5（26）` -> `这次不更新` |
+| phone has an old build, user says yes | as above, then `安装成功: Success` |
+| 1.8.5 installed on the phone, one 12 s extend run | `APK 已是最新（手机 1.8.5 / versionCode 26，这里 1.8.4）` -> `采集显卡: 显卡0 "NVIDIA..."（输出 #1）` -> `采集 117 fps · 发送 20.7 Mbps · 手机 收 32 fps / 显示 0 fps` (the phone was locked during the test; shown fps only counts once it is unlocked) |
+
+### 37.7 What it costs, and what it still does not do
+
+* GPU 0..3 x idx 0..4 is at most 20 ffmpeg launches in theory; because "this index does not exist" ends the
+  scan for that GPU it is 2 + 8 in practice, 1.5 s.  It runs once per capture start and is cached afterwards.
+* **This release still cannot promise the Huawei side lights up.**  What it can promise: if that real screen
+  really hangs off the other GPU, ddagrab will now look for it, use it when found, and write into the log
+  which card and which output.  If the log says "显卡1 的 #0 也打不开" as well, then DXGI cannot get at that
+  screen at all and only gdigrab is left -- in that case the phone side is where to look, not the GPU.
+* If a mirror is still black while extend works, send these three lines from the log: `ddagrab 显卡:`,
+  `采集显卡:`, and `采集 N fps · 发送 X Mbps · 手机 收 N / 显示 N`.
+
+### 37.8 Lessons
+
+1. **"Not detected" and "not there" are different things.** ffmpeg silently falls back on an out-of-range GPU
+   index; the return code can never tell you.
+2. **One screen can belong to two cards.** Two candidates is not a fault, it is a normal laptop; the job is
+   to pick one that can explain itself, not to give up.
+3. **"Installed" is not "current".** The version number existed all along; nobody ever asked the phone.
+4. **"Let the user confirm" was the right request.** A silent install restarts the phone app the moment
+   streaming begins, which yanks the user's picture away once more.
+
+---
 
 ---
 

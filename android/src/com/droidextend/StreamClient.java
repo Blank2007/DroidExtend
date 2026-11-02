@@ -58,6 +58,9 @@ public class StreamClient extends Thread {
     private volatile boolean running = true;
     private Socket socket;
     private OutputStream control;
+    // The decoder reports from its own thread while the pump thread sends its
+    // statistics; both write the same OutputStream, so they take turns.
+    private final Object upLock = new Object();
     private long clockSkewUs;
 
     public StreamClient(String host, int port, VideoDecoder decoder, Listener listener,
@@ -115,6 +118,35 @@ public class StreamClient extends Thread {
         try { if (socket != null) socket.close(); } catch (IOException ignored) { }
         socket = null;
         control = null;
+    }
+
+    /**
+     * Send one log line back to the host.
+     *
+     * Video only ever travels PC->phone, so a black picture on the phone used
+     * to be invisible in the PC's log: "the frames never arrived" and "the
+     * decoder was handed frames it never put on screen" looked exactly the
+     * same from there.  Every interesting thing the decoder does travels up
+     * this channel as "DXL1 <text>", and the host writes it into its log with
+     * a 手机: (phone) prefix.
+     */
+    public void note(String text) {
+        up("DXL1 " + text);
+    }
+
+    private void up(String line) {
+        OutputStream os = control;
+        if (os == null) {
+            return;
+        }
+        synchronized (upLock) {
+            try {
+                os.write((line + "\n").getBytes("UTF-8"));
+                os.flush();
+            } catch (Throwable ignored) {
+                // The socket may be gone; the stream itself will notice.
+            }
+        }
     }
 
     private void connectAndStream(byte[] unit) throws IOException {
@@ -285,6 +317,13 @@ public class StreamClient extends Thread {
                         + " samples=" + latCount
                         + (skipUntilKey ? " (dropping to keyframe)" : ""));
                 stats(st);
+                // Tell the host the same numbers, so its log can tell a phone
+                // that receives nothing from one that decodes without ever
+                // showing a frame.
+                up("DXU1 " + Math.round(st.streamFps)
+                        + " " + Math.round(st.shownFps)
+                        + " " + Math.round(st.mbps * 1000)
+                        + " " + Math.round(Math.max(st.latencyMs, 0)));
                 status(w + "x" + h + "  " + Math.round(st.streamFps) + " fps", true);
                 frames = 0;
                 bytes = 0;

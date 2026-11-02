@@ -48,7 +48,7 @@ def migrate_legacy(log=None):
 KEYS = (
     "width", "height", "hz", "fps", "bitrate_mbps", "rate_control", "quality",
     "encoder", "preset", "backend", "position", "mode", "draw_mouse",
-    "install_apk", "match_phone",
+    "install_apk", "reinstall_apk", "match_phone",
     # 1.6.0 -- position="custom" needs somewhere to keep the coordinates.
     "pos_x", "pos_y",
 )

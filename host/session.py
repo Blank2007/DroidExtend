@@ -12,9 +12,11 @@ The flow, in order:
 
 Stop() reverses all of it, including removing the extra desktop area.
 """
+import os
 import threading
 import time
 
+import apkver
 import i18n
 import win_display as wd
 from capture import Capture
@@ -47,6 +49,7 @@ DEFAULTS = {
     "pos_y": 0,              # position="custom": top edge,  in primary's coords
     "monitor": "",           # mirror mode: adapter name to copy
     "install_apk": True,
+    "reinstall_apk": False,
     "auto_launch": True,
     "touch": True,           # phone touches -> real mouse input
     "match_phone": True,     # size the virtual screen like the phone's own panel
@@ -80,6 +83,7 @@ class Session(object):
         self._last = time.time()
         self._last_frames = 0
         self._last_bytes = 0
+        self._last_stat_log = 0.0
         self._display_applied = None
         # The adapter the driver last gave us.  Stopping a stream takes the
         # screen off the desktop but leaves the device node enabled, so the next
@@ -109,6 +113,14 @@ class Session(object):
         self._stream_t0 = 0.0
         self._last_boot_try = 0.0
         self._last_cfg_check = 0.0
+        # Called with a one-line description of the GPU doing the capture, so
+        # the window can show it.  1.8.5: "which graphics card is it using?"
+        # had no answer anywhere in the program.
+        self.gpu_cb = None
+        # Called as ask_install(old_code, new_code, new_name) -> True/False when
+        # the phone's app is older than the one shipped here.  None (headless
+        # tests) means "do not touch the phone".
+        self.ask_install = None
 
     # ------------------------------------------------------------------ state
     @property
@@ -639,24 +651,7 @@ class Session(object):
         if rc2 != 0:
             self.log("  触摸通道 reverse 失败: " + out2.strip())
 
-        if self.cfg.get("install_apk"):
-            apk = apk_path()
-            if self.adb.is_installed(s):
-                self.log("APK 已安装：跳过安装（改代码后请重新构建并勾选“重新安装”）")
-            else:
-                self.log("正在安装 %s …" % apk)
-                ok, out = self.adb.install(s, apk)
-                self.log("  安装%s: %s" % ("成功" if ok else "失败", out.strip().splitlines()[-1] if out.strip() else ""))
-                if not ok:
-                    # 1.8.3: Huawei's 纯净模式 refuses the APK with an error code
-                    # nobody can read, and the user is left thinking the cable is
-                    # broken.  install_hint() names the switch to turn off.
-                    from adb import install_hint
-                    hint = install_hint(out)
-                    if hint:
-                        self.log("  " + hint, "err")
-                    raise RuntimeError(i18n.t("APK 安装失败：%s",
-                                      "APK install failed: %s") % (hint or out.strip()))
+        self._prepare_apk(s)
 
         if self.cfg.get("auto_launch"):
             self.adb.force_stop(s)
@@ -664,6 +659,82 @@ class Session(object):
             rc, out = self.adb.start_app(s)
             self.log("已启动手机端 App (rc=%s)" % rc)
         return True
+
+    def _prepare_apk(self, s):
+        """Make sure the phone runs this build, and say which version it has.
+
+        1.8.5: "installed" used to mean "done".  A phone could sit on 1.6.9 for
+        months while the PC ran 1.8.4 and the only symptom was a missing
+        feature nobody could explain.  The APK's own versionCode is read out of
+        the shipped file (apkver) and compared with the one on the phone; an
+        older app is *offered*, never silently replaced and never silently
+        skipped, because the whole point of the update is that the person
+        holding the phone gets a say.  "每次重新安装 APK" still forces it.
+        """
+        apk = apk_path()
+        # A source checkout without a build has no DroidExtend.apk; say so
+        # instead of failing later inside adb.install with a bare path.
+        if not apk or not os.path.exists(apk):
+            self.log(i18n.t("找不到随程序附带的 APK（DroidExtend.apk），这次不改手机端",
+                            "No DroidExtend.apk next to the program; leaving the phone alone"))
+            return
+        code, name = apkver.read_apk_version(apk)
+        ver = name or "?"
+        if not self.adb.is_installed(s):
+            self.log(i18n.t("手机上没有 App，正在安装 %s（%s）…",
+                            "The app is not on the phone; installing %s (%s)...")
+                     % (apk, ver))
+            self._install_apk(s, apk)
+            return
+        if self.cfg.get("reinstall_apk"):
+            self.log(i18n.t("按设置重新安装 APK（%s）…",
+                            "Reinstalling the APK as configured (%s)...") % ver)
+            self._install_apk(s, apk)
+            return
+        had, had_name = self.adb.installed_version(s)
+        if not code or not had:
+            self.log(i18n.t("APK 已安装：跳过安装（查不到手机上的版本号，勾“每次重新安装 APK”可强制重装）",
+                            "APK installed: skipping (could not read the phone's "
+                            "version; tick Reinstall to force it)"))
+            return
+        if code <= had:
+            self.log(i18n.t("APK 已是最新（手机 %s / versionCode %d，这里 %s）",
+                            "APK up to date (phone %s / versionCode %d, here %s)")
+                     % (had_name or "?", had, ver))
+            return
+        self.log(i18n.t("手机上的 App 是旧的：手机 %s（versionCode %d），这里是 %s（%d）",
+                        "The phone's app is older: %s (versionCode %d) on the phone, "
+                        "%s (%d) here")
+                 % (had_name or "?", had, ver, code))
+        ask = self.ask_install
+        yes = False
+        if ask is not None:
+            try:
+                yes = bool(ask(had, code, ver))
+            except Exception as e:
+                self.log(i18n.t("  询问安装时出错: %s", "  Asking about the update failed: %s") % e)
+        if not yes:
+            self.log(i18n.t("  这次不更新（新旧的界面与协议可能对不上，出问题先更新手机端）",
+                            "  Not updating this time (old and new can disagree; "
+                            "update the phone app first if anything looks odd)"))
+            return
+        self._install_apk(s, apk)
+
+    def _install_apk(self, s, apk):
+        ok, out = self.adb.install(s, apk)
+        last = out.strip().splitlines()[-1] if out.strip() else ""
+        self.log(i18n.t("  安装%s: %s", "  Install %s: %s")
+                 % (i18n.t("成功", "ok") if ok else i18n.t("失败", "failed"), last))
+        if ok:
+            return True
+        # 1.8.3: Huawei's 纯净模式 refuses the APK with an error code nobody can
+        # read, and the user is left thinking the cable is broken.
+        from adb import install_hint
+        hint = install_hint(out)
+        if hint:
+            self.log("  " + hint, "err")
+        raise RuntimeError(i18n.t("APK 安装失败：%s", "APK install failed: %s")
+                           % (hint or out.strip()))
 
     # -------------------------------------------------------------- 3. stream
     def start_stream(self, port=HOST_PORT):
@@ -817,6 +888,50 @@ class Session(object):
             self._capture_cfg = cfg
             self._stream_fps = fps
             self.log("编码器 %s / 采集 %s" % (cfg["encoder"], backend))
+            self._log_gpu(cap)
+
+    def _log_gpu(self, cap):
+        """Name the card that grabs the picture, and the one that encodes it.
+
+        ddagrab has no adapter argument: without -init_hw_device it always
+        duplicates GPU 0.  On a laptop where the screen sits on the other card
+        that is the whole reason one mode works and the other shows nothing, so
+        the answer belongs in the log and in the window, not in a support reply.
+        The encoder is a separate card decision: gdigrab reads the desktop through
+        Windows, but NVENC still runs on the NVIDIA card.
+        """
+        adapter = getattr(cap, "dda_adapter", None)
+        enc = str(self.cfg.get("encoder", ""))
+        if "nvenc" in enc:
+            enc_txt = i18n.t("NVIDIA 显卡的 NVENC", "NVIDIA GPU (NVENC)")
+        elif "amf" in enc:
+            enc_txt = i18n.t("AMD 显卡的 AMF", "AMD GPU (AMF)")
+        elif enc.startswith("libx"):
+            enc_txt = i18n.t("CPU（%s）", "CPU (%s)") % enc
+        else:
+            enc_txt = enc or i18n.t("未知", "unknown")
+        if adapter is None:
+            grab = i18n.t("桌面拷贝（gdigrab，不经过显卡）", "desktop copy (gdigrab, no GPU)")
+            short = i18n.t("gdigrab 抓桌面 · 编码 %s", "gdigrab · encode %s") % enc_txt
+        else:
+            name = getattr(cap, "dda_gpu", None) or i18n.t("名字未知", "unknown")
+            idx = getattr(cap, "dda_output", 0)
+            grab = i18n.t('显卡%d "%s"（输出 #%d）', 'GPU %d "%s" (output #%d)') % (
+                adapter, name, idx)
+            short = i18n.t('显卡%d "%s" · 编码 %s', 'GPU %d "%s" · encode %s') % (
+                adapter, name, enc_txt)
+        self.log(i18n.t("采集显卡: %s ／ 编码: %s", "Capture card: %s / encode: %s")
+                 % (grab, enc_txt))
+        self._notify_gpu(short)
+
+    def _notify_gpu(self, text):
+        cb = getattr(self, "gpu_cb", None)
+        if cb is None:
+            return
+        try:
+            cb(text)
+        except Exception:
+            pass
 
     def _wait_hello(self, limit):
         """Block until the phone's panel rate is known, but never past limit."""
@@ -866,6 +981,7 @@ class Session(object):
     # ------------------------------------------------------ capture watchdog
     STALL_LIMIT = 3.0        # seconds of silence before we call it dead
     RECOVER_WAIT = 4.0       # seconds between restart attempts
+    STATS_EVERY = 5.0        # how often _stat_line() goes to the log
 
     def _watch_capture(self):
         cap = self.capture
@@ -979,6 +1095,30 @@ class Session(object):
             self.stats["dropped"] = self.server.stats["dropped"]
             self.stats["sent"] = self.server.stats["sent"]
         self._last = now
+        # Every 5 seconds, one line that says where the frames went.  A phone
+        # that shows nothing leaves the user (and any bug report) guessing
+        # between four very different causes: the host stopped producing
+        # frames, the socket is not carrying them, the phone receives them but
+        # never decodes them, or it decodes them and never puts them on screen.
+        # The phone reports its own numbers (Server.client_stats), so this one
+        # line answers that question without a cable and a logcat.
+        if (self.server is not None and self.server.conn is not None
+                and now - self._last_stat_log >= self.STATS_EVERY):
+            self._last_stat_log = now
+            self.log(self._stat_line())
+
+    def _stat_line(self):
+        line = "采集 %.0f fps · 发送 %.1f Mbps" % (self.stats["fps"],
+                                                self.stats["mbps"])
+        srv = self.server
+        st = getattr(srv, "client_stats", None) if srv is not None else None
+        age = time.time() - (getattr(srv, "client_stats_at", 0.0) or 0.0)
+        if st and age < 6.0:
+            line += " · 手机 收 %d fps / 显示 %d fps · %d ms" % (
+                st["recv_fps"], st["shown_fps"], st["latency_ms"])
+        else:
+            line += " · 手机暂无回报（1.8.4 之前的 App 不会回话）"
+        return line
 
     # ------------------------------------------------------------------ stop
     def attached_display(self):
@@ -1064,6 +1204,7 @@ class Session(object):
                 self._shut_vdd_down()
             except Exception as e:
                 self.log("彻底关闭虚拟屏时出错: %s" % e)
+        self._notify_gpu(None)
         self.log("会话已停止")
 
     def shutdown(self):
