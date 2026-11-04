@@ -183,6 +183,50 @@ class Adb(object):
         rc, out = self.run("-s", serial, "shell", "wm", "size", timeout=20)
         return out.strip()
 
+    def screen_portrait(self, serial):
+        """True while the display is taller than it is wide.
+
+        A rotation index alone cannot answer this: it is measured against the
+        panel's natural orientation, and a tablet's natural orientation is
+        often portrait, so the same index means upright on one device and
+        sideways on another.  The size the window manager is using right now
+        answers the actual question on any hardware.
+        """
+        try:
+            rc, out = self.run("-s", serial, "shell",
+                               "dumpsys window displays | grep -m2 -E 'init=|cur='",
+                               timeout=20)
+        except Exception:
+            rc, out = 1, ""
+        if rc == 0:
+            m = re.search(r"cur=(\d+)x(\d+)", out)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                if w != h:
+                    return h > w
+        # Fallback for a ROM that prints neither: rotation index (even means
+        # unchanged from the panel's own orientation) times that orientation.
+        try:
+            rc, out = self.run("-s", serial, "shell",
+                               "dumpsys input | grep -m1 SurfaceOrientation",
+                               timeout=20)
+        except Exception:
+            return None
+        if rc != 0:
+            return None
+        m = re.search(r"SurfaceOrientation:\s*(\d+)", out)
+        if not m:
+            return None
+        try:
+            size = self.physical_size(serial)
+        except Exception:
+            return None
+        if not size or size[0] == size[1]:
+            return None
+        natural_portrait = size[1] > size[0]
+        turned = int(m.group(1)) % 2 == 1
+        return natural_portrait != turned
+
     def physical_size(self, serial):
         """The panel's real resolution as (width, height), or None.
 

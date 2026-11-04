@@ -19,10 +19,20 @@ public final class Prefs {
     public static final String PRIVACY = "privacy";
     /** Whether the panel may animate at all; see Anim. */
     public static final String ANIM = "anim";
+    /** Settings button size, 0..3; see HudView.GEAR_DP. */
+    public static final String GEAR_SIZE = "gear_size";
+    /** "auto" (follow the tablet) / "landscape" / "portrait". */
+    public static final String ORIENTATION = "orientation";
+
+    public static final String ORIENT_AUTO = "auto";
+    public static final String ORIENT_LANDSCAPE = "landscape";
+    public static final String ORIENT_PORTRAIT = "portrait";
 
     private final SharedPreferences sp;
+    private final Context ctx;
 
     public Prefs(Context ctx) {
+        this.ctx = ctx;
         sp = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
@@ -70,6 +80,42 @@ public final class Prefs {
 
     public void setGear(float fx, float fy) {
         sp.edit().putFloat(GEAR_X, fx).putFloat(GEAR_Y, fy).apply();
+    }
+
+    /** 0..3; 1 is the size the button always had. */
+    public int gearSize() {
+        return sp.getInt(GEAR_SIZE, 1);
+    }
+
+    public void setGearSize(int level) {
+        sp.edit().putInt(GEAR_SIZE, Math.max(0, Math.min(HudView.GEAR_DP.length - 1, level)))
+                .apply();
+    }
+
+    /**
+     * How the screen may turn.
+     *
+     * "auto" (default) follows the tablet: lay it down for a wide desktop, stand
+     * it up and the desktop turns with it.  The two fixed values are for people
+     * who keep the tablet in one position and do not want it turning -- and for
+     * the case where the tablet's own idea of which way is up is wrong.
+     */
+    public String orientation() {
+        String v = sp.getString(ORIENTATION, null);
+        if (v != null && v.length() > 0) {
+            return v;
+        }
+        // The first run has to pick something.  A phone is held upright and a
+        // wide desktop in that shape is a stamp in a letterbox, so a phone keeps
+        // the locked landscape it has always had.  A tablet is the device that
+        // gets stood up on a desk, so it follows its own rotation from the
+        // start -- and either can be changed in the settings.
+        boolean tablet = ctx.getResources().getConfiguration().smallestScreenWidthDp >= 600;
+        return tablet ? ORIENT_AUTO : ORIENT_LANDSCAPE;
+    }
+
+    public void setOrientation(String value) {
+        sp.edit().putString(ORIENTATION, value).apply();
     }
 
     /** "auto" (default) means follow the system locale. */

@@ -84,6 +84,8 @@ class Session(object):
         self._last_frames = 0
         self._last_bytes = 0
         self._last_stat_log = 0.0
+        self._stat_seen = None
+        self._orientation_hinted = None
         self._display_applied = None
         # The adapter the driver last gave us.  Stopping a stream takes the
         # screen off the desktop but leaves the device node enabled, so the next
@@ -182,9 +184,24 @@ class Session(object):
             self.log("  读不到手机分辨率，按 %dx%d 处理" % (w, h))
             return w, h, hz
 
-        # The app is locked to landscape, so the panel's long side is its width.
-        pw, ph = max(size), min(size)
-        self.log("  手机分辨率 %dx%d" % (pw, ph))
+        # Which way round the panel is being held decides which number is the
+        # width.  The app used to be locked to landscape, so the long side was
+        # always the width; since 1.8.6 it can stand up, and a tablet on a stand
+        # then wants a tall screen instead of a wide desktop with bars above and
+        # below it (issue #4).
+        portrait = None
+        try:
+            if self.adb is not None:
+                portrait = self.adb.screen_portrait(self.serial)
+        except Exception as e:
+            self.log("  读手机方向失败: %s" % e)
+        if portrait is True:
+            pw, ph = min(size), max(size)
+        else:
+            pw, ph = max(size), min(size)
+        self.log("  手机分辨率 %dx%d（%s）" % (
+            pw, ph, "竖屏" if portrait else ("横屏" if portrait is False
+                                            else "方向未知，按横屏处理")))
 
         best = wd.best_mode(name, pw, ph, hz)
         if not best:
@@ -527,10 +544,10 @@ class Session(object):
             return name, w, h, hz, note
 
         self.log(i18n.t(
-            "  重启一次驱动，让它读到刚写进模式表的 %dx%d（约 4 秒，不会弹窗）"
+            "  重启一次驱动，让它读到刚写进模式表的 %dx%d（约 4–7 秒，不会弹窗）"
             % (w, h),
             "  restarting the driver once so it reads the %dx%d that was just "
-            "added to its mode table (about 4 s, no prompt)" % (w, h)))
+            "added to its mode table (about 4-7 s, no prompt)" % (w, h)))
         ok, new = vd.reload_modes((w, h), log=self.log)
         if not ok or not new:
             self.log(i18n.t(
@@ -589,10 +606,10 @@ class Session(object):
                 # before the screen is attached, so point the user there.
                 self.log(i18n.t(
                     "显示模式未更改：驱动还没读过这个尺寸。点「停止」再「开始投屏」，"
-                    "程序会自动重启一次驱动把它用上（约 4 秒）",
+                    "程序会自动重启一次驱动把它用上（约 4–7 秒）",
                     "Display mode unchanged: the driver has not read this size "
                     "yet. Stop and start casting again and the program restarts "
-                    "the driver once to pick it up (about 4 s)."))
+                    "the driver once to pick it up (about 4-7 s)."))
             else:
                 self.log("显示模式未更改")
             return False
@@ -753,6 +770,10 @@ class Session(object):
         self._capture_cfg = None
         self._stream_fps = 0
         self._stream_t0 = time.time()
+        # Every session gets its first stats line back: the fingerprint of the
+        # last one belongs to a stream that is already over.
+        self._stat_seen = None
+        self._last_stat_log = 0.0
         if self.cfg.get("touch", True):
             # Hand the injector the display *name*, not just its rectangle: it
             # re-reads the real position on a short timer so that dragging the
@@ -814,6 +835,36 @@ class Session(object):
         # make the app's 700 ms reconnect loop queue behind it.
         threading.Thread(target=self._ensure_capture, name="capture-boot",
                          daemon=True).start()
+
+    def _orientation_hint(self):
+        """Say it out loud when the phone and the virtual screen disagree.
+
+        The size of the virtual screen is decided before the phone connects, so
+        a rotation in the middle of a session cannot be followed live: Windows
+        would have to move the screen and the encoder would have to restart.
+        Saying so beats leaving the user to wonder why the picture is lying on
+        its side -- and stopping and starting again takes about three seconds.
+        """
+        if not self.cfg.get("match_phone", True) or self.server is None:
+            return
+        if not self.rect:
+            return
+        upright = getattr(self.server, "client_portrait", None)
+        w = int(self.rect.get("width", 0) or 0)
+        h = int(self.rect.get("height", 0) or 0)
+        if upright is None or w <= 0 or h <= 0:
+            return
+        if upright == (h > w):
+            return
+        # Once per direction, not once per second: the phone says which way up
+        # it is a moment after the handshake, so testing only at connect time
+        # would check an empty answer, and repeating it every second would bury
+        # the rest of the log.
+        if getattr(self, "_orientation_hinted", None) == upright:
+            return
+        self._orientation_hinted = upright
+        self.log("手机现在是%s，虚拟屏是%s；点「停止」再「开始投屏」就按手机的方向重排"
+                 % ("竖屏" if upright else "横屏", "竖屏" if h > w else "横屏"))
 
     def _wanted_fps(self):
         """The frame rate to encode at, and the panel rate it came from.
@@ -981,7 +1032,18 @@ class Session(object):
     # ------------------------------------------------------ capture watchdog
     STALL_LIMIT = 3.0        # seconds of silence before we call it dead
     RECOVER_WAIT = 4.0       # seconds between restart attempts
-    STATS_EVERY = 5.0        # how often _stat_line() goes to the log
+    # The shortest gap between two stats lines.  A line every five seconds is
+    # 120 lines in a ten-minute session, all but the first saying the same
+    # thing; _stat_key() has to change as well for a second line to be worth
+    # printing, so a steady stream logs one line and a stream that falls apart
+    # logs whenever it falls apart (at most once per STATS_EVERY).
+    STATS_EVERY = 10.0
+    # Do not say anything during the first seconds of a stream: capture climbs
+    # from 30 to 120 fps, the decoder has shown nothing yet, and each of those
+    # numbers would be a line.  STATS_LATE is the escape hatch -- a stream that
+    # never settles (the phone shows nothing at all) still gets one line.
+    STATS_QUIET = 12.0
+    STATS_LATE = 20.0
 
     def _watch_capture(self):
         cap = self.capture
@@ -1095,17 +1157,62 @@ class Session(object):
             self.stats["dropped"] = self.server.stats["dropped"]
             self.stats["sent"] = self.server.stats["sent"]
         self._last = now
-        # Every 5 seconds, one line that says where the frames went.  A phone
+        # One line that says where the frames went.  A phone
         # that shows nothing leaves the user (and any bug report) guessing
         # between four very different causes: the host stopped producing
         # frames, the socket is not carrying them, the phone receives them but
         # never decodes them, or it decodes them and never puts them on screen.
         # The phone reports its own numbers (Server.client_stats), so this one
-        # line answers that question without a cable and a logcat.
-        if (self.server is not None and self.server.conn is not None
-                and now - self._last_stat_log >= self.STATS_EVERY):
-            self._last_stat_log = now
-            self.log(self._stat_line())
+        # line answers that question without a cable and a logcat.  It is
+        # printed once, and then only when the numbers move into another
+        # bucket: a line every few seconds trains people to stop reading.
+        if self.server is not None and self.server.conn is not None:
+            self._orientation_hint()
+            key = self._stat_key()
+            if (key is not None and self._stat_moved(key)
+                    and now - self._last_stat_log >= self.STATS_EVERY):
+                self._stat_seen = key
+                self._last_stat_log = now
+                self.log(self._stat_line())
+
+    def _stat_key(self):
+        """What a stats line would say, as numbers.  None means "not yet".
+
+        The line is printed when this changes enough (_stat_moved); comparing
+        the numbers rather than bucketing them is what keeps 119 fps from
+        looking like a change from 120 fps.
+        """
+        since = time.time() - self._stream_t0
+        if since < self.STATS_QUIET:
+            return None
+        srv = self.server
+        st = getattr(srv, "client_stats", None) if srv is not None else None
+        age = time.time() - (getattr(srv, "client_stats_at", 0.0) or 0.0)
+        if not st or age >= 6.0:
+            return ("手机没回报", self.stats["fps"])
+        if (st["shown_fps"] < 0.6 * (self._stream_fps or 1)
+                and since < self.STATS_LATE):
+            # Still ramping towards the configured rate.  A picture that stays
+            # under this line past STATS_LATE is the case worth printing.
+            return None
+        return ("手机有回报", float(st["recv_fps"]), float(st["shown_fps"]),
+                float(st["latency_ms"]))
+
+    def _stat_moved(self, key):
+        """Is this worth another line?
+
+        25 % on a frame rate (at least 15 fps) or 50 ms on latency.  Anything
+        finer turns a healthy stream into a wall of near-identical lines --
+        119 then 120 then 119 again.
+        """
+        old = self._stat_seen
+        if old is None or old[0] != key[0] or len(old) != len(key):
+            return True
+        for i, (a, b) in enumerate(zip(old[1:], key[1:])):
+            span = 50.0 if i == 2 else max(15.0, 0.25 * abs(a))
+            if abs(b - a) > span:
+                return True
+        return False
 
     def _stat_line(self):
         line = "采集 %.0f fps · 发送 %.1f Mbps" % (self.stats["fps"],

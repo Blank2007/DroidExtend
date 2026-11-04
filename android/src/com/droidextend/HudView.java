@@ -47,8 +47,19 @@ public class HudView extends View {
     private final Paint dotPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gearPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gearBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint gearPressBg = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint centrePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint centreSubPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+    /**
+     * Button sizes in dp, in the order the settings cycle through them.
+     *
+     * One size cannot fit both a 6 inch phone held in the hand and a 13 inch
+     * tablet on a stand, so the size is a preference now; index 1 is the 21dp
+     * the button always had.
+     */
+    public static final float[] GEAR_DP = {18f, 21f, 26f, 32f};
+    private float gearDp = GEAR_DP[1];
 
     private final float d;
     private final int cText;
@@ -74,6 +85,9 @@ public class HudView extends View {
     private float gearCx;
     private float gearCy;
     private float gearR;
+    private float downX;
+    private float downY;
+    private final float dragSlop;
     private float dragDx;
     private float dragDy;
     private boolean dragging;
@@ -106,6 +120,8 @@ public class HudView extends View {
         gearPaint.setStrokeCap(Paint.Cap.ROUND);
         gearBgPaint.setColor(0x40060C18);
         gearBgPaint.setStyle(Paint.Style.FILL);
+        gearPressBg.setColor(0x70060C18);
+        gearPressBg.setStyle(Paint.Style.FILL);
 
         centrePaint.setColor(cText);
         centrePaint.setTextSize(sp(19));
@@ -115,6 +131,12 @@ public class HudView extends View {
         centreSubPaint.setColor(cDim);
         centreSubPaint.setTextSize(sp(14));
         centreSubPaint.setTextAlign(Paint.Align.CENTER);
+        // The same threshold the system uses to tell a tap from a scroll.  The
+        // old 9dp was measured from the button centre instead of from the
+        // finger's own landing point, so a tap that landed anywhere but the
+        // middle counted as movement before the finger had moved at all.
+        dragSlop = Math.max(dp(8f), android.view.ViewConfiguration.get(ctx)
+                .getScaledTouchSlop());
     }
 
     private float dp(float v) {
@@ -127,6 +149,20 @@ public class HudView extends View {
 
     public void setListener(Listener l) {
         listener = l;
+    }
+
+    /**
+     * Button size, 0 (small) to 3 (extra large).  Out of range values clamp.
+     *
+     * The hit area is never smaller than the ink, and never smaller than a
+     * finger: see onGear().
+     */
+    public void setGearSize(int level) {
+        int i = level < 0 ? 0 : (level >= GEAR_DP.length ? GEAR_DP.length - 1 : level);
+        gearDp = GEAR_DP[i];
+        gearR = dp(gearDp);
+        layoutGear();
+        invalidate();
     }
 
     public void setPanelWanted(boolean on) {
@@ -224,7 +260,7 @@ public class HudView extends View {
     @Override
     protected void onSizeChanged(int w, int h, int ow, int oh) {
         super.onSizeChanged(w, h, ow, oh);
-        gearR = dp(21);
+        gearR = dp(gearDp);
         layoutGear();
     }
 
@@ -321,13 +357,18 @@ public class HudView extends View {
      * sliders stay legible and cost three lines and three dots.
      */
     private void drawGear(Canvas c) {
-        c.drawCircle(gearCx, gearCy, gearR, gearBgPaint);
+        // Pressed state, so a press that has not moved yet still answers.  The
+        // button used to only light up while dragging, which made a normal tap
+        // feel like the app had not heard it.
+        int ink = dragging ? cGood : cText;
+        c.drawCircle(gearCx, gearCy, gearR * (dragging ? 1.08f : 1f),
+                dragging ? gearPressBg : gearBgPaint);
         gearPaint.setStyle(Paint.Style.STROKE);
-        gearPaint.setStrokeWidth(dp(2.1f));
-        gearPaint.setColor(dragging ? cGood : cText);
+        gearPaint.setStrokeWidth(dp(dragging ? 2.6f : 2.1f));
+        gearPaint.setColor(ink);
         float span = gearR * 0.52f;
         float[] knobs = {-0.34f, 0.30f, -0.04f};
-        dotPaint.setColor(dragging ? cGood : cText);
+        dotPaint.setColor(ink);
         for (int i = 0; i < 3; i++) {
             float row = gearCy + gearR * (i - 1) * 0.36f;
             c.drawLine(gearCx - span, row, gearCx + span, row, gearPaint);
@@ -335,10 +376,18 @@ public class HudView extends View {
         }
     }
 
+    /**
+     * Is this touch on the button?
+     *
+     * The target is deliberately larger than the drawn circle: 28dp was hard
+     * to hit with a finger on glass, and this button is the only way back into
+     * the settings once the read-out covers something.  34dp is the smallest
+     * that still feels like a button rather than a skilful aim.
+     */
     private boolean onGear(MotionEvent e) {
         float dx = e.getX() - gearCx;
         float dy = e.getY() - gearCy;
-        float r = gearR * 1.35f;
+        float r = Math.max(gearR * 1.5f, dp(34f));
         return dx * dx + dy * dy <= r * r;
     }
 
@@ -354,6 +403,8 @@ public class HudView extends View {
                 }
                 dragging = true;
                 moved = false;
+                downX = e.getX();
+                downY = e.getY();
                 dragDx = e.getX() - gearCx;
                 dragDy = e.getY() - gearCy;
                 invalidate();
@@ -363,11 +414,18 @@ public class HudView extends View {
                 if (!dragging) {
                     return false;
                 }
-                // Anyone who has fought an on-screen button knows the pain of
-                // a 2-pixel slip turning a press into a no-op, so a drag only
-                // starts once the finger has really travelled.
-                if (Math.abs(e.getX() - gearCx) + Math.abs(e.getY() - gearCy)
-                        > dp(9)) {
+                // A drag only starts once the finger has really travelled --
+                // but "travelled" is measured from where the finger went down,
+                // not from the button's centre.  Measuring from the centre was
+                // the bug behind issue #4: the button is 21dp across, so a tap
+                // near its rim (which is where people aim) was already further
+                // than the threshold from the centre, the very first move event
+                // set moved, and the tap came out as a drag -- the settings
+                // panel opened only when the finger hit the middle exactly and
+                // did not twitch.
+                if (!moved
+                        && Math.abs(e.getX() - downX) + Math.abs(e.getY() - downY)
+                        > dragSlop) {
                     moved = true;
                 }
                 if (moved) {

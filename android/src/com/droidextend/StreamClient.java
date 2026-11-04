@@ -53,6 +53,10 @@ public class StreamClient extends Thread {
     // The fastest rate this panel can display, 0 when unknown.  Announced to
     // the host before the handshake, so it can choose the capture rate.
     private final int panelMaxHz;
+    // True while the tablet is standing up.  The host uses it to decide which
+    // way round the virtual screen should be, so a tablet held upright gets a
+    // tall desktop instead of a wide one with bars above and below.
+    private volatile boolean portrait;
     private final VideoDecoder decoder;
     private final Listener listener;
     private volatile boolean running = true;
@@ -71,6 +75,11 @@ public class StreamClient extends Thread {
         this.listener = listener;
         this.panelMaxHz = panelMaxHz;
         setName("droid-extend-stream");
+    }
+
+    /** Say which way the tablet is being held; read by the next hello. */
+    public void setPortrait(boolean upright) {
+        portrait = upright;
     }
 
     public void shutdown() {
@@ -170,10 +179,17 @@ public class StreamClient extends Thread {
         // ffmpeg starts.  Nothing is sent when the rate is unknown.
         byte[] hello = panelMaxHz > 0
                 ? ("DXH1 " + panelMaxHz + "\n").getBytes("UTF-8") : null;
+        // A separate line, not another word on the hello: a 1.8.5 host parses
+        // the hello with a plain float() and would drop the whole line -- and
+        // the refresh rate with it -- if a second number appeared after it.
+        // Unknown lines are ignored by every version.
+        byte[] facing = ("DXP1 " + (portrait ? 1 : 0) + "\n").getBytes("UTF-8");
         if (hello != null) {
             control.write(hello);
             control.flush();
         }
+        control.write(facing);
+        control.flush();
         InputStream raw = s.getInputStream();
         DataInputStream in = new DataInputStream(raw);
 
@@ -211,6 +227,8 @@ public class StreamClient extends Thread {
             control.write(hello);
             control.flush();
         }
+        control.write(facing);
+        control.flush();
         decoder.setFormat(w, h, fps);
         videoSize(w, h, fps);
         if (listener != null) {
@@ -225,6 +243,11 @@ public class StreamClient extends Thread {
         long shownPrev = decoder.renderedFrames();
         long bytes = 0;
         long lastReport = System.currentTimeMillis();
+        // The stats are refreshed every 2 s (the overlay and the host both read
+        // them), but the log line is written every fifth refresh, and straight
+        // away when the stream starts dropping frames: one line every ten
+        // seconds is a record, one every two seconds is noise.
+        int reportCount = 0;
         long latSum = 0;
         long latMax = 0;
         int latCount = 0;
@@ -310,12 +333,15 @@ public class StreamClient extends Thread {
                 st.catchingUp = skipUntilKey;
                 // This is the number that matters: ms from the frame leaving
                 // the encoder on the PC to the decoder handing it to the screen.
-                Log.i(TAG, "perf fps=" + Math.round(st.streamFps)
-                        + " mbps=" + String.format(java.util.Locale.US, "%.2f", st.mbps)
-                        + " latency_avg_ms=" + Math.round(st.latencyMs)
-                        + " latency_max_ms=" + Math.round(st.latencyMaxMs)
-                        + " samples=" + latCount
-                        + (skipUntilKey ? " (dropping to keyframe)" : ""));
+                reportCount++;
+                if (reportCount % 5 == 0 || skipUntilKey) {
+                    Log.i(TAG, "perf fps=" + Math.round(st.streamFps)
+                            + " mbps=" + String.format(java.util.Locale.US, "%.2f", st.mbps)
+                            + " latency_avg_ms=" + Math.round(st.latencyMs)
+                            + " latency_max_ms=" + Math.round(st.latencyMaxMs)
+                            + " samples=" + latCount
+                            + (skipUntilKey ? " (dropping to keyframe)" : ""));
+                }
                 stats(st);
                 // Tell the host the same numbers, so its log can tell a phone
                 // that receives nothing from one that decodes without ever

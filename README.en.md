@@ -29,7 +29,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 > **Every line of source was written by an AI coding agent** — inside **DeepSeek Harness**, using the
 > **deepseek-flash** model, written from scratch in a handful of sessions between 2026-10-10 and
 > 2026-10-16; every release since
-> (currently 1.6.8) has been maintained by it in this same repository.
+> has been maintained by it in this same repository.
 > The human ([@Blank2007](https://github.com/Blank2007)) supplies the requirements, plugs in a real device, clicks
 > "Yes" when admin rights are needed, and signs off on the result.
 >
@@ -47,14 +47,14 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
 | ⚡ **Low latency** | Measured end to end at **5–11 ms** (from the host grabbing a frame to the phone decoding it); it was 31–42 ms before the fix |
 | 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
-| 🧹 **Unplug the cable and it's gone** | Hit stop or pull the cable and the virtual display is removed from the system immediately — no ghost monitor left behind |
+| 🧹 **Stop and it is gone** | Hit `停止` (Stop), or quit the program, and the virtual display is removed from the system immediately — no ghost monitor left behind. Pulling the cable without stopping leaves the screen in place for now; stop once after reconnecting and it goes |
 | 🎛️ **Fully hardware-accelerated pipeline** | `ddagrab` (desktop capture) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU |
-| 📦 **Works out of the box** | A 34 MB installer with ffmpeg / adb / the driver / the APK all inside — nothing else to prepare after installing |
+| 📦 **Works out of the box** | A 37 MB installer with ffmpeg / adb / the driver / the APK all inside — nothing else to prepare after installing |
 | 🔄 **In-app updates** | "Check for updates" downloads the new version right there in the app and verifies size / SHA256 / file format — **if verification fails, it doesn't install**; no browser required |
 
 > **Just want the ready-made binaries?**
-> * Installer ⬇️ **[DroidExtend-Setup-1.6.8.exe](https://github.com/Blank2007/DroidExtend/releases/latest)** (35 MB)
-> * Phone app ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)** (206 KB)
+> * Installer ⬇️ **[the latest release](https://github.com/Blank2007/DroidExtend/releases/latest)** (named like `DroidExtend-Setup-1.8.6.exe`, 37 MB)
+> * Phone app ⬇️ **[DroidExtend.apk](https://github.com/Blank2007/DroidExtend/releases/latest/download/DroidExtend.apk)** (210 KB)
 >
 > You can also grab them from the [Releases](https://github.com/Blank2007/DroidExtend/releases) page.
 > Note that the installer's **filename carries the version number**, so the link above points at the releases page
@@ -72,14 +72,14 @@ This document only covers how to use it.
 
 ## 0. Install (recommended — just keep clicking Next)
 
-Double-click **`DroidExtend-Setup-1.6.8.exe`** → keep clicking "Next" all the way through.
+Double-click **`DroidExtend-Setup-<version>.exe`** → keep clicking "Next" all the way through.
 **The very first page is "Select install location"**; it defaults to the directory below — click "Browse…" next to it
 to put it somewhere else.
 
 * Installs to `%LOCALAPPDATA%\Programs\DroidExtend` by default (changeable), **never asks for admin rights**, and
   works immediately after installing
 * Creates Start menu and desktop shortcuts automatically; to remove it, click **卸载 DroidExtend** in the Start menu
-* The installer is 34 MB and already packs ffmpeg, adb, the virtual display driver files and the phone app APK,
+* The installer is 37 MB and already packs ffmpeg, adb, the virtual display driver files and the phone app APK,
   so **there is nothing else to prepare after installing**
 
 > The installer only writes files into your user directory — **it leaves the system alone**. The virtual display
@@ -118,6 +118,12 @@ Pick your resolution and frame rate in the window, then click **▶ 开始投屏
 The first run installs the APK onto the phone and launches it automatically; a few seconds later the phone is a
 second screen.
 
+> Since 1.8.5 every `开始投屏` (Start casting) first compares the version of the app on the phone with the one
+> shipped here: if the phone's copy is older you are asked whether to update it. Answer "no" and casting still
+> works, only the two ends may disagree. Tick `每次重新安装 APK` (reinstall every time) to install unconditionally.
+> The `设备与显示器` box on the left also gained a `采集显卡` (capture GPU) line: which adapter grabs the
+> picture and which one encodes it.
+
 > `DroidExtend.exe` is the portable main program (the `_internal\` folder next to it holds its runtime libraries —
 > the two must stay together). `启动 DroidExtend.bat` launches the same program from source and is kept as a
 > fallback: if the exe ever gets blocked by antivirus, double-clicking that does exactly the same thing.
@@ -142,6 +148,8 @@ The menu bar is at the top (**File / Tools / Help**), and the status bar at the 
 repository URL and where the settings file lives.
 The left half of the middle area shows device and display status; the right half is where you tune quality and
 frame rate.
+Besides the phone model, the left half has carried a `采集显卡` (capture GPU) line since 1.8.5: which adapter
+grabs the picture and which one encodes it.
 
 | Item | Description |
 | --- | --- |
@@ -153,6 +161,8 @@ frame rate.
 | **Quality Q** | Lower is better quality and higher bitrate. `18~20` is essentially visually lossless; from `24` up you can see blocking |
 | **Encoder** | Every entry is **actually test-encoded** before it is offered. Available here: `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` (NVIDIA), `h264_amf` / `hevc_amf` (AMD), `libx264` / `libx265` (pure CPU fallback). Ones that are compiled in but cannot run on this machine (`*_qsv` and `av1_amf` here) are removed from the menu, and the log says so |
 | **Capture** | `auto` picks ddagrab (Desktop Duplication API, zero-copy into NVENC); switch to gdigrab on older GPUs or if something misbehaves |
+| **Capture GPU (read-only)** | Which adapter is actually grabbing the picture. The old ddagrab could only see one card on a two-GPU machine; since 1.8.5 every card's outputs are probed and the log says `采集显卡: 显卡0 "NVIDIA …"（输出 #1） ／ 编码: NVIDIA 显卡的 NVENC` (capture GPU / encoder) |
+| **APK version (read-only)** | The app on the phone is compared with the bundled APK by versionCode; an older phone side asks once for confirmation (see the previous section) |
 | **Screen position** | Place the virtual display to the right / left / above / below the primary screen |
 | **Test the USB cable speed** | Measures how many Mbps this cable can actually do and clamps the bitrate cap to a safe value (stop the stream first for a more accurate reading) |
 | **Stop** | Stops the stream and **removes the virtual display from the system** (see below) |
@@ -198,9 +208,27 @@ display, Windows treats it as a real mouse on that display.
 > Coordinates are normalized against the **entire virtual desktop**, and the program sets per-monitor DPI awareness
 > at startup accordingly; so even if you set Windows scaling above 125%, touch points still line up.
 
+### Screen direction and the settings button (phone side)
+
+Two entries in the phone's display settings exist for tablets (since 1.8.6):
+
+* **Screen direction**: follow the tablet / always landscape / always portrait. A tablet defaults to
+  "follow the tablet", a phone to "always landscape" (held upright with a 16:9 picture, the image shrinks
+  to a third of the screen height, which is worse than turning the phone sideways). In portrait the host
+  builds the virtual screen tall as well (2136x3200 for example), so the desktop gains a **tall screen** --
+  it is not a landscape picture rotated by 90 degrees. The picture is shown whole, with bars, because
+  scaling it to cover would leave only a vertical strip. The host cannot follow a rotation while streaming: it only logs a hint to press Stop and then Start, which
+  re-mounts the screen in the new direction (about 3 s); a portrait size the driver has never declared is added
+  automatically with one driver restart, about 4-7 s (6.1 s measured).
+* **Button size**: small / medium / large / extra large, medium by default. It was never hard to open
+  because it was too small -- the code measured the distance from the finger to the centre of the button,
+  so a finger landing near the edge plus a pixel of jitter counted as a drag. It now measures how far the
+  finger has moved from where it went down. Next to it there is "put the button back in the top right".
+
 ### The virtual display disappears after you stop
 
-When you press `停止` (Stop) — or close the window — the program **removes the virtual display from the desktop**:
+When you press `停止` (Stop) — or close the window and choose Quit (minimising to the tray keeps both the stream
+and the screen as they are) — the program **removes the virtual display from the desktop**:
 the display is gone from Windows display settings, and the desktop width goes back from 4480 to 2560.
 
 > This was the most annoying thing about the early versions — the old code only "restored the virtual display to
@@ -276,7 +304,13 @@ Other tuning tips:
 
 ### Latency (measured)
 
-Every 2 seconds the phone prints a line like `perf fps=… latency_avg_ms=… latency_max_ms=…`
+Since 1.8.4 the phone reports back every 2 seconds how many frames it received, how many it showed and the
+latency, and the host log writes a line only when the numbers really move (since 1.8.6: a frame rate that
+changes by 25 %, a latency that changes by 50 ms, at least 10 seconds apart), such as
+`采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 8 ms` — that single line tells you whether
+the host never sent, the phone never received, or the phone decoded but never presented. The phone also prints its
+own line every 10 seconds (since 1.8.6; straight away when frames start being dropped):
+`perf fps=… latency_avg_ms=… latency_max_ms=…`
 (`adb logcat -s DroidExtend:I`). The timestamp is stamped by the host when it grabs the frame, and the phone
 converts it using the clock offset established during the handshake, so what's measured is the **full path from
 frame grab to decode**:
@@ -358,7 +392,7 @@ ToDesk or Sunlogin cannot enumerate it either; the program already runs as admin
 for nothing extra. **Just take it off the desktop** leaves the driver alone and asks for nothing — the
 screen still exists, it is simply not on the desktop. Both modes only affect **quitting**: an ordinary
 `停止` (Stop) just takes the screen off the desktop without touching the driver, which is why starting
-again takes a couple of seconds. There is also a menu item, "Shut the virtual
+again takes about three seconds. There is also a menu item, "Shut the virtual
 display down for real", if you want it gone right now. Note that writing `<count>` 0 into the driver
 settings does **not** achieve this: MttVDD treats 0 as invalid (`Monitor Count is not valid`) and
 creates one monitor anyway.
@@ -400,7 +434,7 @@ droid-extend/
 ├─ 构建手机端 APK.bat             ← only needed if you changed the phone-side Java code
 ├─ dist/
 │   ├─ DroidExtend.apk           ← phone-side package
-│   └─ DroidExtend-Setup-1.6.8.exe ← Windows installer (35 MB)
+│   └─ DroidExtend-Setup-<version>.exe ← Windows installer (37 MB)
 ├─ tools/installer/
 │   └─ DroidExtend.iss           ← Inno Setup script for the installer
 ├─ host/                          ← Windows side (Python)
@@ -416,6 +450,7 @@ droid-extend/
 │   ├─ paths.py                  locate the bundled adb / ffmpeg / JDK / SDK, plus the data directory
 │   ├─ settings.py               settings I/O (atomic write + allowlist + migration from the old location)
 │   ├─ applog.py                 writes DroidExtend.log (2 MB rollover, and a failure never takes the program down)
+│   ├─ apkver.py                 reads versionCode / versionName out of the APK (used to compare the phone side since 1.8.5)
 │   ├─ update.py                 checks GitHub for the latest Release
 │   ├─ manual.py                 the body text of the in-app user manual
 │   └─ version.py                version number and repository URL (change once, applies everywhere)
@@ -427,7 +462,7 @@ droid-extend/
 │   ├─ src/com/droidextend/HudView.java      status overlay + draggable settings button (all hand-drawn)
 │   ├─ src/com/droidextend/Stats.java        per-frame statistics
 │   ├─ src/com/droidextend/AppLog.java       logging switch and file output
-│   ├─ src/com/droidextend/Prefs.java        three toggles + button position
+│   ├─ src/com/droidextend/Prefs.java        toggles, button size and position, screen direction
 │   ├─ AndroidManifest.xml
 │   └─ build.py                  one-shot build: aapt2 → javac → d8 → package → apksigner
 ├─ tools/                         ← bundled toolchain and install scripts

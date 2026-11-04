@@ -7,7 +7,9 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -185,13 +187,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         AppLog.setEnabled(prefs.logging());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         hideSystemUi();
+        // Before anything is laid out: the manifest still says landscape, and
+        // this is what overrides it for the run.
+        applyOrientation();
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
         touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
 
         surfaceView = new VideoSurface(this);
-        surfaceView.setFill(prefs.fill());
+        surfaceView.setFill(videoFill());
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) {
@@ -206,6 +211,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         hud = new HudView(this);
         hud.setPanelWanted(prefs.showHud());
         hud.setGearFraction(prefs.gearX(), prefs.gearY());
+        hud.setGearSize(prefs.gearSize());
         hud.setListener(new HudView.Listener() {
             @Override public void onGear() {
                 showSettings();
@@ -244,7 +250,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         }
         AppLog.i("main  启动 v" + versionName() + "  fill=" + prefs.fill()
                 + " hud=" + prefs.showHud() + " log=" + prefs.logging()
-                + " gear=" + prefs.gearX() + "," + prefs.gearY());
+                + " gear=" + prefs.gearX() + "," + prefs.gearY()
+                + " size=" + prefs.gearSize() + " orient=" + prefs.orientation()
+                + " portrait=" + portraitNow());
     }
 
     private String versionName() {
@@ -264,6 +272,78 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
+
+    /**
+     * Turn the screen the way the preference asks.
+     *
+     * The manifest says sensorLandscape, which is what every version before
+     * 1.8.6 did and why a tablet standing up still showed a sideways desktop.
+     * FULL_USER follows the device (and allows the upside-down positions too);
+     * the two fixed values are for people who keep the tablet in one place.
+     */
+    private void applyOrientation() {
+        String mode = prefs.orientation();
+        int want;
+        if (Prefs.ORIENT_PORTRAIT.equals(mode)) {
+            want = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+        } else if (Prefs.ORIENT_LANDSCAPE.equals(mode)) {
+            want = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+        } else {
+            want = ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
+        }
+        try {
+            if (getRequestedOrientation() != want) {
+                setRequestedOrientation(want);
+            }
+        } catch (Throwable t) {
+            AppLog.i("main  设置方向失败: " + t);
+        }
+    }
+
+    /** True while the tablet is standing up. */
+    private boolean portraitNow() {
+        return getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_PORTRAIT;
+    }
+
+    /**
+     * Whether the picture should be cropped to fill the panel.
+     *
+     * Landscape keeps the user's choice -- cropping a few pixels off a wide
+     * desktop is worth losing the bars.  Portrait never crops: the desktop is
+     * wide, the panel is tall, and filling would throw away the left and right
+     * thirds of the picture.  Fit beats fill there by a mile.
+     */
+    private boolean videoFill() {
+        return !portraitNow() && prefs.fill();
+    }
+
+    private void syncFill() {
+        if (surfaceView != null) {
+            surfaceView.setFill(videoFill());
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration cfg) {
+        super.onConfigurationChanged(cfg);
+        // configChanges keeps the activity alive across a rotation, so nothing
+        // here re-runs by itself: the picture would stay cropped and the
+        // settings sheet would keep the size it was built at.
+        syncFill();
+        if (sheet != null) {
+            hideSettings();
+        }
+        StreamClient c = client;
+        if (c != null) {
+            c.setPortrait(cfg.orientation == Configuration.ORIENTATION_PORTRAIT);
+        }
+        if (streamFps > 0) {
+            requestFrameRate(streamFps);
+        }
+        AppLog.i("main  旋转后 orientation=" + cfg.orientation
+                + " fill=" + videoFill() + " " + cfg.screenWidthDp + "x" + cfg.screenHeightDp);
     }
 
     @Override
@@ -355,14 +435,83 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 }));
 
-        card.addView(check(Lang.t("让画面铺满屏幕（裁掉多余边缘）",
+        // A tall screen cannot hold a wide picture without bars, so in portrait
+        // the picture always shows whole.  The switch is disabled -- not
+        // hidden -- there, and either way the decision goes through syncFill(),
+        // which asks videoFill() rather than trusting the stored flag.
+        CheckBox fillBox = check(Lang.t("让画面铺满屏幕（裁掉多余边缘）",
                         "Fill the screen (crop the extra edges)"), prefs.fill(),
                 new CompoundButton.OnCheckedChangeListener() {
                     @Override public void onCheckedChanged(CompoundButton b, boolean on) {
                         prefs.set(Prefs.FILL, on);
-                        surfaceView.setFill(on);
+                        syncFill();
                     }
-                }));
+                });
+        if (portraitNow()) {
+            fillBox.setEnabled(false);
+            // Disabled controls are dimmed by hand here: the accent tick stays
+            // blue when a checkbox is disabled, which would read as "still on".
+            fillBox.setAlpha(0.45f);
+            fillBox.setText(Lang.t("让画面铺满屏幕（竖屏时始终整幅显示）",
+                    "Fill the screen (portrait always shows the whole picture)"));
+        }
+        card.addView(fillBox);
+
+        // --- 屏幕方向与按钮大小 ------------------------------------------
+        // Both of these used to open a system AlertDialog: a light-themed
+        // dialog dropped on top of a dark sheet, laid out for a phone from
+        // another decade, and it hid the other choices until you tapped it.
+        // They are a segmented row now -- every choice visible at once, the
+        // picked one filled with the accent colour, one tap to change.
+        // A tablet on a stand is not a monitor lying on its side, so the
+        // direction is a first-class choice, not a hidden one.
+        card.addView(segTitle(Lang.t("屏幕方向", "Screen direction")));
+        final String[] orientValues = {Prefs.ORIENT_AUTO, Prefs.ORIENT_LANDSCAPE,
+                Prefs.ORIENT_PORTRAIT};
+        String[] orientNames = {
+                Lang.t("跟随平板", "Follow"),
+                Lang.t("一直横屏", "Landscape"),
+                Lang.t("一直竖屏", "Portrait")};
+        int orientAt = 0;
+        for (int i = 0; i < orientValues.length; i++) {
+            if (orientValues[i].equals(prefs.orientation())) {
+                orientAt = i;
+            }
+        }
+        card.addView(segment(orientNames, orientAt, new Pick() {
+            @Override public void onPick(int i) {
+                prefs.setOrientation(orientValues[i]);
+                AppLog.i("ui    屏幕方向 -> " + orientValues[i]);
+                applyOrientation();
+                // A locked portrait while the tablet lies flat still needs the
+                // picture to stop cropping, and a turn the other way has to
+                // stop leaving bars.
+                syncFill();
+                if (sheet != null) {
+                    hideSettings();
+                }
+            }
+        }));
+
+        card.addView(segTitle(Lang.t("设置按钮大小", "Settings button size")));
+        card.addView(segment(gearNames(), prefs.gearSize(), new Pick() {
+            @Override public void onPick(int i) {
+                prefs.setGearSize(i);
+                hud.setGearSize(i);
+                AppLog.i("ui    按钮大小 -> " + i);
+            }
+        }));
+
+        Button resetGear = button(Lang.t("把按钮放回右上角",
+                "Put the button back in the top-right corner"));
+        resetGear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                hud.setGearFraction(1f, 0f);
+                prefs.setGear(1f, 0f);
+                AppLog.i("ui    按钮位置复位");
+            }
+        });
+        card.addView(resetGear);
 
         // --- 触摸操作 ---------------------------------------------------
         // The gestures are the whole point of the app and not one of them is
@@ -535,6 +684,95 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         Anim.in(sheet, this, prefs);
         AppLog.i("ui    打开显示设置");
+    }
+
+    private String[] gearNames() {
+        return new String[]{Lang.t("小", "Small"), Lang.t("中", "Medium"),
+                Lang.t("大", "Large"), Lang.t("特大", "Extra large")};
+    }
+
+    /** What a segmented row calls back when the pick changes. */
+    private interface Pick {
+        void onPick(int index);
+    }
+
+    /** The small dim heading that sits above a segmented row. */
+    private TextView segTitle(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(getResources().getColor(R.color.hud_dim));
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(6)));
+        return t;
+    }
+
+    /**
+     * A segmented control: every choice in one rounded row, the picked one
+     * filled with the accent colour.
+     *
+     * <p>Replacing the old AlertDialog was not only a matter of looks.  A
+     * dialog hid the other choices until it was tapped, covered the picture
+     * while it was open, and on a tablet it opened at phone size in the middle
+     * of a very large screen.  This row shows all of them, costs one tap, and
+     * cannot get out of sync with what is stored: it paints from the value it
+     * is handed.
+     */
+    private LinearLayout segment(String[] labels, int checked, final Pick pick) {
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        GradientDrawable frame = new GradientDrawable();
+        frame.setColor(getResources().getColor(R.color.sheet_row));
+        frame.setCornerRadius(dp(12));
+        frame.setStroke(Math.round(dp(1)), getResources().getColor(R.color.hud_stroke));
+        row.setBackground(frame);
+        int pad = Math.round(dp(3));
+        row.setPadding(pad, pad, pad, pad);
+
+        final TextView[] cells = new TextView[labels.length];
+        final int[] at = {Math.max(0, Math.min(labels.length - 1, checked))};
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            TextView cell = new TextView(this);
+            cell.setText(labels[i]);
+            cell.setGravity(Gravity.CENTER);
+            cell.setSingleLine(true);
+            cell.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+            cell.setPadding(Math.round(dp(3)), Math.round(dp(11)),
+                    Math.round(dp(3)), Math.round(dp(11)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            cell.setLayoutParams(lp);
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (at[0] == idx) {
+                        return;
+                    }
+                    at[0] = idx;
+                    paintSegments(cells, idx);
+                    pick.onPick(idx);
+                }
+            });
+            cells[i] = cell;
+            row.addView(cell);
+        }
+        paintSegments(cells, at[0]);
+        return row;
+    }
+
+    /** The picked cell is filled, the rest are transparent; nothing else. */
+    private void paintSegments(TextView[] cells, int checked) {
+        for (int i = 0; i < cells.length; i++) {
+            boolean on = i == checked;
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(9));
+            g.setColor(on ? getResources().getColor(R.color.accent) : 0x00000000);
+            cells[i].setBackground(g);
+            cells[i].setTextColor(on ? 0xFF0A1020
+                    : getResources().getColor(R.color.hud_dim));
+            cells[i].setTypeface(Typeface.create(
+                    on ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
+        }
     }
 
     private CheckBox check(String text, boolean on,
@@ -979,6 +1217,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 });
             }
         }, currentPanelHz());
+        client.setPortrait(portraitNow());
         client.start();
         AppLog.i("client started");
     }

@@ -65,7 +65,10 @@ DroidExtend 使用说明   v{ver}
 
   注意：触摸注入的是「那块虚拟屏」上的坐标，鼠标会真的跑到那块屏去，
   所以主屏上的鼠标位置会跟着跳，这是正常的。
-  把手机横过来，画面会自动跟着横。
+  手机转过来，画面会跟着转：手机端「显示设置」里的「屏幕方向」有三档
+  （跟随平板 / 一直横屏 / 一直竖屏）。平板默认「跟随平板」，手机默认
+  「一直横屏」。竖屏时主机端也按竖的方向做虚拟屏，桌面右侧会多出一块
+  竖着的屏，不是把横向画面旋转 90 度。
 
 【五、参数怎么选】
   分辨率      虚拟屏的大小。和手机屏幕比例一致最清楚，1920x1080 最通用。
@@ -133,6 +136,16 @@ DroidExtend 使用说明   v{ver}
      vdd_settings.xml 里的每一行 <resolution> 建模式表，表外的尺寸 Windows 一律
      拒掉，以前点了没反应就是这个原因）。如果某个尺寸不在列表里，就是驱动给不
      出来；日志会说清楚。刷新率同理。
+
+  Q: 平板竖起来能当竖着的副屏吗？右上角那个按钮很难点开？
+  A: 两件都是 1.8.6 起做好的。手机端「显示设置」里：
+     · 「屏幕方向」三档：跟随平板 / 一直横屏 / 一直竖屏。平板默认「跟随
+       平板」，手机默认「一直横屏」。选跟随以后把平板竖起来，画面和虚拟屏
+       都跟着变竖；投屏过程中转屏要重新挂一次屏（约 3 秒），面板里会提示。
+     · 「设置按钮大小」四档：小 / 中 / 大 / 特大，默认中，点一下切一档。
+       旁边还有「把按钮放回右上角」，拖偏了不用再一路拖回来。
+     以前点不开不是按钮太小：程序量的是「手指到按钮中心的距离」，手指落在
+     按钮边缘抖一两像素就会被当成拖动。现在量的是「手指离开按下点多远」。
 
   Q: 停止之后那块屏去哪了？为什么鼠标不会滑到右边去了？
   A: 「停止」会把虚拟屏从桌面上摘掉，所以桌面上不再多出一块空屏，鼠标也不会飘过去。
@@ -265,7 +278,12 @@ DroidExtend manual   v{ver}
 
   Note: touch is injected at coordinates on that virtual screen, so the real
   cursor does move over there and the pointer leaves your main screen.  That is
-  normal.  Turn the phone sideways and the picture follows.
+  normal.  Turn the phone and the picture follows: "Screen direction" in the
+  phone's display settings has three choices (follow the tablet / always
+  landscape / always portrait).  A tablet defaults to "follow the tablet", a
+  phone to "always landscape".  In portrait the host builds the virtual screen
+  tall as well, so the desktop gains a tall screen -- it is not a landscape
+  picture rotated by 90 degrees.
 
 [5] How to choose the settings
   Resolution     Size of the virtual screen.  Matching the phone's aspect ratio
@@ -409,6 +427,22 @@ DroidExtend manual   v{ver}
      "do not ask again (remember this choice)" box next to them. To change it
      later use Tools -> Closing behaviour..., where "ask me every time" is always
      available.
+
+  Q: Can a tablet standing up act as a tall second screen, and why is the
+     top-right button so hard to open?
+  A: Both were done in 1.8.6.  In the phone's display settings:
+     . "Screen direction" has three choices: follow the tablet / always
+       landscape / always portrait.  A tablet defaults to "follow the tablet",
+       a phone to "always landscape".  With "follow", standing the tablet up
+       turns both the picture and the virtual screen tall; rotating while
+       streaming re-mounts the screen once (about 3 s) and the sheet says so.
+     . "Button size" has four steps (small / medium / large / extra large),
+       medium by default, one tap cycles it.  Next to it, "put the button back
+       in the top right".
+     It was never too small: the code measured the distance from the finger to
+     the centre of the button, so a finger landing near the edge plus a pixel
+     of jitter counted as a drag.  It now measures how far the finger moved
+     from where it went down.
 
   Q: I cannot find the mouse on the extra screen?
   A: The virtual screen is placed against the main one according to "Position".

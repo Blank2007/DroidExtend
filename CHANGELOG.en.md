@@ -61,6 +61,7 @@
 | [35](#35-183-huawei-devices-would-not-connect-so-first-the-diagnostics-and-the-docs) | 1.8.3: Huawei diagnostics / documents | for a device we cannot touch, hand out the diagnostics and the checklist |
 | [36](#36-184-let-the-phone-report-back-so-a-black-screen-leaves-a-trail) | 1.8.4: three ways a mirror can be black / the phone reports back | the phone answers every 2 s, so a black screen leaves a trail |
 | [37](#37-185-on-a-dual-gpu-machine-ddagrab-could-only-see-one-graphics-card) | 1.8.5: dual GPU / which card / APK version check | one screen belongs to two cards; only the right one shows |
+| [38](#38-186-the-gear-would-not-open-and-a-tablet-stood-on-end) | 1.8.6: a button size of your own / screen direction | the tap test measured the wrong distance; a tablet stood up becomes a tall screen |
 
 ---
 
@@ -3599,6 +3600,282 @@ was really an "install or not" switch.
    streaming begins, which yanks the user's picture away once more.
 
 ---
+
+## 38. 1.8.6: the gear would not open, and a tablet stood on end
+
+### 38.1 What was asked
+
+This release comes from issue #4 plus two sentences in the session (m02746, m02799).
+
+The issue body is one line:
+
+> 请改善已链接平板 设定按钮 (按住2秒拽动) 让平板能进入 portrait 模式
+> (please improve the settings button on a linked tablet -- hold it 2 s to drag -- so the tablet can go into portrait mode)
+
+The author added two lines under it that describe the experience:
+
+> - 当我平板链接后, 右上角会有个设定按钮, 比较容易移动但非常难点进去(因为平板延迟)
+>   (once the tablet is connected there is a settings button in the top right; it moves easily but is very hard to open, because of tablet latency)
+> - 然后平板可以这个姿势使用
+>   (and the tablet can be used in this position)
+
+The attached photo is two monitors side by side: the left one landscape, the right one **standing upright**, with
+the taskbar running down its right edge.  What is wanted is "a tablet stood up as a tall second screen", not "a
+landscape picture rotated 90 degrees".
+
+Passed on to us, the request was:
+
+> 「现在issue#4的问题解决一下 …… 安卓端设置按钮有人反馈不好点到 然后有人会把安卓端屏幕竖起来用 你需要给出一个方案来适应安卓端的旋转 来判断出是横屏使用还是竖屏使用 我的建议是在安卓端给出一个开关来使得用户自行决定是否旋转 说说你的想法先告诉我 不着急改动」
+
+and after reading the plan, one more line merging the two halves into one release:
+
+> 「按钮大小让用户自己自定义吧 默认方向是否跟随平板也给出自定义按钮 尽量和在一个版本里面」
+
+So 1.8.6 is three things only: fix "hard to open", let the user pick the button size, let the user pick the screen direction.
+
+### 38.2 "Very hard to open" was never a small button -- the tap test measured the wrong distance
+
+The first guess was "tablet resolution is high, the button is only 21 dp, it is too small".  The code says otherwise.
+
+In `android/src/com/droidextend/HudView.java` the gear's visual radius is `gearR = dp(21)` (computed in
+`onSizeChanged()`), while the hit test `onGear(MotionEvent e)` uses `float r = gearR * 1.35f;` -- the touch
+target was already 35 % larger than the circle you see.  "Is it big enough" had been thought about long ago.
+
+The problem is the `ACTION_MOVE` branch of `onTouchEvent()`:
+
+```
+if (Math.abs(e.getX() - gearCx) + Math.abs(e.getY() - gearCy) > dp(9)) {
+    moved = true;
+}
+```
+
+It measures **the distance from the finger to the centre of the gear**, not **how far the finger has travelled from
+where it went down**.
+
+The consequence is concrete.  The gear's radius is 21 dp.  The finger lands 15 dp from the centre -- well inside the
+circle, visually "on the button" -- and then the first MOVE event arrives with a pixel or two of jitter.  The distance
+to the centre is 15 dp, already greater than 9 dp, so `moved = true` immediately.  On release the code takes the
+"drag" path and `listener.onGear()` is never called at all.
+
+In other words there is exactly one way to open it in a single tap on a tablet: land within 9 dp of the centre and do
+not twitch between down and up.  This is not a small button; it is "only the little circle at the exact centre counts
+as a tap".
+
+The issue author's "because of tablet latency" fits as well: the earlier the MOVE events arrive, the more easily the
+jitter is read as a drag.
+
+### 38.3 The fix: measure how far the finger went, and hand the button to the user
+
+Four changes, mostly in `HudView.java`, plus the settings sheet in `MainActivity.java`:
+
+1. **The test is now the displacement from the down point.**  `downX`/`downY` are remembered on ACTION_DOWN, and
+   ACTION_MOVE compares `Math.hypot(e.getX() - downX, e.getY() - downY)` with `slop` (the larger of
+   `ViewConfiguration.getScaledTouchSlop()` and a floor).  That is the standard Android tap-versus-drag rule.
+2. **A floor under the hit radius:** `Math.max(gearR + dp(10), dp(34))`, so even the smallest gear keeps a touch
+   target no smaller than a finger.
+3. **Feedback on press.**  Before, the gear only turned green while dragging, so a tap gave no visible answer; now it
+   highlights on press and settles on release.
+4. **Four sizes, chosen by the user.**  `gear_size` lives in `Prefs`: 0/1/2/3 = small / medium / large / extra large
+   (radii 18 / 21 / 26 / 31 dp), default 2 -- identical to 1.8.5 and everything before it.  A cycling button in the
+   settings sheet applies it immediately and writes it to disk.
+
+While in there, a "put the button back in the top right" button was added.  Before, a gear dragged somewhere awkward
+could only be dragged back, which on a tablet means pressing on the button and walking it to the corner again.
+
+### 38.4 A tall screen is two changes; doing one of them does nothing
+
+The issue asks for "a tablet stood up as a tall second screen".  For that to be true, both ends have to change:
+
+* **Phone end:** the activity declares `android:screenOrientation="sensorLandscape"`, so the app itself pins itself
+  to landscape -- turning the tablet does nothing at the system level.
+* **Host end:** the virtual screen is sized from the phone's panel, and `_match_phone()` in `host/session.py` had it
+  written down:
+
+  ```
+  # The app is locked to landscape, so the panel's long side is its width.
+  pw, ph = max(size), min(size)
+  ```
+
+  i.e. **no matter how the phone is held, the host builds a landscape screen.**
+
+Change only the phone end and the user gets a landscape picture squeezed into a tall window (wide empty bands above and
+below) -- not what was asked for.  So both ends now follow the direction:
+
+* the phone app sends one more line after its hello, `DXP1 <0|1>` (0 = landscape, 1 = portrait), from `MainActivity`
+  in `onCreate` and in `onConfigurationChanged`;
+* the host parses it into `client_portrait` in `host/server.py`, gains `screen_portrait()` in `host/adb.py` as the
+  guess **before** the handshake, and `_match_phone()` in `host/session.py` takes its orientation from the direction
+  (standing up means `pw, ph = min(size), max(size)`).
+
+How the picture sits in the window was a trade-off too: **in portrait the picture is always contained (the whole
+desktop, with bars), in landscape the user's own "fill the screen" switch still applies.**  The reason: a 16:9 desktop
+inside a tall window scaled to cover loses most of its left and right, and what is left is a vertical strip -- not a
+tall second screen.  Bars are better than a strip.
+
+Rotating destroys and recreates the Surface, a path that had been dealt with one release earlier:
+`VideoDecoder.setSurface()` first tries `codec.setOutputSurface(s)` (API 23+), and on failure or on an old system it
+calls `reset()` and reconfigures.  This release walked that path on real hardware (see 38.7).
+
+### 38.5 Defaults: a tablet follows the tablet, a phone stays landscape
+
+"Screen direction" has three choices: **follow the tablet / always landscape / always portrait**.  One default cannot
+serve both kinds of device:
+
+* **A tablet defaults to "follow".**  Standing a tablet up is a normal way to use it (that is exactly the issue), and
+  the screen is large enough that a contained picture is fine.
+* **A phone defaults to "always landscape".**  If a phone follows its orientation when held upright, the user sees a
+  16:9 desktop shrunk into the middle, a third of the screen height -- worse than turning the phone sideways.  Keeping
+  the old behaviour means existing users see no change after upgrading.
+
+"Tablet or phone" is decided with `smallestScreenWidthDp >= 600` (Android's own tablet rule), computed once the first
+time `Prefs.orientation()` is called and stored; after that it is entirely the user's choice.
+
+`android/AndroidManifest.xml` changed from `screenOrientation="sensorLandscape"` to `fullUser` as well -- otherwise
+`setRequestedOrientation(SENSOR_PORTRAIT)` is overridden by the manifest on some ROMs.
+
+### 38.6 How the host learns which way up the phone is: two wrong attempts
+
+**Attempt one:** `SurfaceOrientation` in `dumpsys input` is a **rotation index relative to the natural
+orientation**, and I read "odd = portrait".  That only holds for **a phone whose natural orientation is landscape**.
+The test device is a tablet whose natural orientation is already portrait (2136x3200), so standing it up gives index 0
+(even) and it was classified as landscape.  The log said, confidently:
+
+```
+手机分辨率 3200x2136（横屏）
+```
+
+while the device was plainly upright.
+
+**Attempt two:** read `cur=WxH` (the current window size) from `dumpsys window displays`, and call it portrait when
+the width is smaller than the height.  That one is right: measured landscape `cur=3200x2136` -> False, upright
+`cur=2136x3200` -> True.  The rotation index is kept only as a fallback, combined with the natural orientation from
+`physical_size()`.
+
+**Attempt three was a sequencing problem.**  `DXP1` arrives a moment after the handshake.  The "phone direction" note
+was first written into `_on_client()` -- that is, at handshake time -- so it always read an empty value and printed
+nothing at all.  Moving it into the five-second block inside `_tick()`, and printing it only when the direction
+changes, produced:
+
+```
+手机方向: 竖屏
+```
+
+### 38.7 Verification
+
+Test device: a Xiaomi tablet (24091RPADC, panel 2136x3200, density 352/440, `smallestScreenWidthDp` 971, so judged a
+tablet), APK 1.8.6 (versionCode 27).
+
+**The settings button (first half of the issue)**
+
+| Action | Result |
+| --- | --- |
+| an exact tap at the gear centre (3091,110) | logcat `ui 打开显示设置` (settings opened) |
+| `input swipe 3091 110 3096 115 150` (5 px of jitter, always failed before) | **settings still opened** |
+| `input swipe 3091 110 2691 310 400` (a real 400 px drag) | the button moved, settings did **not** open |
+| sheet: `设置按钮大小：中` -> `特大` (gear size medium -> extra large) | logcat `ui 按钮大小 -> 3`, the row text became `特大`, the gear is visibly bigger in the screenshot |
+| `把按钮放回右上角` (put the button back in the top right) | logcat `ui 按钮位置复位`, the gear returned to (1,0) |
+
+The first two rows are the point: the old test measured the distance to the centre, so 5 px of jitter near the edge of
+a 21 dp circle was always a drag; the new one measures from the down point, 5 px is far below the slop, and it opens.
+
+**Screen direction (second half of the issue)**
+
+| Action | Result |
+| --- | --- |
+| sheet: `一直竖屏` (always portrait) | logcat `ui 屏幕方向 -> portrait` + `main 旋转后 orientation=1 fill=false 783x914` |
+| sheet: `跟随平板` (follow the tablet) | logcat `ui 屏幕方向 -> auto` |
+| follow + physically landscape (`user_rotation 0`) | `main 旋转后 orientation=2 fill=false 1455x914` + `surface changed to 3200x1800` |
+| follow + physically upright (`user_rotation 1`) | `main 旋转后 orientation=1 fill=false` + `surface changed to 2136x1202` (contained: full width, height shrunk to 16:9) |
+
+Nothing dropped during rotation: the rebuilt Surface went through `setOutputSurface()` successfully (no
+`setOutputSurface failed` in the log) and the picture kept coming.
+
+**Portrait end to end (real phone, real driver, real stream)**
+
+Mode `拓展屏` (extend) + `按手机分辨率撑满` (fill the phone's panel), tablet standing up, 12 seconds.  The host log, in
+order:
+
+```
+手机分辨率 2136x3200（竖屏）
+驱动模式表里还没有 2136x3200，先加进去再重启一次驱动
+驱动已重启，现在真的能给出 2136x3200（6.1 秒）
+拓展屏就绪: \\.\DISPLAY22 -> 2136x3200@120 at (2560,0)
+手机方向: 竖屏
+采集显卡: 显卡0 "NVIDIA GeForce RTX 5070 Laptop GPU"（输出 #1）
+采集 120 fps · 发送 41.5 Mbps · 手机 收 120 fps / 显示 121 fps · 10 ms
+已移除虚拟显示器 \\.\DISPLAY22，桌面恢复为 2560x1600
+```
+
+The phone screenshot (2136x3200) is the whole tall desktop, with the overlay reading
+`2136 × 3200 · 显示 119 fps（屏 120 Hz）` and `39.77 Mbps · 15 ms`.
+
+**Landscape regression** (same device, laid flat): `手机分辨率 3200x2136（横屏）` -> handshake `3200x2136@120` ->
+`手机方向: 横屏` -> `采集 119 fps · 发送 37.7 Mbps · 手机 收 121 fps / 显示 120 fps · 9 ms`, and after stopping the
+desktop was back to 2560x1600.
+
+**Cleanup:** the portrait test added 2136x3200 to the driver's mode table, so the whole file was restored from a
+backup afterwards (deleting by the `auto` flag would also remove sizes the user had added by hand),
+`vd.reload_modes(None)` was run, and the SHA256 matched the backup; the desktop is back to a single 2560x1600@300
+screen.
+
+### 38.8 What it costs
+
+* **Rotating while streaming does not re-lay out immediately.**  The host does re-lay the virtual screen once the new
+  direction arrives, but the stream already open has to handshake again, so in practice it is "stop and start once"
+  (about 3 s).  If the new direction needs a size the driver's table does not have (2136x3200 in portrait, say), the
+  size has to be added and the driver restarted, measured at 6.1 s.  The settings sheet says so.
+* **Portrait always has bars.**  Portrait is always contained, so there are empty bands whose size depends on the
+  desktop's and the phone's aspect ratios.
+* **Defaults depend on the device kind.**  A phone still defaults to locked landscape (same as 1.8.5); a tablet
+  defaults to "follow", which behaves exactly as before when it is laid flat, except that the system now lets it turn.
+* **The manifest moved from sensorLandscape to fullUser.**  A few ROMs may show one orientation animation at startup.
+* **DXP1 is one new line of its own.**  A 1.8.5-or-older host does not know it and stops at the newline, so the
+  refresh-rate line (DXH1) parses exactly as before; conversely, a 1.8.6 host talking to an old app that reports no
+  direction treats it as landscape, which is the old behaviour.
+
+### 38.9 Lessons
+
+1. **"Hard to tap" starts by measuring the distance the tap test uses.**  Enlarging the widget is the last resort;
+   here the test compared against the wrong reference point -- the hit radius was already 35 % larger than the visual
+   one, so nothing was too small.
+2. **A rotation index is relative to the natural orientation.**  It answers "how far has it turned", not "is it
+   upright now".  Ask for the current window size instead.
+3. **The two halves of one feature have to change together.**  The app owns the direction, the host owns the virtual
+   screen's size; change only the first and an upright user gets a landscape picture.
+4. **Reports and handshakes have an order.**  A field that cannot be read at handshake time is, nine times out of ten,
+   on the next line.
+5. **Pick defaults by device kind.**  A tablet follows, a phone stays landscape -- not guesswork: one is a common way
+   to use a tablet, the other is unpleasant when shrunk.
+
+### 38.10 The two settings were redone once more on the last day
+
+Before shipping, the user looked at a screenshot and said: "安卓端那个按钮自定义大小的弹窗界面 UI 太老旧了" (the dialog for the button size on the phone looks dated).  They were right.
+
+"Screen direction" and "settings button size" first used `AlertDialog.Builder.setSingleChoiceItems`: a light-themed system dialog over our dark sheet, showing only the current value, with the other choices one tap deeper, and on a tablet it appeared centred with phone-sized margins.  Nothing was broken, but it looked like it had fallen in from another program.
+
+They are now **segmented controls**: three (or four) choices laid out in one row, the selected cell filled with the accent colour, one tap to change, applied immediately.
+
+One hidden bug came out with them.  The "fill the screen" checkbox called `surfaceView.setFill(on)` directly, bypassing the "portrait always shows the whole picture" rule in `videoFill()`, so ticking it in portrait re-cropped a tall picture into a landscape one.  It goes through `syncFill()` now, and in portrait the checkbox is greyed out and relabelled "(portrait always shows the whole picture)", because in portrait it has no state left to choose.
+
+### 38.11 The frame-rate line in the log is no longer written every five seconds
+
+1.8.4 added a line every 5 seconds saying where the frames went -- `采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 8 ms` -- so that a black phone screen would leave a trail.  It earns its place while something is wrong and is noise the rest of the time: a ten-minute session wrote 120 near-identical lines and pushed everything else off the screen.  The user's words were "帧率行不要多次打印" (do not print the frame-rate line many times).
+
+It is now written only when the numbers actually move:
+
+* one baseline line per session; afterwards only a frame rate that changes by more than 25 % (and at least 15 fps), a latency that changes by more than 50 ms, or a phone that goes from reporting to silent, earns another line.  119 -> 120 fps is not a change, it is the same number wobbling;
+* nothing in the first 12 seconds: that is capture climbing from 30 to 120 fps while the decoder shows its first frame, and every number there is different and none of them useful.  A stream that still has not settled after 20 seconds is written up -- that is exactly the case worth reading;
+* at least 10 seconds between two lines, so a wobbly number cannot turn back into a flood.
+
+The phone's `perf fps=…` line also moved from every 2 seconds to every 10 -- the overlay and the `DXU1` report to the host still update every 2 seconds, they are simply no longer written to logcat; the moment frames start being dropped (`dropping to keyframe`) a line is written straight away, because that is the moment worth keeping.
+
+Measured on the same tablet with the same 30-second extend session: 6 such lines in the host log before, **1** after; 15 `perf` lines in logcat before, 2 after, ten seconds apart.
+
+### 38.12 Thanks
+
+* **JYlam87** (GitHub, [issue #4](https://github.com/Blank2007/DroidExtend/issues/4)) -- both this section and the one above started with their report: "当我平板链接后, 右上角会有个设定按钮, 比较容易移动但非常难点进去(因为平板延迟)" (after my tablet connects there is a settings button in the top right; it moves easily but is very hard to tap, because of the tablet's lag), plus a photo of a tablet standing up as a tall second screen.
+
+My first reaction to "hard to tap" was also "the button is too small"; measuring it showed the touch target already had 35 % of slack and that the tap test used the wrong reference point.  One report was worth a whole section.
 
 ---
 

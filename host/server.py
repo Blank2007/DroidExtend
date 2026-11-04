@@ -53,6 +53,13 @@ HELLO_MAX = 32
 # costs one background thread that never sees a byte.
 UP_MAGIC = b"DXU1"
 EVENT_MAGIC = b"DXL1"
+
+# A third line kind, sent once right after the hello: "DXP1 <0|1>\n", 1 when
+# the tablet is standing up.  It travels on its own line rather than as a second
+# word on the hello because a 1.8.5 host reads the hello with a single float()
+# and would drop the entire line -- refresh rate included -- the moment another
+# number appeared after the rate.
+PORTRAIT_MAGIC = b"DXP1"
 UPLINK_LINE_MAX = 400    # a line longer than this is garbage; drop the buffer
 UPLINK_POLL = 0.5        # how often the reader wakes up to notice a stop
 
@@ -112,6 +119,9 @@ class StreamServer(object):
         self.stats = {"sent": 0, "dropped": 0, "bytes": 0, "clients": 0}
         # The panel refresh rate the current phone announced, 0 while unknown.
         self.client_hz = 0
+        # True/False once the app has said which way up it is; None until then
+        # (and always None for apps older than 1.8.6).
+        self.client_portrait = None
         # The last "how is it going" line from the phone, and when it arrived.
         # None until the phone says something (an old app never does).
         self.client_stats = None
@@ -149,6 +159,7 @@ class StreamServer(object):
                 with self._cv:
                     self._queue = []
                     self._queue_bytes = 0
+            self.client_portrait = None
             self.client_hz, hello_left = self._read_hello(conn)
             self.conn = conn
             self.addr = addr
@@ -265,6 +276,15 @@ class StreamServer(object):
             text = line[len(EVENT_MAGIC):].strip().decode("utf-8", "replace")
             if text:
                 self.log("手机: " + text[:200])
+            return
+        if line.startswith(PORTRAIT_MAGIC):
+            try:
+                upright = int(float(line[len(PORTRAIT_MAGIC):].strip() or b"0")) != 0
+            except ValueError:
+                return
+            if self.client_portrait != upright:
+                self.client_portrait = upright
+                self.log("手机方向: %s" % ("竖屏" if upright else "横屏"))
             return
         if line.startswith(HELLO_MAGIC):
             if self.client_hz > 0:
