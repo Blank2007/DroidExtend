@@ -3873,7 +3873,7 @@ Measured on the same tablet with the same 30-second extend session: 6 such lines
 
 ### 38.12 Thanks
 
-* **JYlam87** (GitHub, [issue #4](https://github.com/Blank2007/DroidExtend/issues/4)) -- both this section and the one above started with their report: "当我平板链接后, 右上角会有个设定按钮, 比较容易移动但非常难点进去(因为平板延迟)" (after my tablet connects there is a settings button in the top right; it moves easily but is very hard to tap, because of the tablet's lag), plus a photo of a tablet standing up as a tall second screen.
+* **[@JYlam87](https://github.com/JYlam87)** (GitHub, [issue #4](https://github.com/Blank2007/DroidExtend/issues/4)) -- both this section and the one above started with their report: "当我平板链接后, 右上角会有个设定按钮, 比较容易移动但非常难点进去(因为平板延迟)" (after my tablet connects there is a settings button in the top right; it moves easily but is very hard to tap, because of the tablet's lag), plus a photo of a tablet standing up as a tall second screen.
 
 My first reaction to "hard to tap" was also "the button is too small"; measuring it showed the touch target already had 35 % of slack and that the tap test used the wrong reference point.  One report was worth a whole section.
 
