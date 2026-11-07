@@ -553,6 +553,25 @@ too large. On a machine that's already affected, clicking
 To check for yourself: in the log under `工具 → 检查更新` (Tools → Check for updates), the driver-ready line shows
 the mode count.
 
+**Q: Clicking "安装虚拟显示器驱动（需要管理员）" (Install the virtual display driver) only shows "驱动安装未成功，详见日志" (the driver was not installed -- see the log), and the log is empty?**
+A: **Since 1.8.7 that case explains itself** instead of pointing at an empty log. When the log
+is completely empty and the exit code is `4294901760` (0xFFFF0000), there is almost only one
+cause: Windows PowerShell on this machine cannot start -- not one line of the install script
+ran, which is why the log is empty. This shows up on stripped Windows images ("纯净版", LTSC and
+similar). Repair it in an elevated command prompt:
+
+```powershell
+sfc /scannow
+DISM /Online /Cleanup-Image /RestoreHealth
+```
+
+or install [PowerShell 7](https://aka.ms/powershell) and press the button again. The startup log
+now begins with a `PowerShell: …` line (version and path); "no usable PowerShell" on that line is
+this problem.
+
+**What if it still will not install?** Since 1.8.7 a failed install asks "the driver failed -- retry with the fallback?" -- **an install path that does not use PowerShell at all**: Windows' own `certutil` plus the bundled `nefcon` do the work (the signer certificate ships as `tools\vdd_signer.cer`), exactly what the original script does. Saying yes brings one more UAC prompt, then the usual result message -- and on failure the last log lines are shown in the dialog too.
+
+
 **Q: How do I upgrade to a new version?**
 A: `工具 → 检查更新` (Tools → Check for updates). The program reads the latest version number from GitHub, lists the
 release notes when there's something newer, and "Download and install" **downloads, verifies, installs and restarts

@@ -62,6 +62,7 @@
 | [36](#36-184-let-the-phone-report-back-so-a-black-screen-leaves-a-trail) | 1.8.4: three ways a mirror can be black / the phone reports back | the phone answers every 2 s, so a black screen leaves a trail |
 | [37](#37-185-on-a-dual-gpu-machine-ddagrab-could-only-see-one-graphics-card) | 1.8.5: dual GPU / which card / APK version check | one screen belongs to two cards; only the right one shows |
 | [38](#38-186-the-gear-would-not-open-and-a-tablet-stood-on-end) | 1.8.6: a button size of your own / screen direction | the tap test measured the wrong distance; a tablet stood up becomes a tall screen |
+| [39](#39-187-a-machine-that-would-not-take-the-driver-and-its-broken-powershell) | 1.8.7: PowerShell probe / a message that says why | exit code 4294901760 means the script never ran |
 
 ---
 
@@ -3876,6 +3877,152 @@ Measured on the same tablet with the same 30-second extend session: 6 such lines
 * **[@JYlam87](https://github.com/JYlam87)** (GitHub, [issue #4](https://github.com/Blank2007/DroidExtend/issues/4)) -- both this section and the one above started with their report: "当我平板链接后, 右上角会有个设定按钮, 比较容易移动但非常难点进去(因为平板延迟)" (after my tablet connects there is a settings button in the top right; it moves easily but is very hard to tap, because of the tablet's lag), plus a photo of a tablet standing up as a tall second screen.
 
 My first reaction to "hard to tap" was also "the button is too small"; measuring it showed the touch target already had 35 % of slack and that the tap test used the wrong reference point.  One report was worth a whole section.
+
+---
+
+## 39. 1.8.7: a machine that would not take the driver, and its broken PowerShell
+
+### 39.1 The report
+
+A user tried 1.8.6 on another machine and sent a photo of the screen. Only two log lines mattered:
+
+> 21:47:22 运行: powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\DroidExtend\tools\vdd_install.ps1 -Src … -Nef … -Dest C:\VirtualDisplayDriver -Log D:\DroidExtend\vdd_install.log
+> 21:47:22 安装脚本退出码 = 4294901760
+
+The dialog said "驱动安装未成功，详见日志。" (the driver was not installed, see the log) -- and the log was empty. They added two lines of their own:
+
+> 这是另外一台机器 装的win10纯净版系统
+> 我自己推测可能是powershell组件问题
+
+("this is another machine, a stripped Windows 10 install"; "my guess is it is a PowerShell component problem".) They guessed right, and this time the exit code alone proves it -- without touching the machine.
+
+### 39.2 Who returned 4294901760
+
+4294901760 is 0xFFFF0000. `tools/vdd_install.ps1` only ever exits 0/2/3/4/5 (2 no admin rights, 3 source files or nefcon missing, 5 files did not land, 4 installed but no device found, 0 success), so that number cannot have come from the script -- not one line of it ran.
+
+Nor was the log empty by accident: the first thing the script does is write the log. Nothing means the process never started. 0xFFFF0000 is exactly that class of code -- process creation failed (`Start-Process` hands it back when powershell.exe itself cannot start).
+
+So Windows PowerShell on that machine is broken, which matches what a "纯净版" (stripped) Windows image usually is: the component was removed or mangled by a cleaner, powershell.exe is still there, and it dies on start.
+
+### 39.3 "See the log" said nothing at all
+
+The old check was one line:
+
+    ok = code == 0 and "=== VDD install done ===" in text
+
+`text` is read back from `vdd_install.log`, which was empty. So ok=False and the code raised a fixed message, "the driver was not installed -- see the log", pointing the user at a file that was necessarily empty because nothing had happened. The user learned nothing.
+
+That is the real thing this section fixes: a failure has to say which failure it is.
+
+### 39.4 The fix
+
+**1. Ask the machine whether it has a PowerShell that runs** (new file `host/ps.py`)
+
+    def _candidates():
+        yield <SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe
+        yield "powershell.exe"
+        yield "pwsh.exe"
+        yield "pwsh"
+
+The probe is one line, `$PSVersionTable.PSVersion.Major`: it counts only if a version number comes back; non-zero exit or empty output is a no. The answer is cached -- 0.35 s the first time, 0 after that. When nothing works, the caller gets None plus plain advice: run `sfc /scannow` and `DISM /Online /Cleanup-Image /RestoreHealth`, or install PowerShell 7 (https://aka.ms/powershell).
+
+**2. Every call site asks first**
+
+* `host/vdd.py`: `install()` resolves the exe up front and returns the advice when there is none; `_run_ps1()` (which the display toggle goes through) does the same; so does the `Get-PnpDevice` query in `device_node_exists()`.
+* `host/adb.py`: `_powershell()` returns an empty string instead of raising, so the USB-mode hint simply has nothing to say.
+* `host/update.py`: the signature query and the launcher for the update script both use the probed exe.
+* `安装虚拟显示器驱动.bat`: both the elevation and the script call now check the exit code and print the repair steps in the window.
+
+**3. The elevation launcher names its PowerShell**
+
+`_write_elevator()` used to hard-code `-FilePath 'powershell.exe'`. It now writes the absolute path that was probed, and turns both "Start-Process threw" and "`$p` is null" into `exit 1223` (the code already used for "UAC cancelled") instead of letting null quietly become success.
+
+**4. When the exit code cannot be trusted, look at the machine**
+
+After elevation across UAC, `Start-Process -Wait -PassThru` can itself return 0xFFFF0000 even though the script finished. So there are now four outcomes:
+
+* log has `=== VDD install done ===` and the code is one the script can return -> success, as before;
+* log has done, but the code is in the "process never started" set -> re-check with `vdd.status()`; a ready device counts as success;
+* the log is empty -> say it plainly: "the install script left no log at all (exit code ...) -- it never ran", plus the three usual reasons (UAC never appeared or was declined, a security suite blocked the elevated PowerShell, the PowerShell component is missing or corrupted) and the repair steps;
+* there is a log but it did not finish -> the message carries the last 12 log lines and a note that this exit code usually means PowerShell died.
+
+**5. The dialog says why**
+
+`host/app.py`'s `_install_driver_work()` now puts the first paragraph of the vdd message into the `RuntimeError` (visible in the dialog) and leaves the whole thing in the log panel.
+
+**6. Say it at startup**
+
+The startup log gains a line:
+
+    PowerShell: 5  C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe
+
+On that machine it will read "no usable PowerShell" plus the repair steps, so the next log a user sends answers this in its first lines.
+
+### 39.5 Verification
+
+On this machine (a normal Windows PowerShell):
+
+| Check | Result |
+|---|---|
+| Probe | `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`, version 5, 0.35 s first, 0 s after |
+| Simulated "nothing works" | `ps.exe()` -> None; `vd.install()` returns the advice, never "see the log" |
+| Simulated "empty log + exit 4294901760" | "the install script left no log at all (exit code 4294901760) -- it never ran" plus the three reasons |
+| Simulated "exit -65536 but the script finished and the device is ready" | counted as success (via `status()`) |
+| Simulated "log exists but did not finish" | "the driver was not installed (exit code 4294901760). End of the log: ..." plus the PowerShell advice |
+| `adb._powershell()` with no PowerShell | returns "", does not raise |
+| Generated elevation launcher | names the absolute path; both `catch` and `$null` go to `exit 1223` |
+| End to end (admin, extend mode) | device re-enabled -> `\\.\DISPLAY26` -> attach -1 -> extend topology rc=0 -> `ChangeDisplaySettingsEx -> SUCCESSFUL` -> 2560x1600@120 at (2560,0) -> desktop back to 2560x1600 after stop |
+| `tools\smoke.py` | ALL SMOKE TESTS PASSED |
+
+That machine cannot be verified from here. What this version guarantees is: it either installs, or the dialog says what is missing.
+
+### 39.6 Cost
+
+* One extra PowerShell probe per start, 0.35 s (once; everything after is cached).
+* A failing probe can cost up to 4 x 12 s (one timeout per candidate); a binary that cannot start returns immediately, only a hung one eats the timeout.
+* The `pwsh` fallback only helps if the user installs PowerShell 7; without it the install still cannot proceed, but the message is accurate.
+* One new file (`host/ps.py`) and four call sites that stop hard-coding a name.
+
+### 39.7 Lessons
+
+1. **An exit code outside the script's own set is proof the script never ran.** 0xFFFF0000 should send you to "who failed to create the process", not into the script's line by line.
+2. **"See the log" only works when the log is guaranteed to have content.** An empty log is the failure that most needs explaining, and the old code filed it together with "the script said no".
+3. **Check the exit code on the far side of elevation.** `Start-Process -Wait -PassThru`'s `ExitCode` is not trustworthy; observable state (is the device there) is.
+4. **Never assume the `powershell.exe` in the environment works.** On stripped and LTSC images it exists and lists directories, then dies on start. Probing once and naming the absolute path is much cheaper than guessing later.
+### 39.8 An install path that does not touch PowerShell at all
+
+The user put it plainly: if PowerShell can be broken, stop depending on it. So besides explaining the failure, this version also carries **a second install path that never calls PowerShell**.
+
+* `tools/vdd_install_cmd.bat`: a plain command-prompt script that uses only Windows' own `certutil` and the bundled `nefcon` -- it copies the driver package into `C:\VirtualDisplayDriver`, drops a mode table larger than 90 combinations back to the shipped one, trusts the catalog and its signer with `certutil`, removes the old node and installs the device with `nefcon`, then asks `pnputil` whether the device really appeared. Its exit codes 0/2/3/4/5 line up with the .ps1 version.
+* The certificate: `Get-AuthenticodeSignature` exports the signer certificate out of the catalog and `certutil` cannot, so the certificate ships with the program (`tools\vdd_signer.cer`, SignPath Foundation, valid until 2027-09-08). The script looks for it next to itself, then in the driver folder, then in the source folder -- so a driver package fetched from elsewhere still installs.
+* Elevation: it cannot use PowerShell to elevate (that is the broken part), so it calls Win32 `ShellExecuteExW` directly (the `runas` verb plus `SEE_MASK_NOCLOSEPROCESS`) and waits for the process and reads the exit code itself.
+* In the program: when the normal install fails it asks "the driver failed -- retry with the fallback?", explains that this failure involves PowerShell and what the fallback does, and runs it only if the user says yes. On success the window refreshes as usual; on failure the last log lines are laid out in the dialog.
+
+### 39.9 The trap worth remembering: `.bat` cannot be handed to `runas`
+
+The first version pointed `ShellExecuteExW`'s `lpFile` straight at the `.bat`. The call returned success and a process did start, but the exit code was 1 and not one line of log was written. A probe script that only did `echo %~1` reproduced it clearly: **the arguments are lost on the way through the shell**, and `%1` was empty. With `lpFile = cmd.exe` and `lpParameters = /c ""script" args..."` the probe's exit code 7 and its `%1` both came through intact.
+
+### 39.10 Verification
+
+| Case | Result |
+|---|---|
+| `install_cmd` run as administrator | exit code 0 in 4.2 s; `ROOT\DISPLAY\0001` started, `MttVDD is present` in the pnputil list |
+| Normal user rights (how the program actually runs) | `ShellExecuteExW` elevation -> cmd hand-off -> exit code 0, `OK True`, the device ready just the same |
+| The probe `.bat` (before / after the `runas` fix) | before: empty `%1`, exit code 1; after: exit code 7 and a complete `%1` |
+| Where the certificate came from | deleted `signer.cer` from the driver folder and read `tools\vdd_signer.cer` instead; the log still said the certificate was already in the store |
+| The three dialog paths | yes -> fallback ran and succeeded; no -> only the first failure was reported; fallback failed -> the fallback's own reason was reported |
+
+### 39.11 Lessons
+
+5. **A fallback has to be run for real.** A "backup plan" that is only written down is not a backup plan, and it has to be run the way the user runs it -- normal rights, through UAC.
+6. **The elevation method has to match why the fallback exists.** If PowerShell is broken, do not elevate with PowerShell, or the fallback dies in exactly the same place as the main path.
+7. **A `.bat` is not an executable.** Handing it to `runas` loses the arguments and leaves a vague exit code 1 in the log.
+
+### 39.12 Thanks
+
+This whole section started with a report from **小蕉蕉** (Douyin, a Chinese short-video platform): the driver would not install, the program said only "the driver install did not succeed -- see the log", and the log was empty. The screenshot sent back carries `4294901760` -- `0xFFFF0000`, a number the install script itself never returns.
+
+Without that screenshot there is nothing to do but keep guessing at a wrong driver package; with it, "PowerShell does not start on this machine at all" took two minutes. The probe, the human-readable errors and the pure-cmd fallback in 1.8.7 all grew out of that one screenshot.
 
 ---
 

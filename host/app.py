@@ -285,6 +285,16 @@ class App(tk.Tk):
         self.log("%s v%s 启动  (DPI: %s)" % (APP_NAME, APP_VERSION, DPI))
         self.log("adb: %s" % (adb_exe() or "缺失"))
         self.log("ffmpeg: %s" % (ffmpeg_exe() or "缺失"))
+        # The driver install is the one thing here that needs Windows
+        # PowerShell; saying which one (or that none works) turns a failed
+        # install into something the user can act on.
+        try:
+            import ps
+            self.log("PowerShell: %s" % (("%s  %s" % (ps.version(), ps.exe()))
+                                         if ps.exe() else i18n.t("没有可用的 PowerShell",
+                                                                 "no usable PowerShell")))
+        except Exception as e:
+            self.log("PowerShell: 探测失败 %s" % e)
         self.log("设置与日志目录: %s" % paths.data_dir())
         self.log("设置文件: %s%s" % (st.where(),
                                     "" if os.path.exists(st.where()) else "  （还没有，退出时会创建）"))
@@ -1723,14 +1733,90 @@ class App(tk.Tk):
         import vdd as vd
         self._later(lambda: self.stat_var.set(i18n.t("安装驱动…", "Installing the driver...")))
         ok, out = vd.install(log=self.log)
-        for line in (out or "").splitlines()[-40:]:
-            self.log("  " + line)
+        self._log_install_output(out)
         if not ok:
-            raise RuntimeError(i18n.t("驱动安装未成功，详见日志。",
-                                      "The driver was not installed -- see the log."))
+            # vd.install() hands back a human explanation now, not a bare "see
+            # the log": on the machine that reported 0xFFFF0000 the log was
+            # empty, so pointing at it told the user nothing.  The dialog gets
+            # the first paragraph, the log panel keeps the whole thing.
+            head = self._first_paragraph(
+                out, i18n.t("驱动安装未成功，详见日志。",
+                            "The driver was not installed -- see the log."))
+            if not self._ask_cmd_fallback(head):
+                raise RuntimeError(head)
+            # 1.8.7 -- the .ps1 path needs Windows PowerShell.  On the machine
+            # that reported it, PowerShell itself could not start (exit code
+            # 0xFFFF0000, empty log), so no amount of retrying the same script
+            # would have helped.  The fallback does the same work with
+            # certutil and nefcon, neither of which needs PowerShell.
+            self.log("改用不依赖 PowerShell 的备用方式安装驱动…")
+            self._later(lambda: self.stat_var.set(
+                i18n.t("安装驱动（备用方式）…", "Installing the driver (fallback)...")))
+            ok, out = vd.install_cmd(log=self.log)
+            self._log_install_output(out)
+            if not ok:
+                raise RuntimeError(self._first_paragraph(
+                    out, i18n.t("备用方式也没能装上驱动，详见日志。",
+                                "The fallback did not install the driver either -- "
+                                "see the log.")))
+            self.log("备用方式安装驱动完成。", "ok")
         self.log("虚拟显示器驱动安装完成。", "ok")
         self._later(lambda: self.stat_var.set(i18n.t("驱动已安装", "Driver installed")))
         self._refresh_work()
+
+    def _log_install_output(self, out):
+        for line in (out or "").splitlines()[-60:]:
+            self.log("  " + line)
+
+    @staticmethod
+    def _first_paragraph(out, fallback):
+        """The first paragraph of a failure message, cut down for a dialog.
+
+        vd.install()/vd.install_cmd() return "what happened" + two newlines +
+        the log tail, and the hint() text can run several paragraphs.  A
+        messagebox that scrolls off the screen is no better than no message.
+        """
+        msg = (out or "").strip()
+        head = msg.split(chr(10) * 2)[0].strip()
+        if len(head) > 600:
+            head = head[:600] + "…"
+        return head or fallback
+
+    def _ask_cmd_fallback(self, head):
+        """Ask, on the UI thread, whether to retry with the cmd installer."""
+        box = {}
+        done = threading.Event()
+
+        def ask():
+            try:
+                box["yes"] = messagebox.askyesno(
+                    i18n.t("驱动没装上，用备用方式再试一次？",
+                           "The driver failed -- retry with the fallback?"),
+                    i18n.t(
+                        "%s" + NL + NL +
+                        "这次的失败和 Windows PowerShell 有关：有些精简过的系统里它根本启动不了。" + NL +
+                        "程序里还有一条完全不用 PowerShell 的路：用 Windows 自带的 certutil 和随包的 nefcon 做同样的事，装出来的结果是一样的。" + NL + NL +
+                        "现在用备用方式再试一次吗？它同样需要管理员权限，会再弹一次 UAC，请点“是”。",
+                        "%s" + NL + NL +
+                        "This failure involves Windows PowerShell: on some stripped-down "
+                        "Windows images it cannot start at all." + NL +
+                        "There is a second path that does not use PowerShell -- it does "
+                        "the same steps with Windows' own certutil and the bundled "
+                        "nefcon, and the result is identical." + NL + NL +
+                        "Try the fallback now?  It needs administrator rights too, so "
+                        "one more UAC prompt -- click Yes.") % head,
+                    parent=self)
+            except Exception:
+                box["yes"] = False
+            finally:
+                done.set()
+
+        try:
+            self.after(0, ask)
+        except Exception:
+            return False
+        done.wait(600)
+        return bool(box.get("yes"))
 
     def on_install_apk(self):
         self.run_bg(self._install_apk_work)
@@ -2900,6 +2986,20 @@ def main():
                              i18n.t("找不到: ", "Not found: ") + ", ".join(missing))
         applog.close()
         return 1
+    # 1.8.7: the driver installer drives tools/vdd_install.ps1 through Windows
+    # PowerShell.  A stripped Windows 10 image ships a powershell.exe that dies
+    # at startup with 0xFFFF0000, which used to surface as
+    # "安装脚本退出码 = 4294901760" plus an empty log that was supposed to
+    # explain it.  Probe once here so the log records which PowerShell we will
+    # use, or that there is none, before the user ever presses the button.
+    try:
+        import ps
+        if ps.exe():
+            applog.line("PowerShell %s: %s" % (ps.version(), ps.exe()))
+        else:
+            applog.line("没有可用的 PowerShell: " + ps.hint())
+    except Exception as e:
+        applog.line("PowerShell 探测失败: %s" % e)
     app = App()
     # Tk otherwise prints a background exception to a console that a --windowed
     # build does not have, so the one traceback that mattered was invisible.

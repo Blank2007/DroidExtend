@@ -15,14 +15,24 @@ import sys
 import time
 
 import i18n
+import ps
 
 from paths import ROOT, TOOLS, data_dir, popen
 INSTALL_SCRIPT = os.path.join(TOOLS, "vdd_install.ps1")
 VDD_SRC = os.path.join(TOOLS, "vdd", "vdd25", "VirtualDisplayDriver")
 VDD_NEF = os.path.join(TOOLS, "vdd", "nefcon", "x64", "nefconw.exe")
 VDD_SETTINGS_DIR = r"C:\VirtualDisplayDriver"
+INSTALL_CMD = os.path.join(TOOLS, "vdd_install_cmd.bat")
 HWID = r"Root\MttVDD"
 CLASS_GUID = "4D36E968-E325-11CE-BFC1-08002BE10318"
+
+# Exit codes that mean "the install script never ran", as opposed to "the script
+# ran and said no".  vdd_install.ps1 only ever exits 0/2/3/4/5, so anything in
+# this set came from the launcher or from PowerShell itself dying.  0xFFFF0000
+# is what Start-Process hands back on a Windows image where powershell.exe is
+# present but cannot start (seen on a stripped Windows 10 build); subprocess
+# reports that as the signed value -65536.  0xC0000142 is DLL init failure.
+_NO_SCRIPT = (0xFFFF0000, -65536, 0xC0000142, -1073741502)
 
 # adapter description / device id fragments that mean "this is our virtual display"
 HINTS = ("mttvdd", "virtual display driver", "parsec", "idd", "virtual display")
@@ -89,14 +99,15 @@ def device_node_exists():
     `status()` prefers the adapter, but anything that trusted the node list saw
     "no device" on a working install.
     """
-    ps = ("Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { "
+    script = ("Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object { "
           "$h = Get-PnpDeviceProperty -InstanceId $_.InstanceId "
           "-KeyName 'DEVPKEY_Device_HardwareIds' -ErrorAction SilentlyContinue; "
           "$j = ''; if ($h -and $h.Data) { $j = ($h.Data -join ';') }; "
           "if ($j -match 'MttVDD') { "
           "$_.InstanceId + '|' + $_.Status + '|' + $_.FriendlyName } }")
     try:
-        out = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps],
+        out = subprocess.run([ps.exe() or "powershell.exe", "-NoProfile",
+                              "-Command", script],
                              capture_output=True, text=True, timeout=60,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     except Exception:
@@ -149,23 +160,33 @@ def _ps_arg(s):
     return "'\"" + s.replace("'", "''") + "\"'"
 
 
-def _write_elevator(script, args):
+def _write_elevator(script, args, exe=None):
     """Write the spaceless launcher that re-runs the install script elevated.
 
     Why a generated file instead of one big inline -Command string: the install
     path can contain spaces (and does, on the machine this was developed on), and
-    nesting a quoted path through `powershell -Command "... Start-Process
-    -ArgumentList '...'"` is where quoting bugs breed.  Writing the paths as
-    PowerShell literals into a file makes the escaping trivial and inspectable.
-    """
-    import tempfile
+    nesting a quoted path through a -Command string is where quoting bugs breed.
+    Writing the paths as PowerShell literals into a file makes the escaping
+    trivial and inspectable.
 
+    exe is the PowerShell that host/ps.py probed and found working.  On a
+    stripped Windows image the bare name powershell.exe resolves to a binary
+    that dies at startup, so the launcher names the working one explicitly and
+    turns "nothing happened" into exit 1223 (canceled) instead of a silent 0.
+    """
+    exe = exe or ps.exe() or "powershell.exe"
     argv = ", ".join(_ps_arg(a) for a in args)
     body = (
-        "$ErrorActionPreference = 'Continue'\r\n"
-        "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
+        "$ErrorActionPreference = 'Stop'\r\n"
+        "try {\r\n"
+        "  $p = Start-Process -FilePath %s -Verb RunAs -Wait -PassThru "
         "-WorkingDirectory %s -ArgumentList @(%s)\r\n"
-        "exit $p.ExitCode\r\n" % (_ps_single(ROOT), argv)
+        "} catch {\r\n"
+        "  [Console]::Error.WriteLine($_.Exception.Message)\r\n"
+        "  exit 1223\r\n"
+        "}\r\n"
+        "if ($null -eq $p) { exit 1223 }\r\n"
+        "exit $p.ExitCode\r\n" % (_ps_single(exe), _ps_single(ROOT), argv)
     )
     path = os.path.join(data_dir(), "tmp", "droidextend_vdd_elevate.ps1")
     try:
@@ -206,19 +227,23 @@ def install(elevate=True, log=None):
     except OSError:
         pass
 
+    exe = ps.exe()
+    if not exe:
+        return False, ps.hint()
+
     args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", INSTALL_SCRIPT,
             "-Src", VDD_SRC, "-Nef", VDD_NEF,
             "-Dest", VDD_SETTINGS_DIR, "-Log", log_path]
 
     if is_admin() or not elevate:
-        cmd = ["powershell.exe"] + args
+        cmd = [exe] + args
     else:
         try:
-            boot = _write_elevator(INSTALL_SCRIPT, args)
+            boot = _write_elevator(INSTALL_SCRIPT, args, exe)
         except OSError as e:
             return False, i18n.t("无法准备提权脚本: %s",
                                  "could not prepare the elevation script: %s") % e
-        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", boot]
+        cmd = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", boot]
         log("正在请求管理员权限（请在弹窗中点击“是”）…")
 
     log("运行: " + " ".join(cmd))
@@ -254,10 +279,218 @@ def install(elevate=True, log=None):
                               "The install script cannot find the driver files or "
                               "nefcon.\nThat usually means an incomplete install -- "
                               "installing DroidExtend again fixes it.\n\n") + text)
-    ok = code == 0 and "=== VDD install done ===" in text
-    return ok, text
+
+    done = "=== VDD install done ===" in text
+    if not text.strip():
+        # Not a single line was written, so the script never got going.  This is
+        # the shape a stripped Windows 10 image produces: powershell.exe is
+        # present but dies at startup with 0xFFFF0000 (4294901760), and the old
+        # code could only say "see the log" about a log that was empty.
+        return False, i18n.t(
+            "安装脚本一行日志都没有留下（退出码 %s）—— 它根本没跑起来。\n\n"
+            "常见的三种原因：\n"
+            "  * UAC 窗口没有弹出来，或者被点了“否”；\n"
+            "  * 安全软件（360、火绒、电脑管家…）拦下了提权的 PowerShell；\n"
+            "  * 这台机器的 Windows PowerShell 组件缺失或损坏。\n\n%s",
+            "The install script left no log at all (exit code %s) -- it never ran.\n\n"
+            "The three usual reasons:\n"
+            "  * the UAC prompt never appeared, or it was declined;\n"
+            "  * a security suite (360, Huorong, PC Manager...) blocked the elevated "
+            "PowerShell;\n"
+            "  * this Windows image has a broken or missing PowerShell component.\n\n%s"
+        ) % (code, ps.hint())
+
+    ok = code == 0 and done
+    if not ok and done and code in _NO_SCRIPT:
+        # The launcher's exit code is unreliable when the child was elevated the
+        # other side of UAC: Start-Process -Wait -PassThru hands back 0xFFFF0000
+        # even though the script finished cleanly.  Trust what the machine shows
+        # instead of the number.
+        st = status()
+        ok = st["state"] in ("ready", "node")
+
+    if not ok:
+        tail = "\n".join([l for l in text.strip().splitlines() if l.strip()][-12:])
+        msg = i18n.t(
+            "驱动安装未成功（退出码 %s）。日志末尾：\n\n%s\n",
+            "The driver was not installed (exit code %s). End of the log:\n\n%s\n"
+        ) % (code, tail)
+        if code in _NO_SCRIPT:
+            # The script wrote something and then the engine died, or the code
+            # came from the elevated launcher rather than from the script.
+            msg += "\n" + ps.hint()
+        return False, msg
+    return True, text
 
 
+def _decode_text(raw):
+    """Decode tool output that may be UTF-8 or the console's GBK."""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+def _read_text_file(path):
+    try:
+        with open(path, "rb") as f:
+            return _decode_text(f.read())
+    except OSError:
+        return ""
+
+
+def _shell_exec_elevated(bat, params, timeout=600):
+    """Start *bat* elevated through ShellExecuteExW and wait for it.
+
+    Why not "run powershell -Command Start-Process": the whole point of the
+    fallback is that PowerShell cannot start on this machine.  ShellExecuteExW
+    with the "runas" verb raises the UAC prompt itself, so nothing but Windows
+    itself is involved.
+
+    Returns (exit_code, error_text).  exit_code is None when the process could
+    not be started at all; error_text then says why (1223 = the UAC prompt was
+    declined).
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class SHELLEXECUTEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("fMask", ctypes.c_ulong),
+            ("hwnd", wintypes.HWND),
+            ("lpVerb", wintypes.LPCWSTR),
+            ("lpFile", wintypes.LPCWSTR),
+            ("lpParameters", wintypes.LPCWSTR),
+            ("lpDirectory", wintypes.LPCWSTR),
+            ("nShow", ctypes.c_int),
+            ("hInstApp", wintypes.HINSTANCE),
+            ("lpIDList", ctypes.c_void_p),
+            ("lpClass", wintypes.LPCWSTR),
+            ("hkeyClass", wintypes.HKEY),
+            ("dwHotKey", wintypes.DWORD),
+            ("hIcon", wintypes.HANDLE),
+            ("hProcess", wintypes.HANDLE),
+        ]
+
+    SEE_MASK_NOCLOSEPROCESS = 0x00000040
+    SW_SHOWNORMAL = 1
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    # A .bat cannot be handed to "runas" directly: Windows lets the shell open
+    # it, the arguments are dropped on the way (measured: the script ran with
+    # %1 empty and exited 1), and the install looks like it failed for no
+    # reason.  Going through cmd.exe with the whole thing inside one pair of
+    # quotes passes the four paths through intact.
+    lp_file, lp_params = bat, params
+    if bat.lower().endswith((".bat", ".cmd")):
+        lp_file = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
+        lp_params = '/c ""%s" %s"' % (bat, params)
+
+    sei = SHELLEXECUTEINFOW()
+    sei.cbSize = ctypes.sizeof(sei)
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS
+    sei.lpVerb = "runas"
+    sei.lpFile = lp_file
+    sei.lpParameters = lp_params
+    sei.lpDirectory = os.path.dirname(bat)
+    sei.nShow = SW_SHOWNORMAL
+    if not shell32.ShellExecuteExW(ctypes.byref(sei)):
+        err = ctypes.get_last_error()
+        if err == 1223:
+            return None, "cancelled"
+        return None, "ShellExecuteExW failed, error %d" % err
+    if not sei.hProcess:
+        return None, "no process handle came back"
+    try:
+        rc = kernel32.WaitForSingleObject(sei.hProcess, int(timeout * 1000))
+        if rc == 0x00000102:            # WAIT_TIMEOUT
+            return None, "timed out after %d s" % timeout
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(sei.hProcess, ctypes.byref(code)):
+            return None, "could not read the exit code"
+        return int(code.value), ""
+    finally:
+        kernel32.CloseHandle(sei.hProcess)
+
+
+def install_cmd(log=None):
+    """Install the driver with tools/vdd_install_cmd.bat -- no PowerShell.
+
+    The .ps1 install needs Windows PowerShell, which on some stripped Windows
+    images cannot start at all.  This path does the same job with certutil and
+    nefcon only, and is offered to the user as "try the other way" after a
+    failed normal install.  Returns (ok, output) exactly like install().
+    """
+    log = log or (lambda m: None)
+    bat = INSTALL_CMD
+    if not os.path.isfile(bat):
+        return False, i18n.t("备用安装脚本缺失: %s", "fallback install script missing: %s") % bat
+    if not stage_present():
+        return False, i18n.t("驱动文件缺失（tools\\vdd\\vdd25\\VirtualDisplayDriver）",
+                             "driver files missing "
+                             "(tools\\vdd\\vdd25\\VirtualDisplayDriver)")
+    if not os.path.isfile(VDD_NEF):
+        return False, i18n.t("nefcon 缺失: %s", "nefcon missing: %s") % VDD_NEF
+
+    log_path = os.path.join(data_dir(), "vdd_install_cmd.log")
+    try:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+    except OSError:
+        pass
+
+    params = '"%s" "%s" "%s" "%s"' % (VDD_SRC, VDD_NEF, VDD_SETTINGS_DIR, log_path)
+    if is_admin():
+        log("备用方式运行: %s %s" % (bat, params))
+        try:
+            p = popen([bat, VDD_SRC, VDD_NEF, VDD_SETTINGS_DIR, log_path],
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            out, _ = p.communicate(timeout=600)
+            code = p.returncode
+            console = _decode_text(out or b"")
+        except subprocess.TimeoutExpired:
+            return False, i18n.t("备用方式安装超时", "the fallback install timed out")
+        except Exception as e:
+            return False, i18n.t("备用方式启动失败: %s",
+                                 "could not start the fallback install: %s") % e
+    else:
+        log("正在请求管理员权限（备用方式，请在弹窗中点击“是”）…")
+        code, err = _shell_exec_elevated(bat, params, timeout=600)
+        console = ""
+        if code is None:
+            if err == "cancelled":
+                return False, i18n.t(
+                    "UAC 被取消 —— 备用方式同样需要管理员权限。",
+                    "The UAC prompt was cancelled -- the fallback needs "
+                    "administrator rights too.")
+            return False, i18n.t("备用方式启动失败: %s",
+                                 "could not start the fallback install: %s") % err
+
+    text = _read_text_file(log_path) or console
+
+    log("备用方式退出码 = %s" % code)
+    done = "=== VDD install (cmd fallback) done ===" in text
+    if not text.strip():
+        return False, i18n.t(
+            "备用方式连日志都没写出来（退出码 %s）。",
+            "The fallback wrote no log at all (exit code %s).") % code
+    if code == 2 or "not running as administrator" in text:
+        return False, i18n.t(
+            "备用方式没有拿到管理员权限。",
+            "The fallback did not get administrator rights.") + chr(10) * 2 + text
+    ok = (code == 0) or done
+    if not ok:
+        tail = chr(10).join([l for l in text.strip().splitlines() if l.strip()][-12:])
+        return False, i18n.t(
+            "备用方式也没装成功（退出码 %s）。日志末尾：%s%s",
+            "The fallback did not install it either (exit code %s). "
+            "End of the log:%s%s") % (code, chr(10) * 2, tail)
+    log("备用方式安装完成。")
+    return True, text
 def settings_path():
     return os.path.join(VDD_SETTINGS_DIR, "vdd_settings.xml")
 
@@ -598,17 +831,20 @@ def _run_ps1(body, tag, log=None, elevate=True, timeout=180):
         return 1, "cannot write %s: %s" % (script, e)
 
     ps_args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script]
+    exe = ps.exe()
+    if not exe:
+        return 1, ps.hint()
     if elevate and not is_admin():
         try:
-            launcher = _write_elevator(script, ps_args)
+            launcher = _write_elevator(script, ps_args, exe)
         except OSError as e:
             return 1, "cannot write the elevation script: %s" % e
-        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        cmd = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass",
                "-File", launcher]
         log(i18n.t("正在请求管理员权限（请在弹窗中点击“是”）…",
                    "asking for administrator rights (please click \"Yes\")..."))
     else:
-        cmd = ["powershell.exe"] + ps_args
+        cmd = [exe] + ps_args
     try:
         p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out, _ = p.communicate(timeout=timeout)

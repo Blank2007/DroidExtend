@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.8.6"
+#define AppVer "1.8.7"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -175,6 +175,10 @@ Source: "{#P}\tools\platform-tools\adb.exe"; DestDir: "{app}\tools\platform-tool
 Source: "{#P}\tools\platform-tools\AdbWinApi.dll"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion
 Source: "{#P}\tools\platform-tools\AdbWinUsbApi.dll"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion
 Source: "{#P}\tools\vdd_install.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
+; 1.8.7 备用安装：完全不用 PowerShell，靠 certutil + nefcon 装驱动；ps1 装不上时程序会问用户要不要走这条路 / 1.8.7 fallback installer: no PowerShell at all, certutil + nefcon only; offered when the .ps1 path fails.
+Source: "{#P}\tools\vdd_install_cmd.bat"; DestDir: "{app}\tools"; Flags: ignoreversion
+; 随脚本走的 catalog 签名者证书（SignPath Foundation），certutil 装上它驱动才可信 / The catalog signer certificate (SignPath Foundation) that travels with the script; certutil needs it for the driver to be trusted.
+Source: "{#P}\tools\vdd_signer.cer"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#P}\tools\vdd\nefcon\x64\nefconw.exe"; DestDir: "{app}\tools\vdd\nefcon\x64"; Flags: ignoreversion
 Source: "{#P}\tools\vdd\vdd25\VirtualDisplayDriver\*"; DestDir: "{app}\tools\vdd\vdd25\VirtualDisplayDriver"; Flags: ignoreversion
 Source: "{#P}\dist\DroidExtend.apk"; DestDir: "{app}\dist"; Flags: ignoreversion

@@ -34,10 +34,20 @@ import urllib.parse
 import urllib.request
 
 import i18n
+import ps
 
 from paths import data_dir
 
 from version import APP_VERSION, LATEST_RELEASE_API, RELEASES_URL, USER_AGENT
+
+def _ps_exe():
+    """The PowerShell that actually starts on this machine (see host/ps.py).
+
+    A stripped Windows image ships powershell.exe that dies at startup with
+    0xFFFF0000; ps.exe() probes and falls back to pwsh when that happens.
+    """
+    return ps.exe() or "powershell.exe"
+
 
 SETUP_PREFIX = "DroidExtend-Setup-"
 SETUP_SUFFIX = ".exe"
@@ -270,12 +280,12 @@ def signature_status(path, timeout=25):
     Purely informational: the build is not signed, so the caller must not treat
     "NotSigned" as a failure -- the hashes are what pin the bytes.
     """
-    ps = ("$s = Get-AuthenticodeSignature -LiteralPath %s; "
-          "Write-Output $s.Status; Write-Output $s.SignerCertificate.Subject"
-          % _ps_quote(path))
+    script = ("$s = Get-AuthenticodeSignature -LiteralPath %s; "
+              "Write-Output $s.Status; Write-Output $s.SignerCertificate.Subject"
+              % _ps_quote(path))
     try:
         p = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            [_ps_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out = p.stdout.decode("utf-8", "replace").splitlines()
@@ -371,6 +381,11 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
     else:
         cleanup = "Say 'keeping the installer'"
     d = update_dir(work_dir)
+    if not ps.exe():
+        # Nothing to run the script with.  Say it in the user's words here:
+        # Popen would raise FileNotFoundError and the window would show
+        # "[WinError 2] 系统找不到指定的文件", which tells nobody anything.
+        return False, ps.hint(), ""
     try:
         script = os.path.join(d, "apply_update.ps1")
         logp = os.path.join(d, "apply_update.log")
@@ -402,19 +417,20 @@ def run_installer(installer, exe="", pid=None, install_dir="", delete_installer=
             base = (getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
             breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+            exe = _ps_exe()
             try:
-                subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                subprocess.Popen([exe, "-NoProfile", "-NonInteractive",
                                   "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
                                   "-File", script],
                                  close_fds=True, creationflags=base | breakaway, cwd=d)
             except OSError:
                 flags = base
-                subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+                subprocess.Popen([exe, "-NoProfile", "-NonInteractive",
                                   "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
                                   "-File", script],
                                  close_fds=True, creationflags=flags, cwd=d)
         else:
-            subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive",
+            subprocess.Popen([_ps_exe(), "-NoProfile", "-NonInteractive",
                               "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
                               "-File", script],
                              close_fds=True, creationflags=flags, cwd=d)

@@ -5,6 +5,7 @@ import subprocess
 import time
 
 import i18n
+import ps
 
 from paths import TOOLS, adb_exe, popen
 from version import REPO_URL
@@ -263,10 +264,12 @@ DRIVER_URL = "https://developer.android.com/studio/run/win-usb"
 
 
 def _powershell(script, timeout=30):
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    exe = os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-    if not os.path.exists(exe):
-        exe = "powershell"
+    # ps.exe() falls back to PowerShell 7 when the built-in 5.1 is unusable --
+    # see the module docstring in ps.py for what a stripped Windows 10 image
+    # does to Get-NetTCPConnection and friends.
+    exe = ps.exe()
+    if not exe:
+        return ""
     try:
         p = popen([exe, "-NoProfile", "-NonInteractive", "-Command", script],
                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
