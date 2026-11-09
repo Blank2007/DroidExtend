@@ -63,6 +63,7 @@
 | [37](#37-185-on-a-dual-gpu-machine-ddagrab-could-only-see-one-graphics-card) | 1.8.5: dual GPU / which card / APK version check | one screen belongs to two cards; only the right one shows |
 | [38](#38-186-the-gear-would-not-open-and-a-tablet-stood-on-end) | 1.8.6: a button size of your own / screen direction | the tap test measured the wrong distance; a tablet stood up becomes a tall screen |
 | [39](#39-187-a-machine-that-would-not-take-the-driver-and-its-broken-powershell) | 1.8.7: PowerShell probe / a message that says why | exit code 4294901760 means the script never ran |
+| [40](#40-188-mumus-virtual-screen-was-mistaken-for-ours) | 1.8.8: a misidentified adapter / naming what else is on the machine | one \`in\` picked somebody else's virtual screen |
 
 ---
 
@@ -4023,6 +4024,131 @@ The first version pointed `ShellExecuteExW`'s `lpFile` straight at the `.bat`. T
 This whole section started with a report from **小蕉蕉** (Douyin, a Chinese short-video platform): the driver would not install, the program said only "the driver install did not succeed -- see the log", and the log was empty. The screenshot sent back carries `4294901760` -- `0xFFFF0000`, a number the install script itself never returns.
 
 Without that screenshot there is nothing to do but keep guessing at a wrong driver package; with it, "PowerShell does not start on this machine at all" took two minutes. The probe, the human-readable errors and the pure-cmd fallback in 1.8.7 all grew out of that one screenshot.
+
+## 40. 1.8.8: MuMu's virtual screen was mistaken for ours
+
+### 40.1 The report
+
+The same user (Douyin: 废紙箱, the one from 1.8.3 and 1.8.4 with the black mirror on a Huawei tablet) sent another log on 1.8.7 -- this time the other way round:
+
+> 还是上次的反馈 就是华为设备的问题 镜像功能差不多了 拓展出现问题
+
+("Same issue as last time, the Huawei one. Mirroring is about there; extending is now the broken part.")
+
+The dialog in his screenshot said `RuntimeError: 虚拟显示器 \.\DISPLAY10 无法激活（未上桌面）` -- the virtual display could not be activated.
+
+### 40.2 Symptom: mirroring worked, extending never once did
+
+Those 121 log lines spell it out in the one minute around 18:21:
+
+```
+虚拟显示器: \.DISPLAY10 (MuMu Virtual Display Adapter)
+手机分辨率 2880x1920（横屏）
+驱动模式表读不到，按 1920x1080 处理
+激活显示器 attach rc=-1             (five times)
+attach 未生效，改用扩展拓扑 rc=31    (five times)
+RuntimeError: 虚拟显示器 \.DISPLAY10 无法激活（未上桌面）
+```
+
+Three details together tell the story:
+
+1. The adapter it picked is named **MuMu Virtual Display Adapter** -- that is the Android emulator's screen, not this program's driver.
+2. "驱动模式表读不到" (the mode table could not be read) -- this program's mode table lives in `C:\VirtualDisplayDriver\vdd_settings.xml`; not finding it means **this program's driver was never installed**.
+3. It still tried to attach, aimed at MuMu's `\\.\DISPLAY10`, and failed five times.
+
+Mirroring in the same log was fine (`采集 58 fps · 发送 6.7 Mbps · 手机 收 60 / 显示 60`), because mirroring only captures the main screen and never touches a virtual display. Hence "mirroring works, extending is dead".
+
+### 40.3 Root cause: one `in` was enough to pick the wrong screen
+
+The last pass of `find_vdd_adapter()` in `host/vdd.py` used to be:
+
+```python
+if "virtual display" in desc and "gameviewer" not in desc:
+    return a
+```
+
+`desc` is the adapter's description string. Our driver calls itself "Virtual Display Driver"; MuMu, GameViewer, Parsec and SpaceDesk all put "Virtual Display" in theirs too. GameViewer was the only one excluded, **because the development machine happened to have that one installed** -- this machine still lists ten GameViewer screens.
+
+The user's machine runs MuMu, so:
+
+- `find_vdd_adapter()` returned MuMu's adapter, and `status()` therefore said `state="ready"`;
+- the left panel showed "virtual display ready", so nothing suggested installing the driver;
+- `_match_phone()` could not read a mode table and fell back to 1920x1080;
+- the attach aimed at MuMu's screen failed, five retries, then the dialog.
+
+**A wrong answer is worse than no answer.** It turned "the driver is not installed, install it first" into an attach failure nobody could decode.
+
+### 40.4 The fix
+
+`find_vdd_adapter()` now uses three passes, strongest evidence first:
+
+1. the adapter id contains `mttvdd` -- the device node's hardware id, present as soon as the driver is installed;
+2. one of its monitors has an id containing `mtt1337` or `mttvdd` -- the monitor hardware id MttVDD hands Windows;
+3. the description contains Virtual Display Driver and is not on the blacklist.
+
+The blacklist is `FOREIGN = ("mumu", "parsec", "gameviewer", "spacedesk", "usbmmidd", "virtual display adapter", "virtual monitor")`. The old `HINTS` constant had no references left anywhere in the tree, so it is gone.
+
+New `foreign_adapters()` lists the look-alikes, and `status()` carries a `foreign` field. It is only non-empty when our own adapter is missing, and `session.apply_display()` writes it into the log:
+
+```
+  这台机器上还有别的虚拟显示适配器：MuMu Virtual Display Adapter (\\.\DISPLAY10)
+  它们不是本程序的屏，已忽略。
+```
+
+("This machine also has virtual display adapters from other software: ... They are not this program's screen and were ignored.")
+
+One line explains why the panel said "ready" before and says "not installed" now, so the next log needs no guessing.
+
+One more line, for the capture side: when ddagrab cannot open a single output, after listing every failure per card and per output it now ends with a plain sentence --
+
+```
+    常见原因：显卡驱动不提供可捕获的桌面输出（远程桌面、安卓模拟器、虚拟机会这样），
+    或桌面正被别的程序独占。gdigrab 直接抓屏幕像素，不需要这条通路。
+```
+
+("Usual causes: the graphics driver offers no capturable desktop output -- remote desktop, Android emulators and virtual machines do this -- or something else holds the desktop. gdigrab reads screen pixels directly and does not need that path.")
+
+That user's mirroring went down exactly this road (both cards failed ddagrab: `Failed to configure output pad` on card 0, `Failed to enumerate DXGI output` on card 1). The log had the reason all along; what it lacked was a sentence saying "so do not worry about it".
+
+### 40.5 Verification
+
+| Case | How | Result |
+|---|---|---|
+| MuMu only | forged adapter list into `find_vdd_adapter()` | returns None; `foreign_adapters()` names MuMu |
+| MuMu + Parsec + GameViewer | same | returns None; all three named |
+| MuMu next to the real VDD | same | picks the real one (id contains mttvdd), MuMu still named |
+| monitor hardware id only | same | found through MTT1337 |
+| description only | same | found through pass 3 |
+| Parsec alone | same | never mistaken for ours |
+| Real machine (ten GameViewer screens present) | `probe188.py` runs `apply_display()` | `虚拟显示器: \\.\DISPLAY20 (Virtual Display Driver)` → `拓展屏就绪 2560x1600@120 at (2560,0)`; desktop back to 2560x1600 after stop; `status` reports `foreign` 0 |
+| User's machine simulated (MuMu only, driver absent) | `mock188.py` swaps `enum_adapters()` | no attach retries, MuMu named in the log, raises `VddMissing: 未准备驱动文件` → the window says "the virtual display is not ready: driver files not staged / press install the virtual display driver first" |
+
+Twelve unit assertions pass (`D:\probe_test\vdd_foreign_test.py`).
+
+### 40.6 Lessons
+
+1. **A whitelist has to be written down; a blacklist is never long enough.** GameViewer was excluded only because the development machine had it. Look for evidence that only our own driver produces (hardware ids), not for wording in a description.
+2. **A wrong answer is worse than no answer.** Picking the wrong screen turned "the driver is missing" into five attach failures whose only clue was a display number the user had never heard of.
+3. **On failure, name what is on the machine.** "There are also X and Y, ignored" in the log beats any explanation.
+4. **When half of a feature works, the two halves probably do not share a code path.** Mirroring captures the main screen, extending creates one; a working mirror says nothing about the extending code.
+
+---
+
+### 40.7 Thanks
+
+This section comes from the second report by **废紙箱** (Douyin, a Chinese short-video platform).
+
+The first was around 1.8.3 and 1.8.4: a black picture while mirroring on a Huawei tablet. He sent several logs in a row and made the shape of it plain -- extending worked, mirroring did not -- which is what produced the uplink channel in 1.8.4 ("let the phone report back").
+
+This one was on 1.8.7: mirroring finally worked, and extending died every time with "the virtual display could not be activated". He sent the log together with a screenshot, and the single decisive line was this one:
+
+```
+虚拟显示器: \\.\DISPLAY10 (MuMu Virtual Display Adapter)
+```
+
+His machine had an Android emulator installed. That line is the whole clue: the program had picked the wrong screen and believed it had picked the right one. Without it there is nothing to do but keep guessing -- wrong driver package, outdated graphics driver, and so on.
+
+The fix is short (identify the screen by hardware id instead of description text), but finding it started from that line.
 
 ---
 

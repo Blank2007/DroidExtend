@@ -1023,6 +1023,9 @@ class Capture(object):
                     errs = ddagrab_errors()
                     for key in sorted(errs)[:6]:
                         self.log("    显卡%d #%d: %s" % (key[0], key[1], errs[key] or "?"))
+                    self.log("    常见原因：显卡驱动不提供可捕获的桌面输出（远程桌面、"
+                             "安卓模拟器、虚拟机会这样），或桌面正被别的程序独占。"
+                             "gdigrab 直接抓屏幕像素，不需要这条通路。")
             try:
                 cmd = self.command(backend)
             except Exception as e:

@@ -34,8 +34,11 @@ CLASS_GUID = "4D36E968-E325-11CE-BFC1-08002BE10318"
 # reports that as the signed value -65536.  0xC0000142 is DLL init failure.
 _NO_SCRIPT = (0xFFFF0000, -65536, 0xC0000142, -1073741502)
 
-# adapter description / device id fragments that mean "this is our virtual display"
-HINTS = ("mttvdd", "virtual display driver", "parsec", "idd", "virtual display")
+# Descriptions that mean "this is somebody else's virtual display".  They all
+# contain "virtual display" too, which is why a loose match on that phrase used
+# to hand MuMu Player's or Parsec's screen to the attach code (1.8.8).
+FOREIGN = ("mumu", "parsec", "gameviewer", "spacedesk", "usbmmidd",
+           "virtual display adapter", "virtual monitor")
 
 # The driver hands Windows ONE flat list of target modes and builds it as
 # (every <resolution>) x (every <g_refresh_rate>).  That list lives in a fixed
@@ -67,26 +70,72 @@ def stage_present():
     return os.path.isfile(os.path.join(VDD_SRC, "MttVDD.inf"))
 
 
-def find_vdd_adapter(adapters=None):
-    """Return the enum_adapters() entry for the virtual display, or None.
+def _is_foreign(desc):
+    """True when this adapter description belongs to somebody else's software."""
+    low = (desc or "").lower()
+    return any(k in low for k in FOREIGN)
 
-    Detection is by hardware id first (unambiguous) and by description second,
-    because the adapter only appears in the display enum once its device node
-    exists - a driver that is installed but has no device yet is invisible here.
+
+def find_vdd_adapter(adapters=None):
+    """Return the enum_adapters() entry for *this program's* virtual display.
+
+    Three passes, strongest evidence first:
+
+    1. the adapter id contains "mttvdd" -- the device node's hardware id,
+       known from the moment the driver's device exists;
+    2. a monitor under the adapter reports MTT1337 -- the monitor hardware id,
+       which MttVDD hands Windows even on rows whose adapter id looks generic;
+    3. the adapter is literally called "Virtual Display Driver" and is not one
+       of the look-alikes listed in FOREIGN.
+
+    Pass 3 used to accept any description containing "virtual display".  MuMu
+    Player, Parsec, GameViewer and SpaceDesk all install an adapter whose
+    description contains exactly that, so on a machine with one of them the
+    program picked *their* screen, found no mode table ("驱动模式表读不到"), and
+    reported "the virtual display could not be activated" -- while this
+    program's own driver was not even installed.  A wrong answer here is worse
+    than no answer: it turns "the driver is missing, install it" into an
+    unexplainable failure with five attach retries in the log.
     """
     if adapters is None:
         from win_display import enum_adapters
         adapters = enum_adapters()
     for a in adapters:
-        ident = (a.get("id") or "").lower()
-        if "mttvdd" in ident:
+        if "mttvdd" in (a.get("id") or "").lower():
             return a
     for a in adapters:
-        desc = (a.get("desc") or "").lower()
-        if "virtual display" in desc and "gameviewer" not in desc:
+        for m in (a.get("modes") or ()):
+            mid = (m.get("id") or "").lower()
+            if "mtt1337" in mid or "mttvdd" in mid:
+                return a
+    for a in adapters:
+        low = (a.get("desc") or "").lower()
+        if "virtual display driver" in low and not _is_foreign(low):
             return a
     return None
 
+
+def foreign_adapters(adapters=None):
+    """Virtual display adapters that belong to other software, as dicts.
+
+    Used for one thing: when our own adapter is missing, the log can name the
+    look-alikes it saw and ignored instead of leaving the user to wonder why
+    the left panel showed a ready screen and 开始投屏 still failed.
+    """
+    if adapters is None:
+        from win_display import enum_adapters
+        adapters = enum_adapters()
+    out = []
+    for a in adapters:
+        low = (a.get("desc") or "").lower()
+        if "virtual display" not in low and "virtual monitor" not in low:
+            continue
+        own = ("mttvdd" in (a.get("id") or "").lower()
+               or ("virtual display driver" in low and not _is_foreign(low)))
+        if own:
+            continue
+        out.append({"name": a.get("name"), "desc": a.get("desc")})
+    return out
 
 def device_node_exists():
     """Ask PnP whether our device node exists at all (works even when the
@@ -143,6 +192,9 @@ def status():
         "node": node,
         "adapter": adapter,
         "files": driver_files_present(),
+        # Only meaningful when our own adapter is missing: the look-alikes
+        # that were seen and ignored (MuMu, Parsec, ...), for the log to name.
+        "foreign": [] if adapter is not None else foreign_adapters(),
     }
 
 

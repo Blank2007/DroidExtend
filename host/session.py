@@ -260,6 +260,23 @@ class Session(object):
                 "display down for real\", or set the \"when not in use\" choice back to "
                 "\"just take it off the desktop\"."))
 
+    def _name_foreign(self, foreign):
+        """说出「还有别的虚拟屏，但不是本程序的」这件事。
+
+        防的是这个：1.8.7 及以前 MuMu 模拟器、Parsec 的虚拟显示适配器会被
+        认成本程序的 VDD（它们的描述里也有 virtual display），于是程序显示
+        「虚拟显示器已就绪」、真正开始投屏却 attach 五次全失败、最后弹
+        「虚拟显示器无法激活」，而日志里一个字都没提这台机器上还有第二块
+        虚拟屏 —— 用户只能猜。现在把它们过滤掉了，就顺手点一次名。
+        """
+        if not foreign:
+            return
+        labels = " / ".join(
+            "%s (%s)" % (x.get("desc") or "?", x.get("name") or "?")
+            for x in foreign)
+        self.log("  这台机器上还有别的虚拟显示适配器：%s" % labels)
+        self.log("  它们不是本程序的屏，已忽略。")
+
     def _shut_vdd_down(self):
         """程序退出时按档位把虚拟屏收起来。deep 档要提权。"""
         import vdd as vd
@@ -332,6 +349,7 @@ class Session(object):
             self._ensure_vdd_on()
             st = vd.status()
             if st["state"] != "ready":
+                self._name_foreign(st.get("foreign"))
                 raise VddMissing(vd.summary_line(st))
         a = st["adapter"]
         name = a["name"]
