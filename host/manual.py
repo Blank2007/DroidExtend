@@ -63,6 +63,9 @@ DroidExtend 使用说明   v{ver}
   拖动时位置最快每 16 毫秒更新一条（正好是一帧），中间过时的位置会被丢掉，
   但按下、抬起、右键、滚动这些事件一个都不会少。
 
+  不想让手机控制电脑？右栏「手机触摸控制电脑」的勾随时取消、随时勾回来
+  （1.9.0 起），画面照旧，不重连也不中断。
+
   注意：触摸注入的是「那块虚拟屏」上的坐标，鼠标会真的跑到那块屏去，
   所以主屏上的鼠标位置会跟着跳，这是正常的。
   手机转过来，画面会跟着转：手机端「显示设置」里的「屏幕方向」有三档
@@ -87,6 +90,13 @@ DroidExtend 使用说明   v{ver}
   屏幕位置    虚拟屏放在主屏的哪一边。放右边就是「往右拖窗口」。
   显示鼠标指针  把鼠标画进画面里。
   每次重新安装 APK  手机上已经装过就可以取消勾选，开始会快很多。
+  手机触摸控制电脑  勾掉之后手机上的触摸不再控制电脑，画面照旧（1.9.0 起）。
+  开机自动启动  登录 Windows 后自动在后台起来（托盘图标）。
+  开机后自动开始投屏  开机自己开始投屏，不用手点；勾它会自动勾上「开机自动启动」。
+  开机后最多等手机  等到手机为止的最长等待：30 秒 / 60 秒 / 2 分钟 / 5 分钟 /
+              一直等，默认 60 秒。等不到、或者哪一步出错，会发一条 Windows
+              系统通知（有托盘图标时用托盘气泡）；任何时候手动点「开始投屏」
+              或「停止」，它就退开不再等。
 
 【六、常见问题】
   Q: 手机上有画面，但只有壁纸和一条任务栏，看着和主屏一模一样？
@@ -186,6 +196,65 @@ DroidExtend 使用说明   v{ver}
   A: 虚拟屏是按「屏幕位置」贴着主屏放的。放在右边时，鼠标一直往右移就过去了。
      也可以按 Win+P 看当前是「扩展」还是「仅电脑屏幕」。
 
+  —— 1.8.4 以后这几版新出现的问题 ——
+
+  Q: 驱动明明装过了，左边那个按钮怎么还是亮着的？（1.9.1）
+  A: 以前按钮只认「屏幕已经就绪」这一种状态，而选了「退出程序时彻底关闭」的人
+     一退出设备节点就被禁用，下次打开必然「没就绪」，于是按钮一直是亮的。
+     1.9.1 起按钮会说清自己在哪一步：
+     · 「安装虚拟显示器驱动（需要管理员）」= 真的没装；
+     · 「启用虚拟显示器驱动（需要管理员）」= 装了，但设备被关着，点一下打开就行
+       （不用重装，也不会白等一次 UAC 再复制一堆本来就在的文件）；
+     · 「虚拟显示器驱动已安装」= 装好了、正开着，这时按钮是灰的。
+
+  Q: 想彻底把虚拟显示器驱动从系统里去掉？（1.9.1）
+  A: 菜单 工具 -> 卸载虚拟显示器驱动…。它会删掉驱动包和虚拟屏的设备节点，
+     但保留 C:\\VirtualDisplayDriver 里的分辨率表（自己加过的尺寸都还在）
+     和本程序的全部设置。卸载后投屏用不了，要投屏时再装一次。
+     正在投屏会先自动「停止」，不会留下一块挂在桌面上的空屏。
+
+  Q: 通知能关吗？能只通知失败、不通知成功？（1.9.1）
+  A: 能。顶部菜单「通知」里是一个总开关加七类分开勾：投屏开始（自动那次）/
+     手动点开始也通知 / 失败或中断 / 驱动安装启用卸载 / 有新版本 / 手机端
+     App 需要更新 / 其它提示。默认除了「手动点开始也通知」之外都是开的——
+     自己刚点完的按钮再弹一条，多数人嫌吵。
+     「发一条测试通知」可以立刻验证通不通。发不出来最常见的原因是 Windows
+     设置里关掉了本程序的通知，或者开着「专注助手」，菜单里有「Windows 通知设置…」。
+
+  Q: 开机自动开始投屏，结果一直没开始 / 没画面？（1.9.0）
+  A: 两个勾都要在：右栏「开机自动启动」和「开机后自动开始投屏」。
+     「开机后最多等手机」默认 60 秒，可以改 30 秒 / 2 分钟 / 5 分钟 / 一直等。
+     等到会自己开始并点亮手机屏幕；等不到会弹一条 Windows 通知
+     （窗口在托盘里也看得见）。手动点「开始投屏」或「停止」会立刻让这套自动
+     流程退开，不跟人抢按钮。通知里如果说虚拟屏没准备好，先点左栏那个「启用…」
+     按钮——自动流程碰到这一类错不会反复试。
+
+  Q: 装驱动时只弹一句「详见日志」，日志却是空的？（1.8.7）
+  A: 那是 Windows PowerShell 起不来了（退出码 0xFFFF0000 就是它的特征），
+     脚本一行都没跑到，日志当然是空的。1.8.7 起会直接说清原因，并且问你要不要
+     用「不依赖 PowerShell 的备用方式」（certutil + nefcon，纯命令行）再来一次。
+     两次都失败就按日志里的提示修 PowerShell：管理员命令行跑 sfc /scannow 和
+     DISM /Online /Cleanup-Image /RestoreHealth，或者装一个 PowerShell 7。
+     程序启动时日志里有一行「PowerShell: 5 …」，那行就是它现在在用的那个。
+
+  Q: 左边「采集显卡」那一行是什么？为什么有时是「——」？（1.8.5）
+  A: 它写的是画面到底从哪块显卡上抄下来的、以及用谁编码，例如
+     「采集显卡: 显卡0 "NVIDIA GeForce RTX 5070 Laptop GPU"（输出 #1）／编码: NVIDIA 显卡的 NVENC」。
+     没在投屏时是「——」。双显卡机器上这行很有用：1.8.5 之前 ddagrab 只看得见
+     一张显卡的输出，虚拟屏在另一张卡上时会找不到，白白掉回 gdigrab。
+
+  Q: 装了 MuMu / Parsec / GameViewer 之后，扩展屏开了但手机没画面？（1.8.8）
+  A: 1.8.8 修的就是这个。以前程序按名字模糊匹配「virtual display」，会把 MuMu 等
+     软件自己的虚拟显示适配器当成本程序的屏，于是"找到了屏"、其实一块也没挂上。
+     现在只认本程序自己的驱动（MttVDD / MIT1337），日志里也会写出它看到的外来适配器。
+
+  Q: 华为 / 鸿蒙设备投屏没画面，从哪儿查？（1.8.4）
+  A: 1.8.4 起两端都会留证据：主机每 10 秒一行
+     「采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 8 ms」，
+     手机端也会把解码器事件回给主机（配置成功、第一帧上屏、Surface 被替换等）。
+     把这几行一起发到 issue 里，就能分清是「主机没发」还是「手机收了没显示」。
+     README 里「华为 / 鸿蒙设备」一节有更完整的排查顺序。
+
 【七、设置、更新与文件位置】
   · 你改过的参数会自动记住，下次打开软件还是上次的配置。
   · 设置文件： 程序目录里的 settings.json（1.6.6 起所有数据都在安装目录里）
@@ -276,6 +345,10 @@ DroidExtend manual   v{ver}
   position updates at most once every 16 ms (exactly one frame), and the stale
   positions in between are dropped; but not one event is ever lost.
 
+  Do not want the phone driving the PC?  The "phone touch controls the PC" box
+  on the right can be cleared and ticked again mid-stream (since 1.9.0); the
+  picture keeps running and nothing reconnects.
+
   Note: touch is injected at coordinates on that virtual screen, so the real
   cursor does move over there and the pointer leaves your main screen.  That is
   normal.  Turn the phone and the picture follows: "Screen direction" in the
@@ -310,6 +383,16 @@ DroidExtend manual   v{ver}
   Draw pointer   Paints the mouse cursor into the picture.
   Reinstall APK  Untick this once the phone already has the app; starting gets
                  much faster.
+  Phone touch    Unticking this stops the phone from driving the PC; the picture
+                 is unaffected (since 1.9.0).
+  Start with Windows     Comes up in the background (tray icon) at logon.
+  Stream after boot      Starts streaming by itself after boot; ticking it also
+                         ticks "Start with Windows".
+  Wait for the phone     Longest wait for the phone: 30 s / 60 s / 2 min / 5 min
+                         / keep waiting -- 60 s by default.  If it never turns
+                         up, or a step fails, a Windows notification says so (a
+                         tray balloon when there is an icon); pressing Start or
+                         Stop by hand makes it stand down.
 
 [6] Common questions
   Q: The phone shows a picture, but it is only wallpaper and a taskbar, and it
@@ -448,6 +531,77 @@ DroidExtend manual   v{ver}
   A: The virtual screen is placed against the main one according to "Position".
      When it is on the right, keep moving the mouse right and you will reach it.
      Win+P also shows whether Windows is in Extend or PC screen only.
+
+  -- problems new since 1.8.4 --
+
+  Q: The driver is definitely installed, so why is the left button still lit up? (1.9.1)
+  A: The button used to mean one thing only -- "the screen is ready" -- and anyone who
+     quits with the "off for real" setting has the device node disabled, so the next
+     launch is never "ready" and the button stayed lit.  Since 1.9.1 it says which of
+     three situations you are in:
+     . "Install the virtual display driver (needs admin)" -- it really is missing;
+     . "Turn the virtual display driver on (needs admin)" -- installed but the node is
+       off; press it to switch the node back on (no reinstall, no waiting through a
+       second UAC prompt to copy files that are already there);
+     . "The virtual display driver is installed" -- installed and running, greyed out.
+
+  Q: How do I remove the virtual display driver completely? (1.9.1)
+  A: Tools -> Remove the virtual display driver...  It deletes the driver package and
+     the device node, and keeps both the resolution table in C:\\VirtualDisplayDriver
+     (every size you added is still there) and all of this program's settings.
+     Streaming will not work until the driver is installed again.  A running stream is
+     stopped first, so no empty screen is left on the desktop.
+
+  Q: Can notifications be turned off, or limited to failures? (1.9.1)
+  A: Yes.  The "Notifications" menu at the top has a master switch and one box per
+     kind: the stream started by itself / also when I press Start myself / failed or
+     broke off / driver installed, turned on or removed / a newer version / the phone
+     app needs updating / everything else.  All are on by default except "also when I
+     press Start myself", which is noise for most people.
+     "Send a test notification" says straight away whether it works.  When it does not,
+     the usual reason is Windows itself: notifications for this app turned off, or
+     Focus Assist on.  The menu links to the Windows settings.
+
+  Q: The stream should start by itself at boot, but nothing happens? (1.9.0)
+  A: Both boxes have to be ticked: "Start with Windows" and "Stream after boot".
+     "Wait for the phone" defaults to 60 s and can be 30 s / 2 min / 5 min / forever.
+     When the phone turns up it starts and wakes the screen; when it does not you get a
+     Windows notification, even with the window in the tray.  Pressing Start or Stop by
+     hand calls the automatic attempt off at once -- it never fights the user for the
+     button.  If the notification says the virtual display is not ready, press the
+     "turn on ..." button first: the automatic attempt does not retry that kind of error.
+
+  Q: Installing the driver only says "see the log", and the log is empty? (1.8.7)
+  A: That is Windows PowerShell failing to start (exit code 0xFFFF0000 is its
+     signature): the script never ran a line, so of course the log is empty.  Since
+     1.8.7 the program says so, and offers the fallback that does not use PowerShell at
+     all (certutil + nefcon, plain command line).  If both fail, repair PowerShell as the
+     log suggests: sfc /scannow and DISM /Online /Cleanup-Image /RestoreHealth in an
+     admin prompt, or install PowerShell 7.  The log line "PowerShell: 5 ..." at startup
+     says which one is in use.
+
+  Q: What is that "Capture GPU" line on the left, and why does it say "-"? (1.8.5)
+  A: It names the graphics card the picture is actually copied from, and what encodes
+     it, for example "Capture GPU: GPU0 'NVIDIA ...' (output #1) / encoding: NVIDIA
+     NVENC".  It shows "-" while nothing is streaming.  On a dual-GPU machine this is
+     the line to read: before 1.8.5 ddagrab only ever saw the outputs of one card, so a
+     virtual screen sitting on the other one was not found and capture fell back to
+     gdigrab for no visible reason.
+
+  Q: With MuMu / Parsec / GameViewer installed, the extended screen starts but the phone stays black? (1.8.8)
+  A: That is what 1.8.8 fixed.  The program used to match adapters by a fuzzy
+     "virtual display" substring, so another program's virtual adapter was taken for its
+     own -- "found the screen" while nothing had actually been attached.  It now
+     recognises only its own driver (MttVDD / MIT1337) and logs the foreign adapters it
+     noticed.
+
+  Q: A Huawei / HarmonyOS device shows no picture.  Where do I look? (1.8.4)
+  A: Since 1.8.4 both ends leave evidence.  The host writes one line every 10 s:
+     "capture 120 fps / sending 19.8 Mbps / phone receiving 121 fps / showing 122 fps / 8 ms",
+     and the phone reports decoder events back (configured, first frame on screen,
+     surface replaced).  Post those lines in the issue and it becomes obvious whether the
+     host never sent or the phone received and never showed.  The "Huawei / HarmonyOS"
+     section of the README has the full order to try.
 
 [7] Settings, updates and where the files live
   . Your settings are remembered; the next launch starts where you left off.

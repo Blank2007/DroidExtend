@@ -23,6 +23,10 @@ VDD_SRC = os.path.join(TOOLS, "vdd", "vdd25", "VirtualDisplayDriver")
 VDD_NEF = os.path.join(TOOLS, "vdd", "nefcon", "x64", "nefconw.exe")
 VDD_SETTINGS_DIR = r"C:\VirtualDisplayDriver"
 INSTALL_CMD = os.path.join(TOOLS, "vdd_install_cmd.bat")
+# 1.9.1 -- uninstall.  Two files for the same reason the installer has two: on
+# some stripped Windows images PowerShell cannot start at all (1.8.7).
+UNINSTALL_SCRIPT = os.path.join(TOOLS, "vdd_uninstall.ps1")
+UNINSTALL_CMD = os.path.join(TOOLS, "vdd_uninstall_cmd.bat")
 HWID = r"Root\MttVDD"
 CLASS_GUID = "4D36E968-E325-11CE-BFC1-08002BE10318"
 
@@ -176,6 +180,18 @@ def status():
     adm = is_admin()
     node = device_node_exists()
     adapter = find_vdd_adapter()
+    # 1.9.1 -- "the driver is installed" and "the screen is switched on" are two
+    # different questions, and the window used to answer both from state alone.
+    # Quitting with the "off for real" setting disables the device node, so on
+    # the next start state is "node" and the install button came back enabled on
+    # a machine whose driver was installed -- which reads as "the install did not
+    # stick".  The node's own status is what the button needs: Error means
+    # "installed, currently disabled", OK means "installed and running".
+    enabled = None
+    if node:
+        _st = (node[0].get("status") or "").strip().lower()
+        if _st:
+            enabled = _st == "ok"
     if adapter is not None:
         state = "ready"
     elif node:
@@ -190,6 +206,8 @@ def status():
         "admin": adm,
         "state": state,          # missing | download | staged | node | ready
         "node": node,
+        # True = node started, False = node disabled, None = cannot tell.
+        "enabled": enabled,
         "adapter": adapter,
         "files": driver_files_present(),
         # Only meaningful when our own adapter is missing: the look-alikes
@@ -376,8 +394,14 @@ def install(elevate=True, log=None):
 
 
 def _decode_text(raw):
-    """Decode tool output that may be UTF-8 or the console's GBK."""
-    for enc in ("utf-8", "gbk"):
+    """Decode tool output that may be UTF-8 or the console's GBK.
+
+    1.9.1 -- "utf-8-sig" comes first: PowerShell 5.1 writes its Add-Content
+    -Encoding UTF8 logs with a BOM, and plain "utf-8" keeps that BOM as a
+    stray \ufeff on the first line (invisible, but it lands at the front of
+    the first line the GUI shows).
+    """
+    for enc in ("utf-8-sig", "gbk"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
@@ -543,6 +567,123 @@ def install_cmd(log=None):
             "End of the log:%s%s") % (code, chr(10) * 2, tail)
     log("备用方式安装完成。")
     return True, text
+
+
+def uninstall(elevate=True, log=None):
+    """Remove our device node and driver package -- and nothing else.
+
+    What it deliberately does NOT touch, because "uninstall the driver" must
+    not mean "lose your setup":
+
+      * C:\\VirtualDisplayDriver -- the mode table in there holds resolutions
+        the user added by hand (the 1.8.2 custom-size work), so the folder and
+        vdd_settings.xml stay exactly as they are;
+      * settings.json -- this program's own settings;
+      * the SignPath code-signing certificate the installer trusted once.  It
+        is a vendor certificate, harmless to keep, and dropping it would only
+        make the next install ask for trust again.
+
+    Returns (ok, output) like install().  The output matters: an uninstall that
+    fails halfway can leave the node gone and the package behind, and the script
+    log is the only place that says which half happened.
+    """
+    log = log or (lambda m: None)
+    if not os.path.isfile(UNINSTALL_SCRIPT):
+        return False, i18n.t("卸载脚本缺失: %s",
+                             "uninstall script missing: %s") % UNINSTALL_SCRIPT
+    if not os.path.isfile(VDD_NEF):
+        return False, i18n.t("nefcon 缺失: %s", "nefcon missing: %s") % VDD_NEF
+
+    log_path = os.path.join(data_dir(), "vdd_uninstall.log")
+    try:
+        if os.path.exists(log_path):
+            os.remove(log_path)
+    except OSError:
+        pass
+
+    exe = ps.exe()
+    if not exe:
+        return False, ps.hint()
+
+    args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", UNINSTALL_SCRIPT,
+            "-Nef", VDD_NEF, "-Log", log_path]
+
+    if is_admin() or not elevate:
+        cmd = [exe] + args
+    else:
+        try:
+            boot = _write_elevator(UNINSTALL_SCRIPT, args, exe)
+        except OSError as e:
+            return False, i18n.t("无法准备提权脚本: %s",
+                                 "could not prepare the elevation script: %s") % e
+        cmd = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", boot]
+        log("正在请求管理员权限（请在弹窗中点击“是”）…")
+
+    log("运行: " + " ".join(cmd))
+    try:
+        p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out, _ = p.communicate(timeout=300)
+        text = (out or b"").decode("utf-8", "replace")
+        code = p.returncode
+    except subprocess.TimeoutExpired:
+        return False, i18n.t("卸载超时", "the uninstall timed out")
+    except Exception as e:
+        return False, i18n.t("卸载启动失败: %s",
+                             "could not start the uninstall: %s") % e
+
+    if os.path.isfile(log_path):
+        text = _read_text_file(log_path) or text
+
+    log("卸载脚本退出码 = %s" % code)
+    if "canceled by the user" in text or code == 1223:
+        return False, i18n.t(
+            "UAC 被取消 —— 需要点“是”才能卸载虚拟显示器驱动。\n\n",
+            "The UAC prompt was cancelled -- you have to click \"Yes\" to remove "
+            "the virtual display driver.\n\n") + text
+    if code == 2 or "not running as administrator" in text:
+        return False, i18n.t(
+            "卸载脚本检测到没有管理员权限。\n\n",
+            "The uninstall script found no administrator rights.\n\n") + text
+    if code == 3:
+        return False, (i18n.t(
+            "卸载脚本找不到 nefcon。\n"
+            "这通常意味着安装不完整，重装一次 DroidExtend 即可。\n\n",
+            "The uninstall script cannot find nefcon.\n"
+            "That usually means an incomplete install -- installing DroidExtend "
+            "again fixes it.\n\n") + text)
+    if code == 4:
+        return False, (i18n.t(
+            "设备节点没能删掉（可能被别的程序占着）。先停掉投屏、关掉远程软件和"
+            "虚拟机，或者重启一次再试。\n\n",
+            "The device node could not be removed (something may be holding it). "
+            "Stop streaming, close remote-desktop and virtual-machine software, or "
+            "reboot and try again.\n\n") + text)
+    if code == 5:
+        return False, (i18n.t(
+            "设备节点删掉了，但驱动包还在。重启一次电脑后再试，或者到设备管理器里"
+            "手动卸载 MttVDD。\n\n",
+            "The device node is gone but the driver package is still there. Reboot "
+            "and try again, or remove MttVDD by hand in Device Manager.\n\n") + text)
+
+    done = "=== VDD uninstall done ===" in text
+    if not text.strip() and code in _NO_SCRIPT:
+        return False, i18n.t(
+            "卸载脚本一行日志都没有留下（退出码 %s）—— 它根本没跑起来。\n\n%s",
+            "The uninstall script left no log at all (exit code %s) -- it never "
+            "ran.\n\n%s") % (code, ps.hint())
+
+    ok = (code == 0) or done
+    if not ok:
+        tail = "\n".join([l for l in text.strip().splitlines() if l.strip()][-12:])
+        return False, i18n.t(
+            "驱动没卸载干净（退出码 %s）。日志末尾：\n\n%s\n",
+            "The driver was not fully removed (exit code %s). "
+            "End of the log:\n\n%s\n") % (code, tail)
+    log("驱动已卸载（%s 目录和里面的分辨率表都保留着）"
+        % VDD_SETTINGS_DIR)
+    return True, text
+
+
 def settings_path():
     return os.path.join(VDD_SETTINGS_DIR, "vdd_settings.xml")
 

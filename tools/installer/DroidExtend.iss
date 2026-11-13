@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.8.8"
+#define AppVer "1.9.1"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -179,6 +179,12 @@ Source: "{#P}\tools\vdd_install.ps1"; DestDir: "{app}\tools"; Flags: ignoreversi
 Source: "{#P}\tools\vdd_install_cmd.bat"; DestDir: "{app}\tools"; Flags: ignoreversion
 ; 随脚本走的 catalog 签名者证书（SignPath Foundation），certutil 装上它驱动才可信 / The catalog signer certificate (SignPath Foundation) that travels with the script; certutil needs it for the driver to be trusted.
 Source: "{#P}\tools\vdd_signer.cer"; DestDir: "{app}\tools"; Flags: ignoreversion
+; 1.9.1 卸载驱动：只删设备节点与驱动包，C:\VirtualDisplayDriver 里的分辨率表和全部设置都留着 /
+; 1.9.1 driver uninstall: removes the device node and the driver package only; the mode table in
+; C:\VirtualDisplayDriver and every setting stay.
+Source: "{#P}\tools\vdd_uninstall.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
+; 同上的 cmd 版，PowerShell 坏了也能卸 / the same in cmd, for machines where PowerShell is broken.
+Source: "{#P}\tools\vdd_uninstall_cmd.bat"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#P}\tools\vdd\nefcon\x64\nefconw.exe"; DestDir: "{app}\tools\vdd\nefcon\x64"; Flags: ignoreversion
 Source: "{#P}\tools\vdd\vdd25\VirtualDisplayDriver\*"; DestDir: "{app}\tools\vdd\vdd25\VirtualDisplayDriver"; Flags: ignoreversion
 Source: "{#P}\dist\DroidExtend.apk"; DestDir: "{app}\dist"; Flags: ignoreversion

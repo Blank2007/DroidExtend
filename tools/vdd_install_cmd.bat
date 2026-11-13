@@ -72,6 +72,13 @@ if not exist "%NEF%" (
 
 rem --- 3. stage the driver package ---------------------------------------
 if not exist "%DEST%" mkdir "%DEST%" >nul 2>&1
+rem 1.9.1 -- vdd_settings.xml may hold resolutions the user added by hand, and
+rem the xcopy below overwrites it.  Uninstall keeps that file on purpose; a
+rem re-install has to keep the old copy around as well.
+rem 1.9.1 —— vdd_settings.xml 里可能有用户自己加的分辨率，下面的 xcopy 会覆盖它。
+rem 卸载时这份文件是刻意保留的，重新安装也要把它留一份备份。
+if exist "%SETTINGS%" if not exist "%SETTINGS%.bak" copy /Y "%SETTINGS%" "%SETTINGS%.bak" >nul 2>&1
+if exist "%SETTINGS%.bak" call :Log "kept the previous mode table as %SETTINGS%.bak"
 xcopy "%SRC%\*" "%DEST%\" /E /I /Y /Q >nul 2>&1
 set "XCRC=!ERRORLEVEL!"
 call :Log "xcopy exit = !XCRC!"

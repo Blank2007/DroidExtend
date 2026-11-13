@@ -793,13 +793,7 @@ class Session(object):
         self._stat_seen = None
         self._last_stat_log = 0.0
         if self.cfg.get("touch", True):
-            # Hand the injector the display *name*, not just its rectangle: it
-            # re-reads the real position on a short timer so that dragging the
-            # display somewhere else in 显示设置 cannot leave touches offset.
-            self.touch = TouchServer(self.rect, self._display_applied or self.target,
-                                     log=self.log, on_notice=self._phone_notice)
-            self.touch.start()
-            self.log("触摸控制已开启（点按/拖动/双指滚动/双指轻点=右键）")
+            self.set_touch(True)
         self._stop.clear()
         self._pump = threading.Thread(target=self._pump_loop, name="pump", daemon=True)
         self._pump.start()
@@ -1249,6 +1243,36 @@ class Session(object):
     def attached_display(self):
         """The virtual display this session put on the desktop, if any."""
         return self._display_applied
+
+    def set_touch(self, on):
+        """Start or stop the touch channel while the stream keeps running.
+
+        1.9.0: the switch used to be a hidden cfg flag, so the only way to stop
+        the phone from driving the PC mouse was to stop the whole stream (and
+        stop means taking the virtual screen off the desktop).  The channel is
+        only a TCP listener that injects input, so it can come and go without
+        touching ffmpeg, the phone, or the display.
+        """
+        want = bool(on)
+        self.cfg["touch"] = want
+        if not want:
+            if self.touch is not None:
+                try:
+                    self.touch.stop()
+                except Exception:
+                    pass
+                self.touch = None
+                self.log("触摸控制已关闭（画面照旧，手机上的触摸不再控制电脑）")
+            return True
+        if self.touch is None and self.running and self.rect:
+            # Hand the injector the display *name*, not just its rectangle: it
+            # re-reads the real position on a short timer so that dragging the
+            # display somewhere else in 显示设置 cannot leave touches offset.
+            self.touch = TouchServer(self.rect, self._display_applied or self.target,
+                                     log=self.log, on_notice=self._phone_notice)
+            self.touch.start()
+            self.log("触摸控制已开启（点按/拖动/双指滚动/双指轻点=右键）")
+        return True
 
     def release_input(self):
         """Let go of whatever the phone is holding.

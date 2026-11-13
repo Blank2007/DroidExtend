@@ -64,6 +64,8 @@
 | [38](#38-186-the-gear-would-not-open-and-a-tablet-stood-on-end) | 1.8.6: a button size of your own / screen direction | the tap test measured the wrong distance; a tablet stood up becomes a tall screen |
 | [39](#39-187-a-machine-that-would-not-take-the-driver-and-its-broken-powershell) | 1.8.7: PowerShell probe / a message that says why | exit code 4294901760 means the script never ran |
 | [40](#40-188-mumus-virtual-screen-was-mistaken-for-ours) | 1.8.8: a misidentified adapter / naming what else is on the machine | one \`in\` picked somebody else's virtual screen |
+| [41](#41-190-the-touch-channel-got-its-own-switch-and-the-pc-can-start-streaming-by-itself) | 1.9.0: a touch switch / start at boot | anything automatic must stand down when a hand touches it |
+| [42](#42-191-why-the-button-stayed-lit-and-a-program-that-should-not-own-a-notification-centre) | 1.9.1: three driver states / uninstall / notification centre | a Chinese comment ate the next line |
 
 ---
 
@@ -4149,6 +4151,219 @@ This one was on 1.8.7: mirroring finally worked, and extending died every time w
 His machine had an Android emulator installed. That line is the whole clue: the program had picked the wrong screen and believed it had picked the right one. Without it there is nothing to do but keep guessing -- wrong driver package, outdated graphics driver, and so on.
 
 The fix is short (identify the screen by hardware id instead of description text), but finding it started from that line.
+
+---
+
+## 41. 1.9.0: the touch channel got its own switch, and the PC can start streaming by itself
+
+### 41.1 The request
+
+> 现在我需要你把触摸通道开关独立出来 然后做一下开机自启动这块 有的用户反馈需要电脑开机时自动打开拓展屏 老样子先给我方案
+
+("Break the touch channel out into a switch of its own, and do the start-with-Windows part -- some users want the extended screen to come up by itself when the PC boots. Same as before: give me the plan first.")
+
+After the plan went over, four more things:
+
+> 开关位置你自己决定 有一些位置你也要调整一下 等待策略你可以让用户自行决定等待时间 默认设置60s 投屏失败弹提示 我的建议是能否走Windows系统通知通道更明显 版本号改到1.9吧
+
+("Put the switches where you think best, and tidy a few of the other positions; let the user decide how long to wait, 60 s by default; show something when casting fails on its own -- I suggest the Windows notification channel, it stands out more. Make the version 1.9.")
+
+So this release is four things: touch gets a switch of its own, streaming can start by itself after boot, the wait is the user's choice, and a failure has to be visible -- through a system notification first.
+
+### 41.2 Touch: until now the only way to turn it off was to stop everything
+
+Touch control has always been there, but it lived in `Session`'s cfg with a value that was always true. The comment in `host/settings.py` said it out loud: "cfg also carries transient things (monitor, auto_launch, touch) that are not user settings" -- it was not even a setting, and the window had no control for it.
+
+So the only way to stop the phone from driving the PC mouse was to press 停止 (Stop). And since 1.8.0, stopping takes the virtual screen off the desktop (section 32). A very small wish -- "I do not want touch control" -- cost the whole second screen.
+
+The fix is short: `set_touch(on)` in `host/session.py`. The touch channel is nothing but a TCP listener (`TouchServer` on 127.0.0.1:27184) that injects mouse and keyboard events; it is not coupled to ffmpeg, to the phone, or to the display, so it can come and go without interrupting the stream:
+
+- off: `touch.stop()` and drop the object, logging "触摸控制已关闭（画面照旧，手机上的触摸不再控制电脑）"
+- on: if a stream is running and there is a rectangle, build a new `TouchServer` and `start()` it; `InputClient` on the phone retries every 700 ms and reconnects by itself
+
+While in there, an old 1.8.1 trap got closed again: `_apply_form()` has to copy the check box into `cfg["touch"]`. That is exactly the step `match_phone` was missing in 1.8.1, and the result was a control that did nothing at all (section 34).
+
+### 41.3 Starting the stream at boot: two promises, kept apart
+
+"Start with Windows" and "start streaming by itself" are two different promises. The first only launches the program (into the tray); the second also presses 开始投屏 (Start) on the user's behalf. So they are two check boxes, and the second depends on the first: ticking it ticks the first, and clearing the first clears it -- otherwise the window would keep a promise that can never happen.
+
+The scheduled task's command line therefore gained one argument: `--stream`. A normal double-click does not have it and behaves exactly like 1.8.x; only the boot command carries it.
+
+Once launched with `--stream`, the order is:
+
+1. Wait three seconds. At logon the adb server, the virtual display driver and the phone are all still waking up; trying immediately only earns "no device".
+2. Read the settings. If "start streaming by itself" is off (say the user cleared it on another machine), write one log line and do nothing.
+3. Read the terms. Pressing Start on someone's behalf when they have never agreed to the notice is worse than doing nothing -- log it, raise one notification, and stop.
+4. Wait for the phone, up to the time the user picked.
+5. On every failed attempt, detach the virtual screen before waiting again. A virtual screen nobody looks at is exactly where the mouse pointer goes to get lost.
+
+The wait became a drop-down: 30 s, 60 s, 2 min, 5 min, or "keep waiting", default 60 s. Both kinds of use are real: on a desk machine someone is nearby and a minute without a phone is worth a nudge; on a machine shut inside a cabinet nobody is watching, so waiting until the phone appears is the only correct behaviour.
+
+"Keep waiting" is not a trap either: pressing 开始 (Start) or 停止 (Stop) cancels the retry loop at once. People do not like the machine taking the wheel.
+
+A failure has to be visible -- and **only driver errors are not retried**: a virtual display that is not ready (`VddMissing`) will not become ready on the hundredth attempt, someone has to press 安装虚拟显示器驱动 (Install the virtual display driver), so the loop stops on the first one and says why.
+
+### 41.4 Notifications: three channels, each louder than the last
+
+1. With a tray icon, use a tray balloon (`Tray.balloon`). It is the lightest and matches the program's other hints. It needed a thread-safe entry point first: the old `balloon()` wrote the `NOTIFYICONDATA` structure directly, and the auto-start failure happens on a worker thread -- writing tray data across threads is how you get a crash that happens once a week. It now posts `PostMessageW(hwnd, WM_APP + 2, ...)` and lets the tray window thread show it.
+2. Without a tray, use a Windows system notification (`host/notify.py`, a new file, standard library only). It loads WinRT's `ToastNotificationManager` through PowerShell and shows a `ToastText02` toast; the title and the body are handed over as base64 so no quoting rules can bite. The name on the notification comes from `HKCU\\Software\\Classes\\AppUserModelId\\DroidExtend.App` (DisplayName and IconUri), otherwise the toast is labelled "Windows PowerShell".
+3. Only when both fail does it fall back to a message box -- and not while the window is hidden in the tray: a program sitting quietly in the tray that suddenly throws an error box into the middle of the screen is more confusing than silence.
+
+This part was measured: the toast returned true in 0.53 s and a "DroidExtend" banner really appeared.
+
+### 41.5 The window: the tidy-up he asked for
+
+The right-hand column had grown one-feature-at-a-time: mouse pointer on row 7, screen position on row 11, "reinstall the APK" on row 7, start-with-Windows on row 12. 1.9.0 groups by kind instead:
+
+- row 7: "draw the mouse pointer" next to the new "phone touch controls the PC" (both are input)
+- row 8: the custom screen position (only shown for position "custom")
+- row 9: "reinstall the APK every time"
+- row 10: "start with Windows" and "start streaming after boot"
+- row 11: "wait for the phone up to" with the drop-down and the note "a system notification if it never shows up"
+- then interface animation, what to do when the program exits, and the cable speed test
+
+The screenshot check turned up two more clips: the left column's second button read "仅安装 AP" (cut from "仅安装 APK 并启动"), and the device line had lost the tail of its serial ("24091RPADC [device] d1").
+Two buttons side by side came to more than the panel is wide, and ttk's answer to that is to clip the text rather than shrink the button; shortening the label from "仅安装 APK 并启动" to "安装 APK" only moved the cut by a couple of characters.
+The fix is one button per row, both stretched to the panel width, plus the device string (model + state + serial) on a line of its own where it can wrap.  A layout that only comes apart on a narrow window is better fixed by not squeezing it in the first place.
+
+### 41.6 Verification
+
+| What | How | Result |
+| --- | --- | --- |
+| touch switch, mid-stream | `Session.set_touch(False / True)` while watching port 27184 and the phone's connection | on: port listening, phone connected; off: port closed and phone gone within 1.01 s while **the same stream kept delivering frames**; on again: listening within 0.02 s, the phone reconnected by itself |
+| the cfg flag | `cfg["touch"] = False` before starting a stream | the touch channel never came up (nothing on 27184) and the picture was unaffected |
+| system notification | `notify.toast(...)` | returned true in 0.53 s, DroidExtend banner on screen |
+| start at boot (through a real App window) | build `App()`, tick "start streaming after boot", trigger the boot path | started waiting at 0.3 s -> at 13.3 s "=== 投屏已开始：extend 3200x2136@60 \\.\\DISPLAY20 ===" -> "开机自动投屏：已经开始" -> phone screen woken as well |
+
+### 41.7 What it costs
+
+- The boot start begins three seconds late, so the first picture appears a dozen seconds or so after logon (most of it is still creating the virtual screen and starting the encoder).
+- A failed attempt detaches the screen before trying again, so the desktop flickers during those retries (screen, no screen, screen).
+- "Keep waiting" keeps the retry loop running until the user intervenes, and each retry writes a line every 5 seconds, so a stream that never comes up makes the log longer.
+
+### 41.8 Lessons
+
+1. **"One feature" is not the same as "one switch position".**  Touch is not part of capture; folding it into the streaming switch meant other things stopped along with it.
+2. **Anything automatic needs a "stand down when a human touches it" rule.**  Otherwise it is fighting the user for the wheel.
+3. **An unattended failure needs an exit that does not need a person.**  A boot-started machine usually has nobody in front of it; a message box is the same as no message.
+4. **Touching Win32 structures across threads does crash.**  The tray balloon wrote the structure directly for years; it became correct only when it started posting a message.
+
+---
+
+## 42. 1.9.1: why the button stayed lit, and a program that should not own a notification centre
+
+### 42.1 The request
+
+> 我已经安装过显示器驱动为什么按钮不是灰色的 再加一个单独的卸载虚拟屏驱动 既然能走Windows通知渠道则把投屏成功或者失败以及一些可能需要的通知都通过Windows通知来提示用户 记得在上面工具栏加一个通知选项 由用户自己决定要不要打开通知以及通知类型 先给方案
+
+After seeing the plan he drew four boundaries:
+
+> 通知默认开 手动开启也通知留给用户自行决定 卸载驱动但是设置的东西不卸载 只留菜单项 帮助那栏里面记得把这几版会遇到的问题加上去 尽量分的细一点
+
+So this version is five things: a button that can express three states; an uninstall that removes only what it should; notifications on by default with every category switchable; the uninstall entry only in a menu; and the help text listing the pitfalls of recent versions, sorted by version.
+
+### 42.2 The driver was installed, so why was the button still lit
+
+The first guess was "the state check is wrong".  The real problem was that **the check had been answering two different questions with one condition**:
+
+`host/app.py` had exactly one line:
+
+    btn_install.configure(state="disabled" if st["state"] == "ready" else "normal")
+
+while `status()` in `host/vdd.py` has five states: `missing` (no driver package), `download` (package downloaded, not installed), `staged` (files on disk, device not installed), `node` (device node present, screen not up), `ready` (adapter enumerated, ready to stream).  Only `ready` greyed the button out -- so "has this ever been installed" and "is it usable right now" were treated as the same fact.
+
+And since 1.8.0, quitting the program applies the "when the program exits" choice: picking "switch it off completely (does not appear at boot either, remote software cannot see it)" **disables the device node**.  The next launch therefore always starts in `node` -- the screen is off, so the button is lit again, and pressing it reinstalls the driver that is already there.
+
+That is precisely what the user saw: the driver was installed, and the button kept waiting for him.
+
+### 42.3 The button now says one of three things
+
+It asks "what needs doing" first, then picks the caption and whether it can be pressed (`_driver_button(st)` in `host/app.py`):
+
+- not shipped, or not installed (`staged` / `download` / `missing`) -> "安装虚拟显示器驱动（需要管理员）", pressable
+- installed, but the node is disabled (`node` with `enabled` false) -> "启用虚拟显示器驱动（需要管理员）", pressable; pressing it first asks "the driver is installed, it is only switched off right now (you picked 'switch it off completely' when the program exited) -- turn it on now?", and then runs `vd.set_enabled(True)`
+- anything else (`ready`, or node present and enabled) -> "虚拟显示器驱动已安装", greyed out
+
+For that, `status()` now also reports `enabled`: read from the `status` column of the `Get-PnpDevice` row -- true for `OK`, false for `Error` and friends, `None` when it cannot be told (treated as "done": better to make somebody press it once too few than to reinstall for no reason).
+
+### 42.4 Uninstall removes exactly two things
+
+"Uninstall the driver" and "uninstall the program" are different actions.  This one removes the device node (`Root\MttVDD`) and the driver package (the `oemNN.inf` that `pnputil` lists for `MttVDD`), and nothing else.  **Everything below is kept on purpose**:
+
+- the whole `C:\VirtualDisplayDriver` directory, including `vdd_settings.xml` -- the resolution table the user has been building
+- `settings.json` (the program's settings)
+- the certificate trust (the `signer.cer` entry)
+- other vendors' virtual display adapters (MuMu, Parsec, GameViewer, ...)
+
+The entry lives only in the Tools menu ("卸载虚拟显示器驱动…"); there is no button in the left panel.  This is a once-in-a-lifetime action, and putting it where the eye passes every day only invites misclicks.
+
+Following the project's habit, there are two scripts: `tools/vdd_uninstall.ps1` and `tools/vdd_uninstall_cmd.bat` (if PowerShell is broken there is still a cmd path, same reason as 1.8.7).  Both return the same codes: 0 success, 2 not elevated, 3 nefcon missing, 4 node still there after removal, 5 driver package still there.  The log starts with `=== VDD uninstall start ===` and ends with `=== VDD uninstall done ===`, and the GUI decides on that last line, exactly like the installer.
+
+If the screen is still attached, the program stops the session first so the screen leaves the desktop -- a device node cannot be removed cleanly while its screen is still part of the desktop.
+
+### 42.5 Re-installing no longer throws away sizes you added
+
+"Keep `vdd_settings.xml`" from the previous section raises a question: **re-installing the driver overwrites it**.  The installer copies `tools\vdd\vdd25\VirtualDisplayDriver` over `C:\VirtualDisplayDriver` (`Copy-Item -Force` / `xcopy /Y`), overwriting anything with the same name, including the mode table.  And since 1.8.2 "custom resolution" works by adding `<resolution auto="1">` rows to that very file -- one re-install and the sizes the user typed in are gone.
+
+So the installer gained one step: before overwriting, copy the existing `vdd_settings.xml` to `vdd_settings.xml.bak` and log "kept the previous mode table as ...".  It only does this **when there is no .bak yet**: the earliest copy is the one holding the hand-typed sizes, and overwriting it on every re-install would quietly destroy exactly the thing worth keeping.  From the second time on the log says "previous mode table already saved as ... - left alone".  Both the ps1 and the cmd version do this.
+
+### 42.6 The pit that made that backup do nothing: a BOM
+
+After the change, the first run wrote no "kept" line and left no .bak -- **as if the code were not there**.
+
+It was not logic, it was encoding: `tools/vdd_install.ps1` is a **UTF-8 file without a BOM**, and Windows PowerShell 5.1 decodes such a file as the system ANSI code page (GBK here).  The Chinese comment I had just added ends with the full stop "。" -- `E3 80 82` in UTF-8 -- and GBK paired its last byte with the following newline, **swallowing the line break**.  Line 85 and line 86 (`$prevSettings = Join-Path $Dest 'vdd_settings.xml'`) merged into one comment, and the assignment simply ceased to exist.
+
+The evidence was unambiguous: the debug copy printed `prev=[]` (the variable was empty), and an ASCII print statement placed right after the Chinese comment produced **no output either**, while the two statements after it were fine.  That file has plenty of Chinese comments, and none of them had ever caused this -- it is pure luck, and the condition is "a Chinese punctuation mark lands in exactly the wrong place".
+
+The fix is a UTF-8 BOM on both ps1 files (PowerShell reads UTF-8 once it sees one), plus a note in the file: **new comments in this file stay ASCII**.  `host/vdd.py` also switched its log decoding from `utf-8` to `utf-8-sig` -- PowerShell's `Add-Content -Encoding UTF8` writes a BOM, and without this the log's first line carries an invisible `\ufeff`.
+
+One more note for the next person: **editing these ps1 files drops the BOM again**.  One edit was made without re-adding it, and the next run produced a PowerShell syntax error (`UnexpectedToken`, reported on the if's closing brace) that looks like bad code but is the same encoding problem wearing a hat.
+
+### 42.7 Notifications: on by default, seven categories, each switchable
+
+The request was "since Windows notifications work, send streaming success, failure and whatever else needs saying through them", but also "let the user decide whether to turn it on, and which kinds".  So:
+
+- the first item under the "Notifications" menu is the master switch (on by default), followed by seven category ticks: streaming started, streaming failed, driver, new version found, new APK on the phone, start at boot, and misc
+- "notify when I press Start myself" is a separate item, off by default: a banner saying "streaming started" right after you clicked Start is noise
+- "send a test notification" and "Windows notification settings..." (opens `ms-settings:notifications`) sit in the same menu
+
+Every notification goes through `_notify(kind, title, text)`: a disabled category only writes a log line ("（这一类通知已关，只写日志）") and shows nothing, and the same (kind, title, text) is shown at most once every 30 seconds -- boot streaming retries every 5 seconds, and without that it would nag someone to death.  Delivery still uses the three paths from 1.9.0: tray balloon, then system notification, then a message box.
+
+This matters most for start-at-boot: that machine usually has nobody in front of it, so the notification about a phone that never showed up has to go through the system channel and still be clickable to read why.
+
+### 42.8 Help, sorted by version
+
+"帮助那栏里面记得把这几版会遇到的问题加上去 尽量分的细一点".  Instead of rewriting the manual, the FAQ gained a section at the end, "-- problems new since 1.8.4 --", one entry per version, symptom first and remedy second:
+
+1.9.1 the three-state driver button (installed yet still lit; now it says "installed" or "turn it on"), 1.9.1 what uninstall keeps, 1.9.1 turning off the seven notification categories; 1.9.0 why start-at-boot sometimes takes a dozen seconds; 1.8.7 the `0xFFFF0000` and the cmd-only fallback install; 1.8.5 what the "采集显卡" line means; 1.8.8 the extra screen that does not appear when MuMu is installed; 1.8.4 why the log gained the "phone receive / show" columns.
+
+The Help menu also gained an item that jumps straight to that section (`on_manual(i18n.t("—— 1.8.4 以后这几版新出现的问题 ——", ...))`), so nobody has to scroll a long document looking for it.
+
+### 42.9 Verification
+
+| What | How | Result |
+| --- | --- | --- |
+| the three states | feed `_driver_button` six different states | `staged`/`download`/`missing` -> install; `node` + disabled -> enable; `ready`, node present and enabled, `enabled` unknown -> installed (greyed) |
+| the real button | this machine happens to be "node present, screen off"; ran a real `App()` elevated and screenshotted | caption "启用虚拟显示器驱动（需要管理员）", pressable, not clipped; left panel says "设备节点存在，但屏幕未激活" |
+| uninstall then re-install | ran `t191_uninstall.py` elevated, which calls `vd.uninstall` / `vd.install` for real | uninstall 6.2 s: node gone, `pnputil` lists 0 MttVDD packages, `C:\VirtualDisplayDriver`, `vdd_settings.xml` and `settings.json` all still there; re-install 5.4 s: state back to `ready`, node OK |
+| mode table backup | same run, watching the directory and the log | `vdd_settings.xml.bak` created (3518 bytes); a second install logs "already saved ... left alone" and does not overwrite it |
+| master switch and categories | real `App()`, read the defaults, then disable "streaming failed" | `notify=True` by default and all categories except "manual" are on; after disabling, `_notify` returns false and the log keeps one "（这一类通知已关，只写日志）" line |
+| de-duplication | two identical notifications within a second | the first goes out, the second returns false |
+| menus | walked the real menu bar | Tools has "卸载虚拟显示器驱动…", Notifications has 8 ticks plus test plus settings, Help has "最近几版新出现的问题" |
+| the manual text | checked both halves of `host/manual.py` | the "since 1.8.4" section exists in Chinese and English, each mentioning "1.9.1" three times |
+
+### 42.10 What it costs
+
+- Uninstall parses `pnputil` output and removes a device node, which can take a dozen seconds; the UI only says "正在卸载…" during it.  It is not done often enough to earn a progress bar.
+- Only the earliest mode-table backup is kept.  A user who customises, re-installs, then customises again will not have the second round backed up -- deliberate: re-installing should mean "back to factory, plus the first hand-typed list preserved".
+- Notifications add a whole menu and a set of switches; the menu bar went from four items to five.
+
+### 42.11 Lessons
+
+1. **A button can only answer one question.**  "Has this been installed" and "does it work right now" are two questions; folded into one grey/lit state, the user only ever sees it waiting for a press.
+2. **An uninstall must state what it deletes and what it keeps -- and then actually keep it.**  Keeping `C:\VirtualDisplayDriver` but letting the next install overwrite it is not keeping it.
+3. **A BOM-less UTF-8 script is a time bomb under PowerShell 5.**  When a Chinese comment eats the next line, the error message points somewhere completely unrelated.
+4. **Defaults depend on who sees them and when.**  Notifications on, manual start off, because the first is something done for you and the second is the button you just pressed.
 
 ---
 

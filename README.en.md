@@ -99,6 +99,13 @@ to put it somewhere else.
 
 About 10 seconds later, `device ROOT\DISPLAY\0001  status=OK` appearing in the log means it worked.
 
+Once it is installed the button greys out and reads **"The virtual display driver is installed"** (since 1.9.1).
+If it reads **"Turn the virtual display driver on (needs admin)"**, the driver is installed and only the device
+is switched off -- that is what "off for real" does when the program exits. Press it to turn it back on; there
+is no need to reinstall. To take the driver out of the system completely: **Tools → Remove the virtual display
+driver...**. That deletes the driver package and the device node and keeps both the resolution table in
+`C:\VirtualDisplayDriver` and all of your settings.
+
 > Windows does not let any program conjure a display out of thin air: you have to install a kernel-level virtual
 > display driver (IDD). This project uses the open-source **Virtual Display Driver 25.7.23**, which is signed and
 > verified on a real machine here — no need to disable Secure Boot and no need to turn on test mode.
@@ -144,7 +151,7 @@ second screen.
 
 ## 2. The interface
 
-The menu bar is at the top (**File / Tools / Help**), and the status bar at the bottom shows the version number, the
+The menu bar is at the top (**File / Tools / Notifications / Language / Help**), and the status bar at the bottom shows the version number, the
 repository URL and where the settings file lives.
 The left half of the middle area shows device and display status; the right half is where you tune quality and
 frame rate.
@@ -207,6 +214,43 @@ display, Windows treats it as a real mouse on that display.
 
 > Coordinates are normalized against the **entire virtual desktop**, and the program sets per-monitor DPI awareness
 > at startup accordingly; so even if you set Windows scaling above 125%, touch points still line up.
+
+> Do not want the phone driving the PC? There is a **"phone touch controls the PC"** box on the right
+> (since 1.9.0) that can be cleared and ticked again mid-stream: clearing it only closes that tunnel --
+> the picture keeps running, nothing reconnects, nothing stutters.
+
+### Streaming starts by itself after boot
+
+Tick both **Start with Windows** and **Start streaming after boot** (ticking the second ticks the first), and
+the program comes up in the background at logon and starts waiting for the phone:
+
+* **The wait is yours to choose**: 30 s / 60 s / 2 min / 5 min / keep waiting, **60 s** by default
+* When the phone turns up it starts by itself and tries to wake the phone screen (with a PIN set the picture
+  stays black until you unlock it)
+* If it never turns up, or a step fails on the way, a **Windows notification** says so (a tray balloon when
+  there is a tray icon) instead of a lone message box nobody is there to see
+
+Pressing `开始投屏` (Start) or `停止` (Stop) by hand makes it stand down at once. A round that found
+nothing (say 60 seconds) can always be followed by starting by hand as usual.
+
+### Notifications (Windows notification centre, since 1.9.1)
+
+The **Notifications** menu at the top holds one master switch and one box per kind of news:
+
+* the stream has started (the automatic start after boot)
+* also notify when I press Start myself (**off by default** -- a balloon about the button you just
+  pressed is noise for most people)
+* the stream failed or broke off
+* driver installed / turned on / removed
+* a newer version of the program exists
+* the phone app needs updating
+* everything else (waiting for the phone, cable speed tests, ...)
+
+Everything is on by default except the manual-start one. Notifications still arrive with the window
+in the tray, which is the point: with the stream starting by itself at boot, nobody is watching the
+window. **Send a test notification** in the same menu tells you at once whether it works; when it
+does not, the usual cause is Windows itself -- notifications for this app switched off, or Focus
+Assist on. The menu links straight to **Windows notification settings...**.
 
 ### Screen direction and the settings button (phone side)
 

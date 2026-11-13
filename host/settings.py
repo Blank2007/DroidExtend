@@ -44,13 +44,16 @@ def migrate_legacy(log=None):
 
 
 # Keys we write back.  Deliberately a whitelist: cfg also carries transient
-# things (monitor, auto_launch, touch) that are not user settings.
+# things (monitor, auto_launch) that are not user settings.
 KEYS = (
     "width", "height", "hz", "fps", "bitrate_mbps", "rate_control", "quality",
     "encoder", "preset", "backend", "position", "mode", "draw_mouse",
     "install_apk", "reinstall_apk", "match_phone",
     # 1.6.0 -- position="custom" needs somewhere to keep the coordinates.
     "pos_x", "pos_y",
+    # 1.9.0 -- the touch channel got its own switch, so it is a real setting
+    # now.  Before this it lived in cfg only and was always on.
+    "touch",
 )
 # Extra, non-cfg keys.
 EXTRA = (
@@ -74,6 +77,23 @@ EXTRA = (
     # question, "tray" hides to the tray, "quit" exits.  Replaces the
     # tray_on_close check box that used to sit on the main window.
     "close_action",
+    # 1.9.0 -- start the stream by itself when the program comes up at boot,
+    # and how long to keep waiting for the phone before giving up.  The wait
+    # is in seconds; 0 means "keep trying until the user stops it".
+    "auto_stream",
+    "auto_stream_wait",
+    # 1.9.1 -- Windows notifications, one switch per kind of news.  A single
+    # dict would have been tidier, but save() only writes scalars (see below),
+    # so each kind gets its own boolean key.  app.NOTIFY_KINDS is the list the
+    # menu is built from; the two must stay in step.
+    "notify",            # master switch
+    "notify_stream",     # "the stream started by itself"
+    "notify_manual",     # ...and also when the user pressed 开始投屏
+    "notify_fail",       # the stream failed or broke off
+    "notify_driver",     # driver installed / turned on / removed
+    "notify_update",     # a newer version of the program exists
+    "notify_apk",        # the phone app is older than the one shipped here
+    "notify_misc",       # everything else worth a balloon
 )
 
 _EXTRA_DEFAULTS = {
@@ -89,6 +109,18 @@ _EXTRA_DEFAULTS = {
     "animations": True,
     "vdd_off_mode": "deep",
     "close_action": "ask",
+    "auto_stream": False,
+    "auto_stream_wait": 60,
+    # Everything on, except "also notify when I pressed Start myself": that is
+    # noise for most people, and the window is in front of them anyway.
+    "notify": True,
+    "notify_stream": True,
+    "notify_manual": False,
+    "notify_fail": True,
+    "notify_driver": True,
+    "notify_update": True,
+    "notify_apk": True,
+    "notify_misc": True,
 }
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}

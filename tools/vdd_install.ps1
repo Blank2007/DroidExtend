@@ -1,4 +1,4 @@
-# Install the Virtual Display Driver (VDD 25.7.23, SignPath-signed) - must run ELEVATED.
+﻿# Install the Virtual Display Driver (VDD 25.7.23, SignPath-signed) - must run ELEVATED.
 # Creates C:\VirtualDisplayDriver, drops in vdd_settings.xml, trusts the catalog signer,
 # then root-enumerates + installs the device with nefcon.
 #
@@ -76,6 +76,28 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 # -LiteralPath on the source: a path with [ ] or wildcard characters must not be globbed.
 # Copy-Item through the pipeline raises a NON-terminating error on failure, so the file
 # count below is the real proof that something landed - never trust "it did not throw".
+# 1.9.1 -- the file about to be overwritten may hold sizes the user added by
+# hand (the custom-resolution work of 1.8.2 writes extra <resolution> rows), so
+# keep the current one next to it first.  Uninstall deliberately leaves that
+# file alone; a re-install must not silently throw the same work away.
+# 1.9.1 —— 下面这次复制会覆盖目标目录里的同名文件，而 vdd_settings.xml 里可能有
+# 用户用「自定义」自己加进去的分辨率（1.8.2 起会往里面多写 <resolution> 行）。
+# 卸载时这份文件是被刻意保留的，重新安装就不该悄悄把它冲掉：先备份一份。
+$prevSettings = Join-Path $Dest 'vdd_settings.xml'
+$prevBackup   = $prevSettings + '.bak'
+# Only take the backup when there is none yet: the first install of this machine
+# is the one that still holds the sizes the user typed in by hand.  Overwriting
+# the backup on every re-install would quietly lose exactly that copy.  (1.9.1:
+# keep new comments in this file ASCII -- PowerShell 5 reads a BOM-less UTF-8
+# script as ANSI and can swallow the newline right after a CJK character, which
+# turns the next line into part of the comment.  See the log for 1.9.1.)
+if ((Test-Path -LiteralPath $prevSettings) -and -not (Test-Path -LiteralPath $prevBackup)) {
+    Copy-Item -LiteralPath $prevSettings -Destination $prevBackup -Force
+    Log ('kept the previous mode table as ' + $prevBackup)
+}
+elseif (Test-Path -LiteralPath $prevBackup) {
+    Log ('previous mode table already saved as ' + $prevBackup + ' - left alone')
+}
 Get-ChildItem -LiteralPath $Src -Force | Copy-Item -Destination $Dest -Recurse -Force
 $staged = @(Get-ChildItem -LiteralPath $Dest -Force -ErrorAction SilentlyContinue).Count
 Log ('staged ' + $staged + ' entries into ' + $Dest)

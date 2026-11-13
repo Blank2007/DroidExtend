@@ -23,6 +23,9 @@ WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
 WM_APP = 0x8000
 WM_TRAYICON = WM_APP + 1
+# 别的线程要弹气泡通知时投递的消息：NOTIFYICONDATAW 由托盘线程独占，
+# 从后台线程直接改它会有内存竞争（1.9.0 自动投屏失败提示就是后台线程触发的）。
+WM_BALLOON = WM_APP + 2
 WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
 WM_NULL = 0x0000
@@ -163,6 +166,8 @@ class Tray(object):
         self._cls = None
         self._ready = threading.Event()
         self._nid = None
+        # 线程之间传气泡内容：(title, text)。只有托盘线程会取出并显示。
+        self._balloons = []
 
     # ------------------------------------------------------------------ 对外
     def start(self):
@@ -201,6 +206,25 @@ class Tray(object):
             pass
 
     def balloon(self, title, text):
+        """弹一个气泡通知。可以从任意线程调用。
+
+        自己就是托盘线程时（比如菜单回调里）直接显示，否则投递一条消息给
+        窗口过程，由托盘线程去碰 NOTIFYICONDATAW。1.9.0 之前这里是谁调用
+        谁直接改 nid，后台线程一用就有竞争。
+        """
+        hwnd = self._hwnd
+        if not hwnd:
+            return
+        if self._thread is not None and self._thread.ident == threading.get_ident():
+            self._balloon_now(title, text)
+            return
+        self._balloons.append((title or "", text or ""))
+        try:
+            user32.PostMessageW(hwnd, WM_BALLOON, 0, 0)
+        except Exception:
+            pass
+
+    def _balloon_now(self, title, text):
         nid = self._nid
         if nid is None:
             return
@@ -297,6 +321,12 @@ class Tray(object):
                 if ev == WM_RBUTTONUP:
                     self._menu(hwnd)
                     return 0
+            elif msg == WM_BALLOON:
+                # 一次消息把队列里的都放出来；多个通知叠着显示也没关系。
+                while self._balloons:
+                    title, text = self._balloons.pop(0)
+                    self._balloon_now(title, text)
+                return 0
             elif msg == WM_COMMAND:
                 self._emit(wparam & 0xFFFF)
                 return 0

@@ -69,11 +69,20 @@ from version import (APP_NAME, APP_TITLE, APP_VERSION, APP_DATE, AUTHOR, OWNER, 
 
 # #3: 被开机自启动拉起时不把窗口糊到人家脸上，直接进托盘待命。
 MINIMIZED = "--minimized" in sys.argv
+# 1.9.0: "--stream" ask the program to start streaming all by itself.  It is
+# only ever added to the autostart command line, so a normal double-click
+# behaves exactly like 1.8.x.  The flag is a request, not a promise: the phone
+# often shows up seconds after Windows does, and that waiting happens later
+# (_auto_stream_worker), not at import time.
+AUTOSTREAM = "--stream" in sys.argv
 # A real newline in a dialog needs to be spelled out: a two-newline
 # escape inside a wrapped i18n string is a syntax error waiting to happen.
 NL = chr(10)
 # 关窗口之后最多等这么久让后台把虚拟屏收干净。deep 档实测 10.65 秒，留一倍余量。
 QUIT_WAIT = 30.0
+# 1.9.0 -- how often the boot-time auto start retries while the phone is still
+# missing (Windows comes up long before the phone finishes booting).
+AUTO_RETRY = 5.0
 
 # Fallback only.  The virtual display driver builds its mode table from the
 # `<resolution>` rows in vdd_settings.xml -- eleven of them on the machine this
@@ -103,6 +112,9 @@ QUALITY_CHOICES = ["14", "16", "18", "20", "22", "24", "26", "28", "32", "36"]
 RATECONTROL = []
 BACKENDS = []
 POSITIONS = []
+# 1.9.0 -- how long the boot-time auto start keeps waiting for the phone:
+# (seconds, caption).  0 means "keep trying until someone presses 停止".
+WAITS = []
 
 BG = "#14161a"
 FG = "#e6e6e6"
@@ -166,6 +178,23 @@ def _custom_label():
     return i18n.t("自定义", "Custom")
 
 
+def _wait_caption(seconds):
+    """Caption for an auto-start wait, in the active language.
+
+    Kept next to the table it reads so a caption can never drift from the value
+    written to settings.json (the dropdown is compared by caption, the file
+    stores seconds).
+    """
+    try:
+        want = int(seconds or 0)
+    except (TypeError, ValueError):
+        want = 60
+    for v, t in WAITS:
+        if v == want:
+            return t
+    return WAITS[1][1] if len(WAITS) > 1 else "60 s"
+
+
 def _install_driver_label():
     """The install-driver button.
 
@@ -174,6 +203,51 @@ def _install_driver_label():
     """
     return i18n.t("安装虚拟显示器驱动（需要管理员）",
                   "Install the virtual display driver (needs admin)")
+
+
+def _enable_driver_label():
+    return i18n.t("启用虚拟显示器驱动（需要管理员）",
+                  "Turn the virtual display driver on (needs admin)")
+
+
+# 1.9.1 -- the kinds of news this program can pop up.  (kind, 中文, English):
+# the settings key for each one is "notify_" + kind, so this tuple is the only
+# place the menu and the sending code can disagree -- and they do not.
+NOTIFY_KINDS = (
+    ("stream", "投屏已经开始（开机自动投屏那次）",
+     "the stream started (the automatic one)"),
+    ("manual", "我手动点「开始投屏」时也通知",
+     "also when I press Start myself"),
+    ("fail", "投屏失败或者中途断了", "the stream failed or broke off"),
+    ("driver", "驱动安装 / 启用 / 卸载", "driver installed / enabled / removed"),
+    ("update", "有新的程序版本", "a newer version of the program"),
+    ("apk", "手机端 App 需要更新", "the phone app needs updating"),
+    ("misc", "其它提示（等着手机、测速之类）", "everything else"),
+)
+_NOTIFY_KINDS_SET = tuple(k for k, _zh, _en in NOTIFY_KINDS)
+
+
+def _driver_button(st):
+    """What the left panel's driver button should say and do right now.
+
+    1.9.1.  The button used to come back enabled on any machine whose screen
+    was not ready, which includes every machine where the driver IS installed:
+    quitting with the "off for real" setting disables the device node, so the
+    next start reports state "node", not "ready".  A user who had just
+    installed the driver saw an enabled "install" button and concluded the
+    install had not stuck.  Three answers now:
+
+      ("install", caption)  nothing installed yet -- state staged/download/missing
+      ("enable",  caption)  installed, node currently disabled -- offer to turn on
+      ("done",    caption)  installed and running -- grey the button out
+    """
+    state = st.get("state")
+    if state in ("staged", "download", "missing"):
+        return "install", _install_driver_label()
+    if st.get("enabled") is False:
+        return "enable", _enable_driver_label()
+    return "done", i18n.t("虚拟显示器驱动已安装",
+                          "The virtual display driver is installed")
 
 
 def _refresh_captions():
@@ -197,6 +271,13 @@ def _refresh_captions():
         ("above", i18n.t("上方", "Above")),
         ("below", i18n.t("下方", "Below")),
         ("custom", _custom_label()),
+    ]
+    WAITS[:] = [
+        (30, i18n.t("30 秒", "30 s")),
+        (60, i18n.t("60 秒", "60 s")),
+        (120, i18n.t("120 秒", "120 s")),
+        (300, i18n.t("5 分钟", "5 min")),
+        (0, i18n.t("一直等", "keep waiting")),
     ]
 
 
@@ -236,6 +317,11 @@ class App(tk.Tk):
         self.upd_busy = False
         self._manual_win = None
         self._manual_txt = None
+        # 1.9.1 -- notifications: the last time each sentence was sent (so a
+        # retry loop cannot spam the same balloon), and whether the stream that
+        # just started was started by 开机自动投屏 rather than by the user.
+        self._notify_seen = {}
+        self._auto_streaming = False
         # 赞赏窗口（1.8.3）和图对象一起留在这里：Tk 不会自己保管 PhotoImage
         # 的引用，局部变量一回收图片就变白。
         self._donate_win = None
@@ -257,6 +343,9 @@ class App(tk.Tk):
         # 退出时的收尾在窗口消失之后才跑（彻底关闭驱动要十几秒），这里存那个
         # 线程，好让 main() 在进程真正结束前等它收干净。
         self._quit_worker = None
+        # 1.9.1 -- what the left panel's driver button currently means:
+        # "install" / "enable" / "done", see _driver_button().
+        self._drv_action = "install"
 
         # app_title() and not the APP_TITLE constant: the constant was evaluated
         # when version.py was first imported (line 64), which is before the
@@ -312,6 +401,13 @@ class App(tk.Tk):
         self.after(200, self._poll_tray)
         if self.settings.get("check_updates", True) and not priv.needs_accept(self.settings):
             self.after(2500, lambda: self.on_check_updates(manual=False))
+        # 1.9.0 -- 自动投屏的重试循环靠这个事件停下：用户一按开始/停止、或者
+        # 程序要退出，都不该继续在后台等手机。
+        self._auto_cancel = threading.Event()
+        if AUTOSTREAM:
+            # 三秒不是仪式：开机时 adb 服务、虚拟屏驱动、手机都还在醒来的路上，
+            # 立刻试一次只会拿到"手机不存在"，白白在日志里留一行红字。
+            self.after(3000, self._auto_stream_check)
         if MINIMIZED:
             self.withdraw()            # 先藏起来，免得开机时闪一下再收
             self.after(400, self._hide_to_tray)
@@ -339,6 +435,13 @@ class App(tk.Tk):
         m_tool.add_command(label=i18n.t("安装虚拟显示器驱动…",
                                         "Install virtual display driver..."),
                            command=self.on_install_driver)
+        # 1.9.1 -- the other half of that line: taking the driver out again.
+        # Deliberately a menu item and not a button on the left panel: pressing
+        # it by accident would cost a reinstall, and nothing about the button
+        # layout should invite that.
+        m_tool.add_command(label=i18n.t("卸载虚拟显示器驱动…",
+                                        "Remove the virtual display driver..."),
+                           command=self.on_uninstall_driver)
         m_tool.add_command(label=i18n.t("仅安装 APK 并启动", "Install APK only and start"),
                            command=self.on_install_apk)
         m_tool.add_separator()
@@ -373,6 +476,33 @@ class App(tk.Tk):
                            command=self.on_save_log)
         bar.add_cascade(label=i18n.t("工具", "Tools"), menu=m_tool)
 
+        # 1.9.1 -- notifications get their own menu instead of a check box
+        # somewhere in the middle of the form: "tell me when it fails" and "do
+        # not tell me every time it starts" have to be answerable separately,
+        # and one switch per kind is the only way to say that.
+        m_notify = tk.Menu(bar, tearoff=0)
+        self.notify_var = tk.BooleanVar(value=bool(self.settings.get("notify", True)))
+        m_notify.add_checkbutton(
+            label=i18n.t("使用 Windows 通知", "Use Windows notifications"),
+            variable=self.notify_var,
+            command=lambda: self._set_notify("notify", self.notify_var))
+        m_notify.add_separator()
+        for _kind, _zh, _en in NOTIFY_KINDS:
+            var = tk.BooleanVar(value=bool(self.settings.get("notify_" + _kind, True)))
+            # Kept on self: a Tk variable nothing references can be collected,
+            # and the check box would then quietly lose its value.
+            setattr(self, "_nvar_" + _kind, var)
+            m_notify.add_checkbutton(
+                label=i18n.t(_zh, _en), variable=var,
+                command=lambda k=_kind, v=var: self._set_notify("notify_" + k, v))
+        m_notify.add_separator()
+        m_notify.add_command(label=i18n.t("发一条测试通知", "Send a test notification"),
+                             command=self.on_test_notify)
+        m_notify.add_command(label=i18n.t("Windows 通知设置…",
+                                          "Windows notification settings..."),
+                             command=lambda: self.open_url("ms-settings:notifications"))
+        bar.add_cascade(label=i18n.t("通知", "Notifications"), menu=m_notify)
+
         # Between Tools and Help rather than before File: File stays first
         # because that is where every Windows user looks for Exit, and the
         # language picker is a preference like the ones behind Tools -- it does
@@ -392,6 +522,14 @@ class App(tk.Tk):
         m_help.add_command(label=i18n.t("常见问题", "Common questions"),
                            command=lambda: self.on_manual(
                                i18n.t("【六、常见问题】", "[6] Common questions")))
+        # 1.9.1 -- the questions that arrived with 1.8.4 and later have their own
+        # heading in the manual (and their own entry here): mixing them into the
+        # old list made people read eight answers to find the one that applied.
+        m_help.add_command(label=i18n.t("最近几版新出现的问题",
+                                        "Problems new in recent versions"),
+                           command=lambda: self.on_manual(
+                               i18n.t("—— 1.8.4 以后这几版新出现的问题 ——",
+                                      "-- problems new since 1.8.4 --")))
         m_help.add_command(label=i18n.t("参数怎么选", "How to choose the settings"),
                            command=lambda: self.on_manual(
                                i18n.t("【五、参数怎么选】", "[5] How to choose the settings")))
@@ -561,6 +699,13 @@ class App(tk.Tk):
         self.mouse_var.set(bool(s.get("draw_mouse", False)))
         self.inst_var.set(bool(s.get("reinstall_apk", False)))
         self.match_var.set(bool(s.get("match_phone", True)))
+        # 1.9.0 -- the touch channel, the boot-time stream and its wait.
+        if hasattr(self, "touch_var"):
+            self.touch_var.set(bool(s.get("touch", DEFAULTS.get("touch", True))))
+        if hasattr(self, "stream_auto_var"):
+            self.stream_auto_var.set(bool(s.get("auto_stream", False)))
+        if hasattr(self, "wait_var"):
+            self.wait_var.set(_wait_caption(int(s.get("auto_stream_wait", 60) or 0)))
         if hasattr(self, "chk_var"):
             self.chk_var.set(bool(s.get("check_updates", True)))
         self.pos_x_var.set(str(s.get("pos_x", 0)))
@@ -615,6 +760,14 @@ class App(tk.Tk):
             s["tray_on_close"] = self.close_action != "quit"
         if hasattr(self, "auto_var"):
             s["autostart"] = bool(self.auto_var.get())
+        if hasattr(self, "touch_var"):
+            s["touch"] = bool(self.touch_var.get())
+        if hasattr(self, "stream_auto_var"):
+            # Without 开机自动启动 there is nothing to hook the stream onto, so
+            # the two are saved as one decision.
+            s["auto_stream"] = bool(self.stream_auto_var.get() and self.auto_var.get())
+        if hasattr(self, "wait_var"):
+            s["auto_stream_wait"] = self._wait_value()
         if hasattr(self, "anim_var"):
             s[anim.KEY] = bool(self.anim_var.get())
         if hasattr(self, "off_mode_var"):
@@ -703,12 +856,19 @@ class App(tk.Tk):
 
         row = ttk.Frame(left)
         row.grid(row=0, column=0, sticky="ew")
-        ttk.Label(row, text=i18n.t("安卓设备:", "Android device:")).pack(side="left")
-        self.dev_var = tk.StringVar(value=i18n.t("未检测", "Not detected"))
-        self.dev_lbl = ttk.Label(row, textvariable=self.dev_var, style="Dim.TLabel")
-        self.dev_lbl.pack(side="left", padx=8)
+        row.columnconfigure(0, weight=1)
+        ttk.Label(row, text=i18n.t("安卓设备:", "Android device:")).grid(
+            row=0, column=0, sticky="w")
+        # The refresh button gets its own cell, and the device name -- model,
+        # state and serial, which is long -- goes on the line below and wraps.
+        # Side by side on one line the two of them ran out of room and both of
+        # them were clipped ("刷", "24091RPADC  [device]  d1").
         ttk.Button(row, text=i18n.t("刷新", "Refresh"), command=self.refresh_env,
-                   width=6).pack(side="right")
+                   width=6).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self.dev_var = tk.StringVar(value=i18n.t("未检测", "Not detected"))
+        self.dev_lbl = ttk.Label(row, textvariable=self.dev_var, style="Dim.TLabel",
+                                 wraplength=360, justify="left")
+        self.dev_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
 
         self.drv_var = tk.StringVar(value=i18n.t("检测中…", "Detecting..."))
         ttk.Label(left, text=i18n.t("虚拟显示器:", "Virtual display:")).grid(
@@ -718,11 +878,16 @@ class App(tk.Tk):
 
         btns = ttk.Frame(left)
         btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        # One button per row, both stretched to the panel width.  Side by side
+        # they came to more than the panel is wide on a narrow window, and ttk
+        # responds by clipping the text ("仅安装 AP", "安装 AP") rather than
+        # shrinking the button -- which reads as a broken interface.
+        btns.columnconfigure(0, weight=1)
         self.btn_install = ttk.Button(btns, text=_install_driver_label(),
                                       command=self.on_install_driver)
-        self.btn_install.pack(side="left")
+        self.btn_install.grid(row=0, column=0, sticky="ew")
         ttk.Button(btns, text=i18n.t("仅安装 APK 并启动", "Install APK only and start"),
-                   command=self.on_install_apk).pack(side="left", padx=6)
+                   command=self.on_install_apk).grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
         self.mon_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.mon_var, style="Mono.TLabel", justify="left",
@@ -856,7 +1021,7 @@ class App(tk.Tk):
                                               "Top-left corner of the virtual screen, in "
                                               "main-screen coordinates"),
                   style="Dim.TLabel").pack(side="left")
-        self.pos_frame.grid(row=11, column=1, columnspan=3, sticky="w", pady=3)
+        self.pos_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=3)
         self.pos_frame.grid_remove()
         self.pos_x_var.trace_add("write", self._layout_changed)
         self.pos_y_var.trace_add("write", self._layout_changed)
@@ -865,11 +1030,23 @@ class App(tk.Tk):
         self.mouse_chk = ttk.Checkbutton(right, text=i18n.t("显示鼠标指针", "Draw the mouse pointer"),
                                          variable=self.mouse_var)
         self.mouse_chk.grid(row=7, column=1, sticky="w", pady=3)
+
+        # 1.9.0 -- the touch channel got a switch of its own.  Until this version
+        # it was a hidden cfg flag that was always on: the only way to stop the
+        # phone from driving the PC mouse was to press 停止, which also takes the
+        # virtual screen off the desktop.  The box takes effect immediately
+        # (_touch_choice -> Session.set_touch), no restart needed.
+        self.touch_var = tk.BooleanVar(value=bool(DEFAULTS.get("touch", True)))
+        self.touch_chk = ttk.Checkbutton(
+            right, text=i18n.t("手机触摸控制电脑", "Phone touch controls the PC"),
+            variable=self.touch_var, command=self._touch_choice)
+        self.touch_chk.grid(row=7, column=2, columnspan=2, sticky="w", pady=3)
+
         self.inst_var = tk.BooleanVar(value=True)
         self.inst_chk = ttk.Checkbutton(right, text=i18n.t("每次重新安装 APK",
                                                            "Reinstall the APK every time"),
                                         variable=self.inst_var)
-        self.inst_chk.grid(row=7, column=2, columnspan=2, sticky="w", pady=3)
+        self.inst_chk.grid(row=9, column=1, columnspan=3, sticky="w", pady=3)
 
         # 1.6.8 -- the "shrink to tray" check box left the window: it is one
         # preference and it was taking a permanent place in the main window.
@@ -880,12 +1057,39 @@ class App(tk.Tk):
         self.auto_chk = ttk.Checkbutton(right, text=i18n.t("开机自动启动", "Start with Windows"),
                                         variable=self.auto_var,
                                         command=self._sync_autostart)
-        self.auto_chk.grid(row=12, column=2, columnspan=2, sticky="w", pady=3)
+        self.auto_chk.grid(row=10, column=0, columnspan=2, sticky="w", pady=3)
+
+        # 1.9.0 -- "start with Windows" and "start streaming by itself" are two
+        # different promises, and the second one is only possible on top of the
+        # first, so ticking this ticks 开机自动启动 too and unticking that clears
+        # this one (see _sync_autostart).
+        self.stream_auto_var = tk.BooleanVar(
+            value=bool(self.settings.get("auto_stream", False)))
+        self.stream_auto_chk = ttk.Checkbutton(
+            right, text=i18n.t("开机后自动开始投屏", "Start streaming after boot"),
+            variable=self.stream_auto_var, command=self._auto_stream_choice)
+        self.stream_auto_chk.grid(row=10, column=2, columnspan=2, sticky="w", pady=3)
+
+        # How long to keep waiting for the phone.  A desktop usually boots in
+        # well under a minute, but the phone may still be asleep or the cable
+        # plugged in later, so the default is a minute and it can be turned into
+        # "keep waiting" for an unattended machine.
+        self.wait_var = tk.StringVar(value=_wait_caption(
+            int(self.settings.get("auto_stream_wait", 60) or 0)))
+        ttk.Label(right, text=i18n.t("开机后最多等手机", "Wait for the phone up to"),
+                  style="Dim.TLabel").grid(row=11, column=0, sticky="w", pady=3)
+        self.wait_cb = ttk.Combobox(right, textvariable=self.wait_var, width=10,
+                                    state="readonly", values=[t for _, t in WAITS])
+        self.wait_cb.grid(row=11, column=1, sticky="w", pady=3)
+        self.wait_cb.bind("<<ComboboxSelected>>", self._wait_changed)
+        ttk.Label(right, text=i18n.t("等不到会弹一条系统通知",
+                                     "a system notification if it never shows up"),
+                  style="Dim.TLabel").grid(row=11, column=2, columnspan=2, sticky="w", pady=3)
 
         self.anim_var = tk.BooleanVar(value=bool(self.settings.get(anim.KEY, True)))
         self.anim_chk = ttk.Checkbutton(right, text=anim.label(), variable=self.anim_var,
                                         command=self._anim_choice)
-        self.anim_chk.grid(row=13, column=1, sticky="w", pady=3)
+        self.anim_chk.grid(row=12, column=1, sticky="w", pady=3)
 
         # 1.6.4 -- how thoroughly to put the virtual screen away.  This used to
         # run on every 停止 (Stop), which made stopping and starting again slow:
@@ -897,25 +1101,25 @@ class App(tk.Tk):
         # one monitor).  "desktop" only takes it off the desktop.
         self.off_mode_var = tk.StringVar(value=self.settings.get("vdd_off_mode", "deep"))
         ttk.Label(right, text=i18n.t("退出程序时：", "When the program exits:"),
-                  style="Dim.TLabel").grid(row=14, column=0, sticky="w", pady=(6, 3))
+                  style="Dim.TLabel").grid(row=13, column=0, sticky="w", pady=(6, 3))
         self.off_deep_btn = ttk.Radiobutton(
             right, text=i18n.t("彻底关闭（开机也不出现，远程软件看不到）",
                                "Switch it off for real (absent at boot, invisible to remote software)"),
             value="deep", variable=self.off_mode_var, command=self._off_mode_choice)
-        self.off_deep_btn.grid(row=14, column=1, columnspan=3, sticky="w", pady=(6, 3))
+        self.off_deep_btn.grid(row=13, column=1, columnspan=3, sticky="w", pady=(6, 3))
         self.off_desk_btn = ttk.Radiobutton(
             right, text=i18n.t("只移出桌面（不弹授权，但屏还在系统里）",
                                "Just take it off the desktop (no prompt, but it still exists)"),
             value="desktop", variable=self.off_mode_var, command=self._off_mode_choice)
-        self.off_desk_btn.grid(row=15, column=1, columnspan=3, sticky="w", pady=3)
+        self.off_desk_btn.grid(row=14, column=1, columnspan=3, sticky="w", pady=3)
 
         self.link_var = tk.StringVar(value="")
         ttk.Label(right, textvariable=self.link_var, style="Dim.TLabel", wraplength=430,
-                  justify="left").grid(row=8, column=0, columnspan=4, sticky="w", pady=(6, 0))
+                  justify="left").grid(row=15, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Button(right, text=i18n.t("测一下数据线速度", "Measure cable speed"),
-                   command=self.on_linkspeed).grid(row=9, column=1, sticky="w", pady=(4, 0))
+                   command=self.on_linkspeed).grid(row=16, column=1, sticky="w", pady=(4, 0))
         ttk.Label(right, textvariable=self.q_hint_var, style="Dim.TLabel", wraplength=430,
-                  justify="left").grid(row=10, column=0, columnspan=4, sticky="w", pady=(4, 0))
+                  justify="left").grid(row=17, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         # -- actions ---------------------------------------------------------
         act = ttk.Frame(outer)
@@ -1006,6 +1210,25 @@ class App(tk.Tk):
         """
         box = {}
         done = threading.Event()
+
+        # 1.9.1 -- at boot the window can still be sitting in the tray, and a
+        # modal question nobody can see would hold the start for five minutes.
+        # Say it with a balloon and leave the phone alone this time: the 每次
+        # 重新安装 APK box, or one run with the window open, settles it.
+        try:
+            hidden = self.state() == "withdrawn"
+        except Exception:
+            hidden = False
+        if hidden:
+            self._notify(
+                "apk",
+                i18n.t("手机端 App 可以更新", "The phone app can be updated"),
+                i18n.t("手机上是 versionCode %d，这个版本带的是 %d（%s）。"
+                       "打开窗口再点一次「开始投屏」就会问你要不要装。",
+                       "The phone has versionCode %d; this build ships %d (%s). "
+                       "Open the window and press Start again and you will be asked.")
+                % (had, want, name))
+            return False
 
         def ask():
             try:
@@ -1701,8 +1924,7 @@ class App(tk.Tk):
 
         st = vd.status()
         self._later(lambda: self.drv_var.set(vd.summary_line(st)))
-        self._later(lambda: self.btn_install.configure(
-            state="disabled" if st["state"] == "ready" else "normal"))
+        self._later(lambda: self._sync_driver_button(st))
 
         mons = wd.live_monitors()
         text = "\n".join("%-12s %-28s %dx%d@%d  @(%d,%d)%s" % (
@@ -1715,8 +1937,47 @@ class App(tk.Tk):
         if st["state"] != "ready":
             self.log("虚拟显示器状态: " + vd.summary_line(st))
 
+    def _sync_driver_button(self, st):
+        """Paint install / turn-on / installed on the left panel's button.
+
+        Greyed out is not the whole story: the Tools menu keeps a working
+        install entry, because a broken install has to be re-done over itself,
+        and the caption names the state so nobody has to read the log to find
+        out whether the driver is there.
+        """
+        action, caption = _driver_button(st)
+        self._drv_action = action
+        try:
+            self.btn_install.configure(
+                text=caption, state="disabled" if action == "done" else "normal")
+        except Exception:
+            pass
+
     # ---------------------------------------------------------------- actions
     def on_install_driver(self):
+        # 1.9.1 -- the same button also covers "installed, but the node is
+        # switched off", which is the normal state after an exit with the
+        # off-for-real setting.  Turning it on costs one UAC prompt and a few
+        # seconds; reinstalling would copy files that are already there.
+        if getattr(self, "_drv_action", "install") == "enable":
+            if not messagebox.askyesno(
+                    i18n.t("启用虚拟显示器驱动",
+                           "Turn the virtual display driver on"),
+                    i18n.t(
+                        "驱动已经装好了，只是现在处于关闭状态"
+                        "（退出程序时选了「彻底关闭」，所以它不会自己出现）。"
+                        + NL + NL +
+                        "现在就把它打开吗？需要管理员权限，会弹一次 UAC，请点“是”。",
+                        "The driver is installed; it is only switched off "
+                        "(the program disables it on exit when the off-for-real "
+                        "setting is selected, so it does not come back by itself)."
+                        + NL + NL +
+                        "Turn it on now?  It needs administrator rights, so one "
+                        "UAC prompt -- click Yes."),
+                    parent=self):
+                return
+            self.run_bg(self._enable_driver_work)
+            return
         if not messagebox.askyesno(
                 i18n.t("安装虚拟显示器驱动", "Install the virtual display driver"),
                 i18n.t(
@@ -1762,6 +2023,85 @@ class App(tk.Tk):
             self.log("备用方式安装驱动完成。", "ok")
         self.log("虚拟显示器驱动安装完成。", "ok")
         self._later(lambda: self.stat_var.set(i18n.t("驱动已安装", "Driver installed")))
+        # 1.9.1 -- this can take a minute behind a UAC prompt, and the window
+        # may well be in the tray by then.  Say it out loud.
+        self._notify("driver",
+                     i18n.t("虚拟显示器驱动已装好", "The virtual display driver is installed"),
+                     i18n.t("现在可以点「开始投屏」了。", "You can press Start now."))
+        self._refresh_work()
+
+    def _enable_driver_work(self):
+        """Turn the device node back on instead of reinstalling the driver."""
+        import vdd as vd
+        self._later(lambda: self.stat_var.set(
+            i18n.t("启用虚拟屏…", "Turning the virtual display on...")))
+        ok, text = vd.set_enabled(True, log=self.log)
+        if not ok:
+            raise RuntimeError(self._first_paragraph(
+                text, i18n.t("虚拟屏没能启用，详见日志。",
+                             "The virtual display could not be turned on -- "
+                             "see the log.")))
+        self.log("虚拟显示器驱动已启用。", "ok")
+        self._later(lambda: self.stat_var.set(i18n.t("驱动已启用", "Driver on")))
+        self._notify("driver",
+                     i18n.t("虚拟显示器驱动已打开", "The virtual display driver is on"),
+                     i18n.t("现在可以点「开始投屏」了。", "You can press Start now."))
+        self._refresh_work()
+
+    def on_uninstall_driver(self):
+        # 1.9.1 -- a way back out.  Until this existed the only way to remove
+        # the driver was Device Manager, and the files left behind in
+        # C:\VirtualDisplayDriver made a half-removed install look installed.
+        answer = messagebox.askyesno(
+            i18n.t("卸载虚拟显示器驱动", "Remove the virtual display driver"),
+            i18n.t(
+                "将删除驱动包和虚拟屏的设备节点，需要管理员权限（会弹一次 UAC）。"
+                + NL + NL +
+                "下面这些会保留：" + NL +
+                "  * C:\\VirtualDisplayDriver 里的分辨率表"
+                "（你自己加过的尺寸都还在）；" + NL +
+                "  * 本程序的全部设置。" + NL + NL +
+                "卸载之后投屏用不了，直到重新安装驱动。继续吗？",
+                "This removes the driver package and the virtual screen's device "
+                "node. It needs administrator rights, so one UAC prompt."
+                + NL + NL +
+                "These are kept:" + NL +
+                "  * the resolution table in C:\\VirtualDisplayDriver "
+                "(every size you added by hand stays);" + NL +
+                "  * all of this program's settings." + NL + NL +
+                "Streaming will not work until the driver is installed again. "
+                "Continue?"),
+            parent=self)
+        if not answer:
+            return
+        self.run_bg(self._uninstall_driver_work)
+
+    def _uninstall_driver_work(self):
+        import vdd as vd
+        # A screen still attached to the desktop cannot be removed cleanly:
+        # detach first, exactly like Stop does, so the desktop is back to one
+        # screen before the device node disappears.
+        s = self.session
+        if s is not None and (s.running or s.attached_display()):
+            self._later(lambda: self.stat_var.set(
+                i18n.t("先停止投屏…", "Stopping the stream first...")))
+            s.stop()
+        self._later(lambda: self.stat_var.set(
+            i18n.t("卸载驱动…", "Removing the driver...")))
+        ok, out = vd.uninstall(log=self.log)
+        self._log_install_output(out)
+        if not ok:
+            raise RuntimeError(self._first_paragraph(
+                out, i18n.t("驱动没有卸载干净，详见日志。",
+                            "The driver was not fully removed -- see the log.")))
+        self.log("虚拟显示器驱动已卸载（分辨率表和设置都留着）。", "ok")
+        self._later(lambda: self.stat_var.set(
+            i18n.t("驱动已卸载", "Driver removed")))
+        self._notify("driver",
+                     i18n.t("虚拟显示器驱动已卸载", "The virtual display driver was removed"),
+                     i18n.t("分辨率表和本程序的设置都留着；要投屏时再装一次驱动。",
+                            "The resolution table and the settings are kept; "
+                            "install the driver again when you need to stream."))
         self._refresh_work()
 
     def _log_install_output(self, out):
@@ -1832,6 +2172,12 @@ class App(tk.Tk):
         self._later(lambda: self.stat_var.set(i18n.t("APK 已就绪", "APK ready")))
 
     def on_start(self):
+        # 人不喜欢被机器抢方向盘：手动点了开始，就把自动投屏的重试停掉。
+        try:
+            self._auto_cancel.set()
+        except Exception:
+            pass
+        self._auto_streaming = False
         self._apply_form()
         self._save_settings()          # starting is a good moment to persist
         self.run_bg(self._start_work)
@@ -1852,6 +2198,17 @@ class App(tk.Tk):
         self.stat_var.set(i18n.t("投屏中", "Streaming"))
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
+        # 1.9.1 -- a program that started streaming by itself at boot has to
+        # say so, or the user only finds out when the picture does not come.
+        # The manual press is a separate kind: most people do not want a
+        # balloon about something they just did with the window in front of
+        # them, and that kind defaults to off.
+        try:
+            desc = self.session.describe()
+        except Exception:
+            desc = ""
+        self._notify("stream" if self._auto_streaming else "manual",
+                     i18n.t("投屏已开始", "Streaming started"), desc)
 
     def _apply_form(self):
         cfg = self.session.cfg
@@ -1882,6 +2239,10 @@ class App(tk.Tk):
                 raise RuntimeError(i18n.t("自定义位置的 X / Y 必须是整数",
                                           "A custom position needs whole numbers for X and Y"))
         cfg["draw_mouse"] = bool(self.mouse_var.get())
+        # 1.9.0 -- the same trap 1.8.1 hit with match_phone: the box has to copy
+        # its value into cfg, or session keeps DEFAULTS["touch"] (always True)
+        # and unticking the box does nothing at all.
+        cfg["touch"] = bool(self.touch_var.get())
         # 1.8.1 -- the one setting this function used to forget.  "match the
         # phone's panel" is remembered in settings.json and shown on the form,
         # but session.cfg kept the DEFAULTS value (True) no matter what the box
@@ -1910,12 +2271,215 @@ class App(tk.Tk):
         # a second, no UAC).  Only exiting the program switches the driver off
         # for real -- see _quit_now.
         self.btn_stop.configure(state="disabled")
+        try:
+            self._auto_cancel.set()
+        except Exception:
+            pass
         self.run_bg(lambda: self.session.stop(), done=self._stopped)
 
     def _stopped(self):
         self.stat_var.set(i18n.t("已停止", "Stopped"))
         self.perf_var.set("")
         self.btn_start.configure(state="normal")
+
+    # ------------------------------------------- 开机后自动开始投屏（1.9.0）
+    def _auto_stream_check(self):
+        """被 --stream 拉起来时，先判断这一次该不该自动开始投屏。
+
+        这里只做判断，真正的重试在 _auto_stream_worker 里：开机那一刻 adb 服务、
+        虚拟屏驱动、手机都还在醒来的路上，试一次就报错没有任何意义。
+        """
+        if not AUTOSTREAM:
+            return
+        if getattr(self, "_auto_begun", False):
+            # 只跑一次。__init__ 里的 after 和手动调用撞上时，两个 worker 会同时
+            # 去点「开始」，第二个白等一下才看到「已经在投屏了」。
+            return
+        self._auto_begun = True
+        if not self.settings.get("auto_stream", False):
+            self.log("命令行带了 --stream，但设置里「开机后自动开始投屏」是关的，这次不自动开始。")
+            return
+        if priv.needs_accept(self.settings):
+            # 条款没同意过就替用户按下开始，比什么都不做更不礼貌。
+            self.log("开机自动投屏没有开始：还没看过并同意使用条款。", "err")
+            self._notify(i18n.t("自动投屏没有开始", "The automatic start did not begin"),
+                         i18n.t("先打开 DroidExtend 看一遍并同意使用条款。",
+                                "Open DroidExtend and accept the terms first."))
+            return
+        self.log("开机自动投屏：开始等手机（%s）。" % self._wait_words())
+        # 表单要在主线程里读（Tk 变量不是线程安全的），后台只负责反复试。
+        try:
+            self._apply_form()
+        except Exception as e:
+            self.log("开机自动投屏读界面设置失败：%s" % e, "err")
+            return
+        threading.Thread(target=self._auto_stream_worker, name="auto-stream",
+                         daemon=True).start()
+
+    def _auto_stream_worker(self):
+        """等手机，等到就开始，等不到就发一条系统通知。
+
+        为什么要循环重试：Windows 登录完成时 adb 服务可能还没起，手机也可能还在
+        开机，第一次几乎必然失败。每 AUTO_RETRY 秒再来一次，直到等到或者超时。
+        """
+        wait = self._wait_value()
+        t0 = time.time()
+        attempt = 0
+        fatal = None
+        while not self._auto_cancel.is_set():
+            if self.busy:
+                # 有人在用（手动点了按钮，或者环境刷新在跑）：让开，别抢按钮。
+                self._auto_cancel.wait(0.5)
+                continue
+            if wait > 0 and time.time() - t0 >= wait:
+                break
+            attempt += 1
+            self.busy = True
+            self._later(lambda: self.btn_start.configure(state="disabled"))
+            err = None
+            try:
+                if self.session is not None and self.session.running:
+                    self.log("开机自动投屏：已经在投屏了，不重复开始。")
+                    return
+                self.log("开机自动投屏：第 %d 次尝试。" % attempt)
+                self._auto_streaming = True
+                self._start_work()
+            except VddMissing as e:
+                err = i18n.t("虚拟显示器未就绪：%s", "the virtual display is not ready: %s") % e
+                fatal = err
+            except Exception as e:
+                err = "%s: %s" % (type(e).__name__, e)
+            finally:
+                self.busy = False
+            if err is None:
+                self.log("开机自动投屏：已经开始。", "ok")
+                self._wake_phone()
+                return
+            self.log("开机自动投屏没有开始：%s" % err.replace(NL, " "), "err")
+            # 每次失败都把屏摘掉：留着一块没人看的虚拟屏，鼠标就会飘过去。
+            try:
+                if self.session is not None and self.session.attached_display():
+                    self.session.stop()
+            except Exception:
+                pass
+            if fatal or self._auto_cancel.is_set():
+                break
+            left = wait - (time.time() - t0)
+            if wait > 0 and left <= 0:
+                break
+            pause = AUTO_RETRY if wait <= 0 else max(1.0, min(AUTO_RETRY, left))
+            self._auto_cancel.wait(pause)
+        if self._auto_cancel.is_set():
+            self.log("开机自动投屏：已取消。")
+            return
+        self._later(lambda: self.btn_start.configure(state="normal"))
+        self._later(lambda: self.stat_var.set(i18n.t("就绪", "Ready")))
+        if fatal:
+            self.log("开机自动投屏：放弃，虚拟屏没准备好。", "err")
+            self._notify("fail",
+                         i18n.t("开机自动投屏没有开始", "The automatic start did not begin"),
+                         i18n.t("虚拟显示器没准备好，先点「%s」。",
+                                "The virtual display is not ready -- press \"%s\" first.")
+                         % _install_driver_label())
+            return
+        self.log("开机自动投屏：%s没等到手机，先放弃。"
+                 % ((i18n.t("等了 %d 秒" % wait, "after %d s" % wait) + " ") if wait > 0 else ""),
+                 "err")
+        self._notify("fail",
+                     i18n.t("开机自动投屏没有开始", "The automatic start did not begin"),
+                     i18n.t("没等到手机。插上数据线、确认 USB 调试已打开后再打开一次程序。",
+                            "The phone never turned up. Check the cable and USB debugging, "
+                            "then start DroidExtend once by hand."))
+
+    def _wake_phone(self):
+        """把手机屏幕点亮。锁着的屏在流里就是一块黑画面，看着像"没画面"。"""
+        try:
+            s = self.session
+            if s is not None and s.adb and s.serial:
+                s.adb.shell(s.serial, "input", "keyevent", "224")   # KEYCODE_WAKEUP
+                self.log("已试着点亮手机屏幕（设了锁屏密码的话还需要手动解锁）。")
+        except Exception as e:
+            self.log("唤醒手机屏幕失败：%s" % e)
+
+    def _notify_on(self, kind):
+        """Is this kind of news allowed right now?
+
+        1.9.1.  The master switch wins, then the per-kind box.  An unknown kind
+        is allowed rather than silently swallowed: a notification that never
+        appears because of a typo in a kind name would be very hard to find.
+        """
+        s = getattr(self, "settings", None) or {}
+        if not s.get("notify", True):
+            return False
+        if kind not in _NOTIFY_KINDS_SET:
+            return True
+        return bool(s.get("notify_" + kind, True))
+
+    def _notify(self, kind, title, text):
+        """按用户的开关发一条通知；关掉的那一类只写日志。"""
+        if not self._notify_on(kind):
+            self.log(i18n.t("（这一类通知已关，只写日志）%s：%s",
+                            "(this kind of notification is off, log only) %s: %s")
+                     % (title, text))
+            return False
+        # The same sentence twice within half a minute is one event seen twice
+        # (a retry loop, two callers), not two events.
+        key = (kind, title, text)
+        now = time.time()
+        last = self._notify_seen.get(key, 0.0)
+        if now - last < 30.0:
+            return False
+        self._notify_seen[key] = now
+        if len(self._notify_seen) > 64:
+            self._notify_seen = {k: v for k, v in self._notify_seen.items()
+                                 if now - v < 300.0}
+        return self._send_notify(title, text)
+
+    def _send_notify(self, title, text):
+        """真的把一条通知送出去：托盘气泡 → 系统通知 → 窗口还看得见时弹框。"""
+        t = getattr(self, "tray", None)
+        if t is not None and getattr(t, "running", False):
+            try:
+                t.balloon(title, text)
+                return True
+            except Exception:
+                pass
+        try:
+            import notify
+            if notify.toast(title, text, log=self.log):
+                return True
+        except Exception as e:
+            self.log("系统通知发不出去：%s" % e)
+        # 通知也没弹出来的时候至少留个痕迹。窗口已经藏起来时不弹框：一个藏在
+        # 托盘里的程序突然在屏幕正中弹出错误框，比没提示更让人困惑。
+        try:
+            if self.state() != "withdrawn":
+                self._later(lambda: messagebox.showwarning(title, text, parent=self))
+        except Exception:
+            pass
+        return False
+
+    def _set_notify(self, key, var):
+        """A notification check box was clicked: remember it, do not argue."""
+        try:
+            self.settings[key] = bool(var.get())
+        except Exception:
+            return
+        self._save_settings()
+
+    def on_test_notify(self):
+        """发一条真通知，绕过开关 —— 用户点这个就是想看它能不能到。"""
+        ok = self._send_notify(
+            i18n.t("测试通知", "Test notification"),
+            i18n.t("能看到这一条，说明 Windows 通知是通的。"
+                   "（关闭按钮在这个气泡的右上角。）",
+                   "If you can see this, notifications reach you. "
+                   "(The close button is at the top right of this balloon.)"))
+        if ok:
+            self.log("测试通知已发出。", "ok")
+        else:
+            self.log("测试通知发不出去：Windows 的通知可能被系统设置或"
+                     "「专注助手」挡住了，菜单里有「Windows 通知设置…」。", "err")
 
     def _poll_perf(self):
         s = self.session
@@ -2248,7 +2812,19 @@ class App(tk.Tk):
             return
         if r["newer"]:
             self.log("发现新版本 v%s（当前 v%s）：%s" % (r["latest"], APP_VERSION, r["url"]), "ok")
-            self._offer_update(r)
+            # 1.9.1 -- the check that runs at startup is not a request for a
+            # window: someone who just booted the machine did not ask to read
+            # release notes.  It becomes a balloon; the full window is one
+            # menu click away (工具 -> 检查更新), and manual=True still gets it.
+            if not manual:
+                self._notify(
+                    "update",
+                    i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready") % r["latest"],
+                    i18n.t("你现在是 v%s。「工具 → 检查更新」可以现在就装。",
+                           "You are on v%s. Tools -> Check for updates installs it now.")
+                    % APP_VERSION)
+            else:
+                self._offer_update(r)
         else:
             self.log("已是最新版本 v%s。" % APP_VERSION, "ok")
             if manual:
@@ -2779,13 +3355,73 @@ class App(tk.Tk):
             return
         try:
             if self.auto_var.get():
-                cmd = auto.write(["--minimized"] if self.close_action == "tray" else [])
+                extra = []
+                # A machine that starts streaming by itself has nobody looking
+                # at it, so the window must not appear as well.
+                if self.close_action == "tray" or self._auto_stream_on():
+                    extra.append("--minimized")
+                if self._auto_stream_on():
+                    extra.append("--stream")
+                cmd = auto.write(extra)
                 self.log("已设置开机自动启动：%s" % cmd)
             elif auto.enabled():
                 auto.remove()
                 self.log("已取消开机自动启动。")
         except Exception as e:
             self.log("设置开机自启动失败：%s" % e, "err")
+        # 自动投屏只能挂在"开机自动启动"上：取消后者时前者必须跟着走，否则
+        # 界面上会留一个永远不会发生的勾。
+        if (hasattr(self, "stream_auto_var") and not self.auto_var.get()
+                and self.stream_auto_var.get()):
+            self.stream_auto_var.set(False)
+            self.log("取消了开机自动启动，「开机后自动开始投屏」也一并取消。")
+
+    def _auto_stream_on(self):
+        try:
+            return bool(self.stream_auto_var.get())
+        except Exception:
+            return False
+
+    def _wait_value(self):
+        """The wait, in seconds.  0 = keep waiting until someone stops it."""
+        try:
+            return int(_key_for(WAITS, self.wait_var.get(), 60) or 0)
+        except Exception:
+            return 60
+
+    def _wait_words(self):
+        n = self._wait_value()
+        if n <= 0:
+            return i18n.t("会一直等到手机接上为止", "it keeps waiting until the phone turns up")
+        return i18n.t("最多等 %d 秒", "it waits up to %d s") % n
+
+    def _auto_stream_choice(self):
+        """用户动了「开机后自动开始投屏」。它得先有「开机自动启动」。"""
+        on = self._auto_stream_on()
+        if on and hasattr(self, "auto_var") and not self.auto_var.get():
+            self.auto_var.set(True)
+            self.log("一并打开了「开机自动启动」——没有它就没有东西拉起本程序。")
+        self._sync_autostart()
+        self._save_settings()
+        if on:
+            self.log("开机后会自己开始投屏，%s；等不到就发一条系统通知。" % self._wait_words())
+        else:
+            self.log("已取消开机后自动开始投屏。")
+
+    def _wait_changed(self, *_):
+        self._save_settings()
+        self.log("开机后最多等手机：%s。" % self._wait_words())
+
+    def _touch_choice(self):
+        """用户动了「手机触摸控制电脑」。投屏中立刻生效，不用停止重来。"""
+        on = bool(self.touch_var.get())
+        self._save_settings()
+        if self.session is None:
+            return
+        try:
+            self.session.set_touch(on)
+        except Exception as e:
+            self.log("切换触摸控制失败：%s" % e, "err")
 
     def _anim_choice(self):
         """用户动了「界面动画」这个勾。立刻生效，不用重启。"""
