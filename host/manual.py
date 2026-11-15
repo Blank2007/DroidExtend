@@ -19,7 +19,7 @@ DroidExtend 使用说明   v{ver}
   是真扩展桌面，不是投屏镜像： Windows 会多出一块屏，窗口可以拖过去，
   鼠标可以移进去，手机上点一下就是在这块屏上点一下。
 
-  延迟实测 5~11 ms，画面走 USB 线，不经过 WiFi、不经过路由器。
+  延迟实测 17~31 ms 上屏（主机发出到真的出现在屏幕上，其中传输 0~12 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
 
 【二、手机要先准备两件事】
   1. 打开开发者选项
@@ -250,7 +250,7 @@ DroidExtend 使用说明   v{ver}
 
   Q: 华为 / 鸿蒙设备投屏没画面，从哪儿查？（1.8.4）
   A: 1.8.4 起两端都会留证据：主机每 10 秒一行
-     「采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 8 ms」，
+     「采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 20 ms」，
      手机端也会把解码器事件回给主机（配置成功、第一帧上屏、Surface 被替换等）。
      把这几行一起发到 issue 里，就能分清是「主机没发」还是「手机收了没显示」。
      README 里「华为 / 鸿蒙设备」一节有更完整的排查顺序。
@@ -295,7 +295,7 @@ DroidExtend manual   v{ver}
   drag windows onto it, move the mouse into it, and a tap on the phone is a
   click on that screen.
 
-  Measured latency is 5-11 ms.  The picture travels over the USB cable -- never
+  Measured latency is 17-31 ms to the glass.  The picture travels over the USB cable -- never
   over WiFi, never through a router.
 
 [2] Two things to set up on the phone first
@@ -597,7 +597,7 @@ DroidExtend manual   v{ver}
 
   Q: A Huawei / HarmonyOS device shows no picture.  Where do I look? (1.8.4)
   A: Since 1.8.4 both ends leave evidence.  The host writes one line every 10 s:
-     "capture 120 fps / sending 19.8 Mbps / phone receiving 121 fps / showing 122 fps / 8 ms",
+     "capture 120 fps / sending 19.8 Mbps / phone receiving 121 fps / showing 122 fps / 20 ms",
      and the phone reports decoder events back (configured, first frame on screen,
      surface replaced).  Post those lines in the issue and it becomes obvious whether the
      host never sent or the phone received and never showed.  The "Huawei / HarmonyOS"

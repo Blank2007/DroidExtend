@@ -45,7 +45,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 |---|---|
 | 🖥️ **A real extended desktop** | Not mirroring. A new display shows up under `Win+P`, windows can be dragged onto it, and the mouse can click right on it |
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
-| ⚡ **Low latency** | Measured end to end at **5–11 ms** (from the host grabbing a frame to the phone decoding it); it was 31–42 ms before the fix |
+| ⚡ **Low latency** | **17–31 ms to the glass** (the 1.9.3 definition: the host put it on the wire -> it is really on the screen; of which 0–12 ms transfer and 14–26 ms decode plus present) |
 | 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
 | 🧹 **Stop and it is gone** | Hit `停止` (Stop), or quit the program, and the virtual display is removed from the system immediately — no ghost monitor left behind. Pulling the cable without stopping leaves the screen in place for now; stop once after reconnecting and it goes |
 | 🎛️ **Fully hardware-accelerated pipeline** | `ddagrab` (desktop capture) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU |
@@ -351,17 +351,18 @@ Other tuning tips:
 Since 1.8.4 the phone reports back every 2 seconds how many frames it received, how many it showed and the
 latency, and the host log writes a line only when the numbers really move (since 1.8.6: a frame rate that
 changes by 25 %, a latency that changes by 50 ms, at least 10 seconds apart), such as
-`采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 8 ms` — that single line tells you whether
+`采集 120 fps · 发送 19.8 Mbps · 手机 收 121 fps / 显示 122 fps · 20 ms`. The phone computes that number itself, and since 1.9.3 it means "host put the frame on the wire -> it is really on the screen" (it used to stop at "the phone received it", which is why it looked so much smaller). That single line tells you whether
 the host never sent, the phone never received, or the phone decoded but never presented. The phone also prints its
 own line every 10 seconds (since 1.8.6; straight away when frames start being dropped):
-`perf fps=… latency_avg_ms=… latency_max_ms=…`
+`perf fps=… latency_avg_ms=… latency_max_ms=… net_ms=… dec_ms=…`
 (`adb logcat -s DroidExtend:I`). The timestamp is stamped by the host when it grabs the frame, and the phone
-converts it using the clock offset established during the handshake, so what's measured is the **full path from
-frame grab to decode**:
+converts it using the clock offset established during the handshake.  Since 1.9.3 what is measured is the
+**full path from the host putting the frame on the wire to it being on the glass**, split in two: `net_ms`
+is "host sent it" to "the phone has it", `dec_ms` is "the phone has it" to "on the glass".  Measured here:
 
 ```
-修复前 (before fix)  latency_avg_ms 31~42   latency_max 56~79
-修复后 (after fix)   latency_avg_ms  5~11   latency_max 26~45
+1.9.3  latency_avg_ms 17~31   latency_max 44~61   net_ms 0~12   dec_ms 14~26
+1.5.x  latency_avg_ms  5~11   latency_max 26~45   (old definition: only "the phone received it")
 ```
 
 Where the difference came from: `capture.py` used `p.stdout.read(65536)` to pull ffmpeg's output. Python's
@@ -380,7 +381,7 @@ It now uses `os.read(p.stdout.fileno(), 65536)`, which takes data the moment it'
 * `fps` low, `latency` normal → the **USB cable** is out of bandwidth. Run "Measure the cable speed"
   on the PC; below 40 Mbps, replace the cable (on the same phone we measured a 40× spread:
   13.7 Mbps ↔ 597 Mbps).
-* `fps` normal, `latency` high (sustained > 80 ms) → the encoder or decoder is queueing. Pick a
+* `fps` normal, `latency` high (since 1.9.3 normal is 17-31 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
   lighter encoder (`h264_nvenc` is the fastest on our machine), or drop to 30 fps.
 * Both numbers fine but the image still stutters → the phone is thermal-throttling; see "Phone side".
 * Even the PC's own mouse starts to lag → the GPU is saturated by something else; see below.
@@ -560,8 +561,9 @@ droid-extend/
    no Wi-Fi needed**).
    Every frame carries a host timestamp, from which the phone computes and displays the end-to-end latency.
 4. On the phone, **`VideoDecoder.java`** pulls the SPS/PPS out of the stream itself to configure MediaCodec, and
-   renders the hardware-decoded output straight to a `SurfaceView`; whenever the backlog exceeds 384 KB it drops
-   through to the next keyframe to keep latency low.
+   renders the hardware-decoded output straight to a `SurfaceView`.  Since 1.9.3 it no longer "jumps to the next
+   keyframe when the backlog grows": dropping a P frame smears everything after it.  A phone that reads slowly now
+   pushes back through the TCP window to the host, where ddagrab drops frames before they are encoded.
 5. Touch events travel back over **`tcp:27184`**: the phone normalizes coordinates against the image's aspect
    ratio → the host's **`touch.py`** injects them with `SendInput` in absolute coordinates across the whole virtual
    desktop, as a real mouse.

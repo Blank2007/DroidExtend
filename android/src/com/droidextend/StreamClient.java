@@ -19,7 +19,6 @@ public class StreamClient extends Thread {
     // in there is added latency.  768 KB was ~2 s of delay at 3 Mbps; 384 KB
     // is still generous for a momentary burst but caps the wait at a level
     // where jumping to the next keyframe is better than catching up.
-    private static final int BACKLOG_DROP_BYTES = 384 * 1024;
     // The two devices' monotonic clocks run at slightly different rates -- a
     // consumer crystal is good to roughly 50 ppm -- so the offset measured once
     // at the handshake slowly stops being true.  Left alone, that drift is added
@@ -229,6 +228,7 @@ public class StreamClient extends Thread {
         }
         control.write(facing);
         control.flush();
+        decoder.setClockSkew(clockSkewUs);
         decoder.setFormat(w, h, fps);
         videoSize(w, h, fps);
         if (listener != null) {
@@ -238,7 +238,8 @@ public class StreamClient extends Thread {
         Log.i(TAG, "handshake " + w + "x" + h + "@" + fps + " skew=" + clockSkewUs
                 + "us note=" + note);
 
-        boolean skipUntilKey = false;
+        // Frames dropped after decoding (several ready for one vsync).
+        long dropPrev = decoder.droppedOutputFrames();
         long frames = 0;
         long shownPrev = decoder.renderedFrames();
         long bytes = 0;
@@ -249,7 +250,6 @@ public class StreamClient extends Thread {
         // seconds is a record, one every two seconds is noise.
         int reportCount = 0;
         long latSum = 0;
-        long latMax = 0;
         int latCount = 0;
         long latMin = Long.MAX_VALUE;
         // The reference the drift is measured against: the window minimum of a
@@ -268,26 +268,20 @@ public class StreamClient extends Thread {
             in.readFully(unit, 0, len);
             bytes += len + 12;      // + the length and timestamp prefixes
 
-            if (raw.available() > BACKLOG_DROP_BYTES) {
-                skipUntilKey = true;
-            }
-            boolean isKey = isKeyframe(unit, len);
-            if (isKey) {
-                skipUntilKey = false;
-            }
-            if (!skipUntilKey) {
-                decoder.feed(unit, 0, len);
-                frames++;
-                long latUs = SystemClock.elapsedRealtimeNanos() / 1000 - clockSkewUs - stampUs;
-                if (latUs > 0 && latUs < 5000000L) {
-                    latSum += latUs;
-                    latCount++;
-                    if (latUs > latMax) {
-                        latMax = latUs;
-                    }
-                    if (latUs < latMin) {
-                        latMin = latUs;
-                    }
+            // Nothing is skipped here any more.  The host now writes straight
+            // to the socket, so a phone that falls behind simply stops reading
+            // and the encoder upstream drops frames *before* encoding them --
+            // the only place a frame can go missing without corrupting the P
+            // frames that reference it.
+            long recvUs = SystemClock.elapsedRealtimeNanos() / 1000 - clockSkewUs;
+            decoder.feed(unit, 0, len, stampUs, recvUs);
+            frames++;
+            long latUs = recvUs - stampUs;
+            if (latUs > 0 && latUs < 5000000L) {
+                latSum += latUs;
+                latCount++;
+                if (latUs < latMin) {
+                    latMin = latUs;
                 }
             }
 
@@ -326,21 +320,32 @@ public class StreamClient extends Thread {
                 st.shownFps = (shownNow - shownPrev) * 1000.0 / secs;
                 shownPrev = shownNow;
                 st.mbps = bytes * 8.0 / 1000.0 / secs;
-                st.latencyMs = latCount > 0 ? latSum / (double) latCount / 1000.0 : -1;
-                st.latencyMaxMs = latMax / 1000.0;
+                // The overlay now shows the whole way: the host putting the
+                // frame on the wire -> the frame on the glass.  The old number
+                // stopped at "arrived in this process", which is why it read a
+                // flattering 8 ms while the picture felt far later.
+                double shownMs = decoder.shownLatencyMs();
+                st.latencyMs = shownMs >= 0 ? shownMs
+                        : (latCount > 0 ? latSum / (double) latCount / 1000.0 : -1);
+                st.latencyMaxMs = decoder.takeShownLatencyMaxMs();
                 st.frames = frames;
                 st.bytes = bytes;
-                st.catchingUp = skipUntilKey;
+                long dropNow = decoder.droppedOutputFrames();
+                boolean dropping = dropNow > dropPrev;
+                dropPrev = dropNow;
+                st.catchingUp = dropping;
                 // This is the number that matters: ms from the frame leaving
                 // the encoder on the PC to the decoder handing it to the screen.
                 reportCount++;
-                if (reportCount % 5 == 0 || skipUntilKey) {
+                if (reportCount % 5 == 0 || dropping) {
                     Log.i(TAG, "perf fps=" + Math.round(st.streamFps)
                             + " mbps=" + String.format(java.util.Locale.US, "%.2f", st.mbps)
                             + " latency_avg_ms=" + Math.round(st.latencyMs)
                             + " latency_max_ms=" + Math.round(st.latencyMaxMs)
+                            + " net_ms=" + Math.round(decoder.transferMs())
+                            + " dec_ms=" + Math.round(decoder.decodeMs())
                             + " samples=" + latCount
-                            + (skipUntilKey ? " (dropping to keyframe)" : ""));
+                            + (dropping ? " (dropped decoded frames)" : ""));
                 }
                 stats(st);
                 // Tell the host the same numbers, so its log can tell a phone
@@ -354,31 +359,11 @@ public class StreamClient extends Thread {
                 frames = 0;
                 bytes = 0;
                 latSum = 0;
-                latMax = 0;
                 latCount = 0;
                 latMin = Long.MAX_VALUE;
                 lastReport = now;
             }
         }
-    }
-
-    private static boolean isKeyframe(byte[] d, int len) {
-        int end = len - 4;
-        for (int i = 0; i < end; i++) {
-            if (d[i] == 0 && d[i + 1] == 0 && (d[i + 2] == 1 || (d[i + 2] == 0 && d[i + 3] == 1))) {
-                int hdr = (d[i + 2] == 1) ? i + 3 : i + 4;
-                if (hdr < len) {
-                    int type = d[hdr] & 0x1F;
-                    if (type == 5 || type == 7) {
-                        return true;
-                    }
-                    if (type == 1) {
-                        return false;
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     private static int readIntLE(DataInputStream in) throws IOException {

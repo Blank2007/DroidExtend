@@ -123,7 +123,16 @@ def read_token():
 # even though HTTP_PROXY / HTTPS_PROXY are empty, and the registry proxy resets
 # the 36 MB asset upload with "[Errno 10054] 远程主机强迫关闭了一个现有的连接".
 # api.github.com and uploads.github.com both work fine direct, so say so here.
+#
+# 1.9.3: "fine direct" is not always true -- on a machine that can only reach
+# GitHub through Clash, direct is dead (000) and everything has to go through
+# the proxy.  Set DX_UPLOAD_PROXY=http://127.0.0.1:7897 for that case; unset it
+# and the old direct behaviour comes back.
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_UPSTREAM = os.environ.get("DX_UPLOAD_PROXY", "").strip()
+if _UPSTREAM:
+    DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler(
+        {"http": _UPSTREAM, "https": _UPSTREAM}))
 
 
 def api(method, url, token, payload=None, timeout=120):

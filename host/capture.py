@@ -767,6 +767,10 @@ def split_access_units(buf, codec=CODEC_H264):
 class Capture(object):
     """Runs ffmpeg and hands out encoded access units."""
 
+    # How many encoded frames may sit between ffmpeg and the socket.  Small on
+    # purpose: see the comment in _reader.
+    MAX_QUEUE = 6
+
     def __init__(self, cfg, rect, log=None):
         self.cfg = cfg
         self.rect = rect
@@ -841,7 +845,12 @@ class Capture(object):
         h = int(self.rect["height"])
         fps = int(c.get("fps", 60))
         bitrate = "%dM" % int(c.get("bitrate_mbps", 20))
-        gop = int(c.get("gop") or max(1, fps * 2))
+        # 1.10.0: one second, not two.  The GOP only costs anything when the
+        # stream has to resynchronise -- and when it does, the phone freezes
+        # until the next IDR.  Halving the GOP halves that freeze; the bitrate
+        # cost of an extra keyframe per second is a couple of percent at the
+        # same -cq, so the picture itself is untouched.
+        gop = int(c.get("gop") or max(1, fps))
         mouse = "1" if c.get("draw_mouse") else "0"
 
         cmd = [ff, "-hide_banner", "-loglevel", "error", "-nostats"]
@@ -931,7 +940,11 @@ class Capture(object):
                 "-g", str(gop), "-bf", "0", "-zerolatency", "1",
                 "-delay", "0"] + prof_args
             if codec == CODEC_H264:
-                cmd += ["-aud", "0", "-surfaces", "8"]
+                # Four concurrent surfaces, not eight: each one is a frame the
+                # encoder may hold before it hands the packet over.  Four still
+                # covers the pipeline (this machine encodes 3200x2136 at 130 fps)
+                # and leaves less to sit in front of the socket.
+                cmd += ["-aud", "0", "-surfaces", "4"]
             if c.get("spatial_aq"):
                 cmd += ["-spatial-aq", "1"]
         elif kind == "amf":
@@ -1086,13 +1099,22 @@ class Capture(object):
                 stamp = now_us()
                 with self._cv:
                     for u in units:
+                        # Backpressure instead of a big queue (1.10.0).  Six
+                        # frames is about 50 ms at 120 fps.  Once they are here
+                        # the reader waits for the pump, the pump waits for the
+                        # socket, and ffmpeg waits for its pipe -- ddagrab then
+                        # drops the frames it cannot hand over *before* they are
+                        # encoded, which is the only place a drop does not break
+                        # the H.264 reference chain.  The old 240-frame queue was
+                        # two seconds of picture that had already lost the race.
+                        while (len(self.unit_queue) >= self.MAX_QUEUE
+                               and not self._stop.is_set()):
+                            self._cv.wait(0.05)
+                        if self._stop.is_set():
+                            break
                         self.unit_queue.append((u[0], u[1], stamp))
                         self.stats["frames"] += 1
                         self.stats["bytes"] += len(u[0])
-                    # bound the backlog; the server drops what it cannot send
-                    if len(self.unit_queue) > 240:
-                        del self.unit_queue[:len(self.unit_queue) - 240]
-                        self.stats["dropped"] += 1
                     self._cv.notify_all()
         with self._cv:
             self._cv.notify_all()
@@ -1103,6 +1125,9 @@ class Capture(object):
                 self._cv.wait(timeout)
             out = self.unit_queue
             self.unit_queue = []
+            # Wake the reader: it may be waiting for room to hand over the next
+            # access unit (see the comment in _reader).
+            self._cv.notify_all()
             return out
 
     def fps(self):

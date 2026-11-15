@@ -2,10 +2,12 @@ package com.droidextend;
 
 import android.media.MediaCodec;
 import android.media.MediaFormat;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayDeque;
 
 /**
  * Minimal H.264 Annex-B decoder that renders straight onto a Surface.
@@ -18,6 +20,13 @@ public class VideoDecoder {
 
     private static final String TAG = "DroidExtend";
     private static final long DEQ_TIMEOUT_US = 10000L;
+
+    /**
+     * How long to keep asking for an input buffer before giving up on this
+     * frame.  Short enough that a healthy decoder never notices, long enough
+     * to bridge the millisecond-scale gaps between the decoder's own threads.
+     */
+    private static final long QUEUE_WAIT_MS = 40L;
 
     /**
      * Where decoder events go so the host can write them into its own log.
@@ -44,6 +53,29 @@ public class VideoDecoder {
     // Only said once per decoder, so a stream that never resynchronises does
     // not turn the uplink into a flood.
     private boolean warnedNoCsd, warnedNoSurface, warnedFirstFrame;
+    private boolean warnedQueueFull;
+
+    /** Host clock to this process's elapsedRealtime, measured once at the handshake. */
+    private long clockSkewUs;
+    /**
+     * Host timestamps of the frames handed to the decoder, oldest first.
+     *
+     * H.264 without B frames comes out in the order it went in, so the Nth
+     * output buffer belongs to the Nth queued stamp and a plain queue is
+     * enough.  Keeping them lets the overlay report the delay that actually
+     * matters -- host put the frame on the wire -> it is on the glass.
+     */
+    private final ArrayDeque<Long> stamps = new ArrayDeque<Long>();
+    /** When each of those frames finished arriving here, same order. */
+    private final ArrayDeque<Long> recvs = new ArrayDeque<Long>();
+    /** Last measured wire-to-glass delay in microseconds; -1 until one frame lands. */
+    private long shownLatencyUs = -1;
+    /** The two halves of that delay: host -> here, and here -> glass. */
+    private long netUs = -1;
+    private long decodeUs = -1;
+    private long shownLatencyMaxUs;
+    /** Output buffers thrown away because several were ready for one vsync. */
+    private long droppedOutput;
 
     /**
      * How many frames have really been put on screen.
@@ -56,6 +88,41 @@ public class VideoDecoder {
      */
     public synchronized long renderedFrames() {
         return rendered;
+    }
+
+    /** Line the host clock up with this process's clock (called after the handshake). */
+    public synchronized void setClockSkew(long skewUs) {
+        clockSkewUs = skewUs;
+    }
+
+    /**
+     * Delay from the frame leaving the host to the frame reaching the surface,
+     * in milliseconds; -1 while no frame has landed yet.
+     */
+    public synchronized double shownLatencyMs() {
+        return shownLatencyUs < 0 ? -1 : shownLatencyUs / 1000.0;
+    }
+
+    /** Take the worst wire-to-glass delay since the last call (ms), then reset it. */
+    public synchronized double takeShownLatencyMaxMs() {
+        double v = shownLatencyMaxUs / 1000.0;
+        shownLatencyMaxUs = 0;
+        return v;
+    }
+
+    /** Time from the host putting the frame on the wire to it arriving here (ms). */
+    public synchronized double transferMs() {
+        return netUs < 0 ? -1 : netUs / 1000.0;
+    }
+
+    /** Time from the frame arriving here to it reaching the surface (ms). */
+    public synchronized double decodeMs() {
+        return decodeUs < 0 ? -1 : decodeUs / 1000.0;
+    }
+
+    /** Output frames dropped because several were ready at once. */
+    public synchronized long droppedOutputFrames() {
+        return droppedOutput;
     }
 
     /** Route decoder events to the host's log (null to stop). */
@@ -107,6 +174,12 @@ public class VideoDecoder {
         frameIndex = 0;
         rendered = 0;
         inputDone = false;
+        stamps.clear();
+        recvs.clear();
+        shownLatencyUs = -1;
+        netUs = -1;
+        decodeUs = -1;
+        shownLatencyMaxUs = 0;
     }
 
     private void configure(byte[] csdData) {
@@ -123,6 +196,10 @@ public class VideoDecoder {
                 fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4 * 1024 * 1024);
                 if (fps > 0) {
                     try { fmt.setFloat(MediaFormat.KEY_FRAME_RATE, fps); } catch (Throwable ignored) { }
+                    // Tell the decoder how fast frames really arrive.  A vendor
+                    // codec that believes it is playing a 30 fps file may clock
+                    // itself down; naming the real rate keeps it at full speed.
+                    try { fmt.setInteger("operating-rate", fps); } catch (Throwable ignored) { }
                 }
                 try { fmt.setInteger(MediaFormat.KEY_PRIORITY, 0); } catch (Throwable ignored) { }
                 if (attempt == 0) {
@@ -162,10 +239,12 @@ public class VideoDecoder {
     }
 
     /**
-     * Feed one Annex-B access unit. Returns false when the unit was buffered
-     * waiting for SPS/PPS.
+     * Feed one Annex-B access unit. Returns false when the unit could not be
+     * taken yet: still waiting for SPS/PPS, no surface, or no free input
+     * buffer at this instant (the caller waits briefly and tries the next
+     * frame instead, which pushes the delay back up the socket).
      */
-    public boolean feed(byte[] data, int offset, int length) {
+    public boolean feed(byte[] data, int offset, int length, long hostStampUs, long recvUs) {
         synchronized (this) {
             if (!configured) {
                 byte[] found = scanCsd(data, offset, length);
@@ -189,27 +268,44 @@ public class VideoDecoder {
                 }
                 configure(csd);
             }
-            return queue(data, offset, length);
+            return queue(data, offset, length, hostStampUs, recvUs);
         }
     }
 
-    private boolean queue(byte[] data, int offset, int length) {
+    private boolean queue(byte[] data, int offset, int length, long hostStampUs, long recvUs) {
         if (inputDone) {
             return true;
         }
         try {
-            int idx = codec.dequeueInputBuffer(DEQ_TIMEOUT_US);
-            if (idx < 0) {
-                drain();
+            int idx = -1;
+            long deadline = SystemClock.elapsedRealtime() + QUEUE_WAIT_MS;
+            while (idx < 0) {
                 idx = codec.dequeueInputBuffer(DEQ_TIMEOUT_US);
+                if (idx >= 0) {
+                    break;
+                }
+                drain();
+                if (SystemClock.elapsedRealtime() >= deadline) {
+                    break;
+                }
             }
             if (idx < 0) {
-                // Decoder is saturated: drop this unit rather than stall the socket.
-                return true;
+                // The decoder cannot take another frame right now.  It used to
+                // be dropped here, and that is the one thing you must not do to
+                // an H.264 stream: every P frame references the one before it,
+                // so a hole in the chain smears the picture until the next IDR.
+                // Reporting "not taken" makes the caller wait a moment instead,
+                // and that wait travels back up the socket to the host's
+                // encoder -- where dropping a frame before encoding is free.
+                if (!warnedQueueFull) {
+                    warnedQueueFull = true;
+                    event("decoder input queue full, waiting for it to drain");
+                }
+                return false;
             }
             ByteBuffer buf = codec.getInputBuffer(idx);
             if (buf == null) {
-                return true;
+                return false;
             }
             buf.clear();
             int n = Math.min(length, buf.capacity());
@@ -217,6 +313,14 @@ public class VideoDecoder {
             long pts = frameIndex * 1000000L / Math.max(fps, 1);
             codec.queueInputBuffer(idx, 0, n, pts, 0);
             frameIndex++;
+            stamps.addLast(hostStampUs);
+            recvs.addLast(recvUs);
+            if (stamps.size() > 480) {
+                // Way more stamps than frames on screen: the pairing is lost,
+                // so start over rather than report a made-up delay.
+                stamps.clear();
+                recvs.clear();
+            }
             drain();
             return true;
         } catch (Throwable t) {
@@ -231,27 +335,75 @@ public class VideoDecoder {
             return;
         }
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        int last = -1;
         while (true) {
             int idx;
             try {
                 idx = codec.dequeueOutputBuffer(info, 0);
             } catch (Throwable t) {
-                return;
+                break;
             }
             if (idx >= 0) {
-                try {
-                    codec.releaseOutputBuffer(idx, true);
-                    rendered++;
-                    if (rendered == 1 && !warnedFirstFrame) {
-                        warnedFirstFrame = true;
-                        event("first frame rendered to the surface");
-                    }
-                } catch (Throwable ignored) { }
+                if (last >= 0) {
+                    // Several pictures became ready since the last drain.  Show
+                    // them all and let the compositor pace them against vsync:
+                    // at 120 Hz a 120 fps stream fills exactly one frame per
+                    // refresh, so throwing the older ones away would halve what
+                    // the panel actually gets to show.
+                    try {
+                        codec.releaseOutputBuffer(last, true);
+                        rendered++;
+                        noteShown(pollStamp(), pollRecv());
+                    } catch (Throwable ignored) { }
+                }
+                last = idx;
             } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 event("decoder output format: " + codec.getOutputFormat());
             } else {
-                return;
+                break;
             }
+        }
+        if (last < 0) {
+            return;
+        }
+        try {
+            codec.releaseOutputBuffer(last, true);
+            rendered++;
+            noteShown(pollStamp(), pollRecv());
+            if (rendered == 1 && !warnedFirstFrame) {
+                warnedFirstFrame = true;
+                event("first frame rendered to the surface");
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** Host timestamp of the frame that was just shown; 0 when unknown. */
+    private long pollStamp() {
+        Long s = stamps.pollFirst();
+        return s == null ? 0L : s.longValue();
+    }
+
+    private long pollRecv() {
+        Long r = recvs.pollFirst();
+        return r == null ? 0L : r.longValue();
+    }
+
+    private void noteShown(long hostStampUs, long recvUs) {
+        if (hostStampUs <= 0) {
+            return;
+        }
+        long nowUs = SystemClock.elapsedRealtimeNanos() / 1000L - clockSkewUs;
+        long lat = nowUs - hostStampUs;
+        if (lat < 0 || lat > 10L * 1000 * 1000) {
+            return;     // the two clocks clearly disagree; do not report it
+        }
+        shownLatencyUs = lat;
+        if (lat > shownLatencyMaxUs) {
+            shownLatencyMaxUs = lat;
+        }
+        if (recvUs > 0) {
+            netUs = recvUs - hostStampUs;
+            decodeUs = nowUs - recvUs;
         }
     }
 

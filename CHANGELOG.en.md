@@ -67,6 +67,7 @@
 | [41](#41-190-the-touch-channel-got-its-own-switch-and-the-pc-can-start-streaming-by-itself) | 1.9.0: a touch switch / start at boot | anything automatic must stand down when a hand touches it |
 | [42](#42-191-why-the-button-stayed-lit-and-a-program-that-should-not-own-a-notification-centre) | 1.9.1: three driver states / uninstall / notification centre | a Chinese comment ate the next line |
 | [43](#43-192-a-virtual-screen-that-would-not-reach-the-desktop) | 1.9.2: activation fallback / stale modes / display numbers | a registry mode goes stale, and so does a name |
+| [44](#44-193-first-make-the-measurement-honest-then-take-the-buffers-out) | 1.9.3: the low-latency rewrite | that 8 ms was never "on the glass" |
 
 ---
 
@@ -4453,6 +4454,120 @@ and its docstring says not to add those flags again -- they belong to the \SDC_U
 2. **A name is not an identity.**  \\.\DISPLAYnn\ moves; anything that spans a driver restart or a topology change must re-read it every round instead of once at the top.
 3. **A recoverable state deserves a path back inside the program.**  The user knows a re-install fixes it; so should the program.
 4. **Measure a "safer" flag before shipping it.**  Those two flags turned a 1.3 s success into a zero success rate.  With Windows display APIs, a flag combination counts only after it is measured.
+
+---
+
+## 44. 1.9.3: first make the measurement honest, then take the buffers out
+
+### 44.1 What the user said
+
+> "You could go and look at ExtensoDesk -- its latency control is far better than yours."
+>
+> "I do not want to trade picture quality, I only want the lowest possible latency. Rewrite it and just give me a build to look at."
+
+Read together the constraint is clear: no paying for latency with resolution, bitrate or quality. The work has to be structural.
+
+### 44.2 The first job was not optimisation but admitting the number was wrong
+
+Since 1.6 the overlay measured this and only this:
+
+```
+long latUs = SystemClock.elapsedRealtimeNanos() / 1000 - clockSkewUs - stampUs;
+```
+
+That is "the host wrote the frame into the socket" to "the phone read those bytes into memory".  No decoding, no presenting, and nothing of the host's own capture and encoding.  It therefore always looked excellent -- around 8 ms -- while the thing a person feels was something else entirely.  That 8 ms never matched the delay I was describing.
+
+The new definition carries the host timestamp all the way into the decoder and subtracts it at the moment the frame is handed to the surface: "host put it on the wire" to "it is on the glass".  Same screen, same stream, and the number starts at 17-31 ms.
+
+### 44.3 There used to be three buffers in the middle, each able to put the picture behind
+
+| Where | Before | As time, at a 50 Mbps stream |
+| --- | --- | --- |
+| The host's send queue in StreamServer | 4 MB | about 640 ms |
+| The socket send buffer | 1 MB | about 160 ms |
+| The phone's "backlog, so jump to the next keyframe" threshold | 384 KB | about 60 ms |
+
+Together a phone that fell behind could be almost 0.8 s late while the log cheerfully said 8 ms.  That, not the encoder, is where "less responsive than a remote desktop app" came from.
+
+### 44.4 Removal one: the host writes to the socket directly
+
+```python
+def _send(self, conn):          # host/server.py, before
+    while not self._stop.is_set():
+        data, ts = self._queue.get()          # a 4 MB queue
+```
+
+There is no queue any more.  `put()` waits for the socket to be writable with `select()`, writes, and returns; if 2 s of waiting accumulate the phone has stopped reading, so the client is dropped and left to reconnect.
+
+The old "drop to the next keyframe" path went with it.  H.264 P frames reference the one before, so dropping a frame in the middle smears everything after it until the next IDR.
+
+A slow phone now produces: the write blocks, the pump thread stops, it stops taking from the capture queue, it stops reading the ffmpeg pipe, and **ddagrab drops frames before they are encoded**.  That is the only safe place in the chain to lose one.
+
+### 44.5 Removal two: the capture queue went from 240 frames to 6
+
+`unit_queue` in `host/capture.py` could hold 240 frames (about 2 s) and threw the oldest away when full -- a design that quietly decided "up to two seconds late is fine".  It now waits for the consumer above 6 frames (about 50 ms), which parks ffmpeg on the pipe.
+
+### 44.6 Removal three: the phone no longer jumps to the next keyframe
+
+`StreamClient` had this:
+
+```java
+if (raw.available() > BACKLOG_DROP_BYTES) {   // 384 KB
+    skipUntilKey = true;                     // skip until the next IDR
+}
+```
+
+It was a patch for the era when the host sent as hard as it could with nobody watching.  With the host no longer queuing, all it does is freeze the picture (up to 2 s with a 2 s GOP).  The whole path is gone.
+
+### 44.7 Removal four: a full decoder input queue no longer drops the frame silently
+
+`queue()` used to return `true` ("accepted") when `dequeueInputBuffer` had nothing for it, and the frame was thrown away for real.  Another broken P-frame chain.  It now waits up to 40 ms and then reports "not taken", so the layer above slows down and the back pressure climbs one more step.
+
+### 44.8 Removal five: do not throw away the older pictures in a batch (tried, then reverted)
+
+The first attempt showed only the last picture when one drain produced several.  Latency fell from 17-31 ms to 12-22 ms, **and the phone's displayed frame rate fell from 120 to 80**.
+
+The arithmetic is simple: a 120 fps stream on a 120 Hz panel fills exactly one frame per refresh, so merging throws away one picture in three.  The user asked for "no sacrifice"; five milliseconds is not worth a visibly choppier screen.  Every picture is presented again and the compositor paces them against vsync.
+
+### 44.9 Two encoder settings changed on the way (unrelated to quality)
+
+- GOP from 2 s to 1 s: if something downstream really does lose frames, the freeze lasts half as long.  At the same `-cq 20` the bitrate grows by a few percent.
+- NVENC `-surfaces` 8 to 4: at most half as many frames held inside the encoder, two or three frames less pipeline.
+- No `-async_depth`: the ffmpeg on this machine has no such option for h264_nvenc (only surfaces / delay / zerolatency / ldkfs / tune).
+
+### 44.10 The account as it stands
+
+This machine (Xiaomi tablet 24091RPADC, 2560x1600 at 120 Hz, extend mode, three runs):
+
+| Item | Before | After |
+| --- | --- | --- |
+| The latency on screen | 8 ms (only "the phone received it") | 17-31 ms (actually "on the glass") |
+| Of which transfer | never measured | 0-12 ms |
+| Of which decode and present | never measured | 14-26 ms |
+| Phone received / displayed | 120 / 120 fps | 120 / 120 fps |
+| Host sending | 20 Mbps | 20 Mbps |
+| With the host queue full | froze until the next keyframe | no longer happens |
+
+The phone log now splits the number in three, so a slow leg is obvious at a glance:
+
+```
+perf fps=120 mbps=23.20 latency_avg_ms=17 latency_max_ms=61 net_ms=0 dec_ms=19
+```
+
+`net_ms` is "host sent it" to "the phone has it", `dec_ms` is "the phone has it" to "it is on the glass", and `latency_ms` is the sum.
+
+### 44.11 Cost
+
+- `put()` on the host blocks the pump thread now.  A dead phone or an unplugged cable takes up to 2 s to be noticed, where before the frames were dropped quietly and nothing was reported.
+- The capture queue holds 6 frames.  A slow CPU encoder (`libx264`) will drop frames more readily than before; NVENC does not notice.
+- The latency shown in the window went up (8 to about 20).  That is the definition becoming honest, not the program becoming slower.
+
+### 44.12 Lessons
+
+1. **Calibrate the instrument before optimising.**  A metric that measures only the first leg can turn "still far off" into a success story.
+2. **A queue is not a buffer, it is delay.**  A 4 MB queue looks like jitter tolerance; it is a licence to be 640 ms late.
+3. **Frames may only be dropped before encoding.**  Any drop after that spoils every frame that references it.
+4. **Watch latency and frame rate together.**  Optimising latency alone buys milliseconds by showing fewer pictures, and the eye notices the stutter immediately.
 
 ---
 

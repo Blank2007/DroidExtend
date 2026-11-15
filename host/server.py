@@ -12,6 +12,7 @@
 The phone reaches us on 127.0.0.1:<port> through `adb reverse`, so the whole
 thing rides the USB cable and never touches the network stack.
 """
+import select
 import socket
 import struct
 import threading
@@ -111,12 +112,18 @@ class StreamServer(object):
         self.addr = None
         self._stop = threading.Event()
         self._accept_thread = None
-        self._send_thread = None
         self._cv = threading.Condition()
-        self._queue = []
-        self._queue_bytes = 0
-        self.max_queue_bytes = 4 * 1024 * 1024
-        self.stats = {"sent": 0, "dropped": 0, "bytes": 0, "clients": 0}
+        # 1.10.0: there is no send queue any more.  put() writes to the socket on
+        # the caller's thread; a phone that cannot keep up blocks the caller,
+        # which blocks the capture thread, which blocks ffmpeg -- and ffmpeg
+        # throwing frames away is the only place a frame can be dropped without
+        # breaking the H.264 reference chain.  The old queue turned a slow phone
+        # into up to 4 MB of backlog (640 ms at 50 Mbps) and every frame behind
+        # it was already too late to show.
+        self.send_wait = 0.25      # seconds select() waits for room to write
+        self.send_stall = 2.0      # give up on a phone that took this long
+        self.stats = {"sent": 0, "dropped": 0, "bytes": 0, "clients": 0,
+                      "slow": 0, "send_ms": 0.0}
         # The panel refresh rate the current phone announced, 0 while unknown.
         self.client_hz = 0
         # True/False once the app has said which way up it is; None until then
@@ -156,22 +163,18 @@ class StreamServer(object):
             self._drop_client(quiet=True)
             if old is not None:
                 self.log("上一路连接已断开，接受新连接")
-                with self._cv:
-                    self._queue = []
-                    self._queue_bytes = 0
             self.client_portrait = None
             self.client_hz, hello_left = self._read_hello(conn)
             self.conn = conn
             self.addr = addr
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+            # 256 KB, not the old 1 MB: the kernel buffer is another queue, and
+            # 1 MB is 160 ms of frames at 50 Mbps sitting in front of a phone
+            # that has already fallen behind.  256 KB is plenty to keep a USB
+            # link busy (window and pacing do the rest) and it fails fast.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)
             self.stats["clients"] += 1
-            self.log("手机已连接: %s:%d" % addr)
-            self._send_thread = threading.Thread(target=self._send, args=(conn,),
-                                                 name="send", daemon=True)
-            self._send_thread.start()
-            with self._cv:
-                self._cv.notify_all()
+            self.log("手机已连接: %s:%d" % (addr[0], addr[1]))
             # Whatever the phone still has to say arrives here: a hello that
             # missed the handshake window, and then the running commentary.
             # One thread does both; it lives as long as the connection.
@@ -349,56 +352,71 @@ class StreamServer(object):
             self.log("握手失败: %s" % e)
             return False
 
-    def _send(self, conn):
-        while not self._stop.is_set() and conn is self.conn:
-            with self._cv:
-                while (not self._queue and not self._stop.is_set()
-                       and conn is self.conn):
-                    self._cv.wait(0.5)
-                batch, self._queue = self._queue, []
-                self._queue_bytes = 0
-            if conn is not self.conn:
-                break
-            if not batch:
+    def _write(self, conn, payload):
+        """Write one frame, giving up on a phone that has stopped reading.
+
+        sendall() on a blocking socket can wait forever: a phone whose app is
+        wedged keeps the TCP connection open and simply never reads.  Waiting in
+        fixed slices lets a stop request through, and the stall limit turns a
+        dead phone into a reconnect instead of a frozen window.
+        """
+        view = memoryview(payload)
+        waited = 0.0
+        while view:
+            if self._stop.is_set() or conn is not self.conn:
+                return False
+            try:
+                _, ready, _ = select.select([], [conn], [], self.send_wait)
+            except (OSError, ValueError):
+                return False
+            if not ready:
+                waited += self.send_wait
+                if waited >= self.send_stall:
+                    return False
                 continue
             try:
-                for u in batch:
-                    data = u[0]
-                    ts = u[2] if len(u) > 2 else _now_us()
-                    conn.sendall(struct.pack("<IQ", len(data), ts))
-                    conn.sendall(data)
-                    self.stats["sent"] += 1
-                    self.stats["bytes"] += len(data)
-            except OSError as e:
-                self.log("发送中断: %s" % e)
-                break
+                n = conn.send(view)
+            except OSError:
+                return False
+            if n <= 0:
+                return False
+            view = view[n:]
+        return True
 
     def put(self, units):
-        """units: list of (bytes, is_keyframe[, timestamp_us])"""
-        if not units or not self.conn:
+        """Send access units right away, on the caller's thread.
+
+        units: list of (bytes, is_keyframe[, timestamp_us])
+
+        The queue is gone on purpose.  A queue cannot make a slow phone faster;
+        it can only decide how far behind the picture runs.  With nothing in
+        between, a phone that cannot keep up blocks Session's pump thread, the
+        pump stops draining Capture, Capture stops reading ffmpeg's pipe, and
+        ffmpeg -- the one place where throwing a frame away is harmless -- drops
+        the frames it cannot hand over.  What still gets sent is a valid H.264
+        reference chain, and it is always the newest one.  (That is also why
+        is_keyframe is no longer used to throw frames away here: dropping a P
+        frame in the middle of a stream corrupts every frame after it until the
+        next IDR.)
+        """
+        conn = self.conn
+        if not units or conn is None:
             return
-        now = _now_us()
-        with self._cv:
-            for u in units:
-                data, key = u[0], u[1]
-                ts = u[2] if len(u) > 2 else now
-                if self._queue_bytes + len(data) > self.max_queue_bytes:
-                    if key:
-                        # squeeze it in by dropping older non-keyframes first
-                        keep = [q for q in self._queue if q[1]]
-                        dropped = len(self._queue) - len(keep)
-                        self._queue = keep
-                        self._queue_bytes = sum(len(q[0]) for q in keep)
-                        self.stats["dropped"] += dropped
-                        if self._queue_bytes + len(data) > self.max_queue_bytes:
-                            self.stats["dropped"] += 1
-                            continue
-                    else:
-                        self.stats["dropped"] += 1
-                        continue
-                self._queue.append((data, key, ts))
-                self._queue_bytes += len(data)
-            self._cv.notify_all()
+        for u in units:
+            data = u[0]
+            ts = u[2] if len(u) > 2 else _now_us()
+            t0 = time.perf_counter()
+            ok = self._write(conn, struct.pack("<IQ", len(data), ts) + data)
+            dt = (time.perf_counter() - t0) * 1000.0
+            if not ok:
+                self.log("手机停止接收数据（%.1f 秒写不进去），断开等它重连" % self.send_stall)
+                self._drop_client(quiet=True)
+                return
+            self.stats["sent"] += 1
+            self.stats["bytes"] += len(data)
+            self.stats["send_ms"] += dt
+            if dt >= 25.0:
+                self.stats["slow"] += 1
 
     @property
     def connected(self):
