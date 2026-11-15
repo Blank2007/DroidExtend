@@ -27,8 +27,8 @@ def app_title():
 # dialogs print.  Prefer app_title() wherever the title is actually rendered.
 APP_TITLE = app_title()
 
-APP_VERSION = "1.9.1"
-APP_DATE = "2026-11-13"
+APP_VERSION = "1.9.2-beta"
+APP_DATE = "2026-11-15"
 
 REPO = "Blank2007/DroidExtend"
 REPO_URL = "https://github.com/" + REPO

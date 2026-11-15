@@ -66,6 +66,7 @@
 | [40](#40-188-mumus-virtual-screen-was-mistaken-for-ours) | 1.8.8: a misidentified adapter / naming what else is on the machine | one \`in\` picked somebody else's virtual screen |
 | [41](#41-190-the-touch-channel-got-its-own-switch-and-the-pc-can-start-streaming-by-itself) | 1.9.0: a touch switch / start at boot | anything automatic must stand down when a hand touches it |
 | [42](#42-191-why-the-button-stayed-lit-and-a-program-that-should-not-own-a-notification-centre) | 1.9.1: three driver states / uninstall / notification centre | a Chinese comment ate the next line |
+| [43](#43-192-a-virtual-screen-that-would-not-reach-the-desktop) | 1.9.2: activation fallback / stale modes / display numbers | a registry mode goes stale, and so does a name |
 
 ---
 
@@ -4364,6 +4365,94 @@ The Help menu also gained an item that jumps straight to that section (`on_manua
 2. **An uninstall must state what it deletes and what it keeps -- and then actually keep it.**  Keeping `C:\VirtualDisplayDriver` but letting the next install overwrite it is not keeping it.
 3. **A BOM-less UTF-8 script is a time bomb under PowerShell 5.**  When a Chinese comment eats the next line, the error message points somewhere completely unrelated.
 4. **Defaults depend on who sees them and when.**  Notifications on, manual start off, because the first is something done for you and the second is the button you just pressed.
+
+---
+
+## 43. 1.9.2: a virtual screen that would not reach the desktop
+
+### 43.1 What the user said
+
+On 2026-11-15, on a different machine (install directory \D:\2\DroidExtend\, version 1.9.1), pressing **Start casting** (开始投屏) produced this and then stopped:
+
+    \B\13:49:26 虚拟显示器: \.\DISPLAY41 (Virtual Display Driver)
+    13:49:26   手机分辨率 3200x2136（横屏）
+    13:49:26   虚拟屏按手机分辨率 3200x2136@144 撑满
+    13:49:26   激活显示器 attach rc=-1
+    13:49:27   attach 未生效，改用扩展拓扑 rc=0
+    ... (retries 1..5, every round attach rc=-1 / extend topology rc=0)
+    13:49:34 RuntimeError: 虚拟显示器 \.\DISPLAY41 无法激活（未上桌面）
+    13:49:34 已移除虚拟显示器 \.\DISPLAY41，桌面恢复为 {'left': -2560, 'top': 0, 'right': 2560, 'bottom': 1600}
+    \B\
+
+The user added (paraphrased): "it worked right after I installed it, then later it stopped working."  So on that machine the virtual screen had appeared at least once -- the driver is installed and the hardware is fine.
+
+### 43.2 What this log rules out first
+
+1. **Not the 1.8.8 misidentified-adapter bug.**  The name is \Virtual Display Driver\ and the hardware id matches.
+2. **Not "the mode table lacks this size".**  \_match_phone\ printed \撑满\ ("fits exactly"), which means \best_mode\ found 3200x2136@144 inside \available_modes\ -- the driver is reporting its table at that moment.
+3. **Not "the driver is missing, the node is down".**  The adapter enumerates, so the device node exists.
+
+That leaves one thing: **Windows refuses to put this target into the active desktop.**  \attach\ returning \-1\ is \DISP_CHANGE_FAILED\; \扩展拓扑 rc=0\ means \SetDisplayConfig\ said "done", yet the desktop rectangle stays empty.
+
+### 43.3 The half that reproduces here: attach used "the previous mode"
+
+\win_display.attach()\ used to build its \DEVMODEW\ from \_base_mode()\, and for a screen that is **not on the desktop** the only readable mode comes from the registry (\ENUM_CURRENT_SETTINGS\ fails, so it falls back to \ENUM_REGISTRY_SETTINGS\).  The registry holds what the screen was **last set to**.
+
+The driver side, however, moves:
+
+* the mode table is read only when the **device node starts**;
+* \add_resolution()\ **deletes its own previously added lines** when the table is full;
+* every "install the virtual display driver" overwrites the table with the bundled one.
+
+So "the previous mode" can stop existing.  Measured on 2026-11-15: delete the \auto="1"\ 2560x1700 line from \vdd_settings.xml\, restart the driver, and the registry still says 2560x1700@120 while \attach\ answers \-2\ (\DISP_CHANGE_BADMODE\); for a detached screen the desktop rectangle stays empty.  This is not a rare coincidence; it is a road that reliably keeps the screen off the desktop.
+
+### 43.4 Second: the display number is not an identity
+
+\\.\DISPLAYnn\ is not a resource id, it is "the n-th time something was enumerated".  One Extend, one driver restart, pushes it up (observed here: 167 → 168 → 169 → 170 → 171 → 172).  The old loop kept the name it captured before the loop: once the number changes, \desktop_rect(name)\ always returns nothing -- the screen is on the desktop while the program believes it is not, and then keeps attaching a name that no longer exists.  The \\.\DISPLAY41\ in the user's error message may well have been history by the time it was printed.
+
+### 43.5 Third: failure had no next step
+
+The old code had six attach/Extend rounds and threw on the sixth.  But the user's own experience is **re-installing the driver fixes it** -- the state is recoverable, the program just never pressed that switch itself.
+
+### 43.6 The fix: four things
+
+1. **Pick the mode from the table the driver offers right now.**  \win_display.attach(device_name, enable=True, prefer=None)\ now reads \available_modes()\ first and chooses a mode that actually exists: with \prefer\ (caller knows the target size) the closest to it, otherwise the closest to the registry one.  The choice lives in \_closest_mode()\: **area first, aspect ratio only as a tie-breaker** (aspect first picks 3200x2136 for 2560x1700 -- sizing the screen up by half before shrinking it back).
+2. **Re-resolve the display name every round.**  The new \Session._put_on_desktop()\ wraps the loop and calls \_vdd_live_name()\ at the top of each round; when it changes it syncs \name\, \_display_applied\ and \_vdd_ready_name\ and logs "  显示号变了：A -> B" ("display number changed").  It returns the final name, which \_set_mode_retry\ and \self.target\ now use.
+3. **After failing, restart the driver device node once and try three more rounds** (\vd.restart_device()\ → \vd.wait_adapter()\).  That is the first thing "re-install the driver" does, minus the user.
+4. **If it still fails, say something the user can act on.**  \_log_activation_trouble()\ prints one diagnostic line (driver state, whether the node is on, whether the adapter is there, how many displays, how many usable modes, how many paths on the desktop), and the error becomes "retries, extend topology and a driver restart were all tried ... please press install the virtual display driver once, or reboot and start casting again."
+
+### 43.7 A "hardening" that measurement rejected
+
+Adding \SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE\ to \extend_topology()\ looked safer (and persistent): measured **87** (\ERROR_INVALID_PARAMETER\) on every round, and the virtual screen never reached the desktop again; dropping the two flags restored \0\ and 1.3 s.  So the line stays:
+
+    return user32.SetDisplayConfig(0, None, 0, None, SDC_TOPOLOGY_EXTEND | SDC_APPLY)
+
+and its docstring says not to add those flags again -- they belong to the \SDC_USE_SUPPLIED_DISPLAY_CONFIG\ call in \detach()\, where they are required.
+
+### 43.8 Verification
+
+| Case | How | Result |
+|---|---|---|
+| Normal start / stop, twice | \D:\probe_test\t_apply.py\ | apply 9.83 s (incl. a 7.1 s driver restart) / 1.63 s; stop 0.11 / 0.28 s; desktop back to 2560x1600 |
+| Registry mode already stale (2560x1700 line deleted, driver restarted) | \t_put.py\ | old code attach \-2\; new code on the desktop in 1.3 s |
+| attach and Extend forced to fail | \t_force.py\ | 4 rounds → node restart (6 s, display 168→169) → success one round later, 11.9 s total |
+| Same, but still failing after the restart | \t_fail.py\ | after 17.9 s: diagnostic line + the two-sentence error, no traceback |
+| Closest-mode choice | \t_closest.py\ | 7 cases pass (2560x1700→2560x1600, 1920x1200→1920x1080, 3200x2136@30→@120, ...) |
+| Regression | \tools\smoke.py\ | ALL SMOKE TESTS PASSED |
+
+### 43.9 Cost
+
+* Nothing extra in the normal case: machines where attach or the first Extend works take the same path (apply is still around 1.6 s here).
+* A machine in the bad state waits up to ~18 s before the picture appears -- better than "six rounds, then an error, forever".
+* One driver device-node restart happens (needs admin; the program already carries a UAC manifest), so the virtual screen blinks out for a few seconds.
+* The fallback is not a guarantee.  It turns "the user must re-install" into "the program tries that itself first"; the remainder still needs a re-install or a reboot.
+
+### 43.10 Lessons
+
+1. **"The previous value" is cheap only until it is wrong.**  The registry mode is the cheapest thing to read and the first thing to go stale.
+2. **A name is not an identity.**  \\.\DISPLAYnn\ moves; anything that spans a driver restart or a topology change must re-read it every round instead of once at the top.
+3. **A recoverable state deserves a path back inside the program.**  The user knows a re-install fixes it; so should the program.
+4. **Measure a "safer" flag before shipping it.**  Those two flags turned a 1.3 s success into a zero success rate.  With Windows display APIs, a flag combination counts only after it is measured.
 
 ---
 

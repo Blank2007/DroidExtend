@@ -10,6 +10,7 @@ Used by the host app to:
 from __future__ import annotations
 
 import ctypes
+import math
 from ctypes import wintypes
 
 import i18n
@@ -461,16 +462,64 @@ def _base_mode(device_name):
     raise OSError("EnumDisplaySettingsEx failed for %s" % device_name)
 
 
-def attach(device_name, enable=True):
+def _closest_mode(modes, width, height, hz=0):
+    """The advertised mode closest to a wanted size.  An exact size wins."""
+    if not modes:
+        return None
+    sizes = sorted({(m[0], m[1]) for m in modes})
+    want = (int(width), int(height))
+    if want in sizes:
+        size = want
+    else:
+        # Area first, aspect ratio only as a tie-break.  Ranking by aspect
+        # alone picks a 3200x2136 for a wanted 2560x1700 (1.498 is closer to
+        # 1.506 than 1.6 is) and hands the desktop a screen half again as big
+        # as the one that was asked for, which then has to be resized again.
+        want_aspect = want[0] / float(want[1] or 1)
+        want_area = float(want[0] * want[1]) or 1.0
+
+        def score(s):
+            return (abs(math.log((float(s[0] * s[1]) or 1.0) / want_area)),
+                    abs(s[0] / float(s[1] or 1) - want_aspect))
+
+        size = min(sizes, key=score)
+    rates = [m[2] for m in modes if (m[0], m[1]) == size]
+    rate = min(rates, key=lambda r: abs(r - int(hz or 0))) if rates else 0
+    return (size[0], size[1], rate)
+
+
+def attach(device_name, enable=True, prefer=None):
     """Tell Windows to (de)activate a display without changing its mode.
 
     Enabling uses _base_mode(), so a screen that was switched off comes back at
     the size it had rather than at a hard-coded 1920x1080 the driver may not
     even offer.
+
+    That stored size is not always one the driver still offers.  The mode
+    Windows keeps in the registry is the last one *this* display was set to,
+    and it goes stale as soon as the driver's mode table changes -- 安装驱动
+    rewrites the table, and add_resolution() drops a size it added itself when
+    the table is full.  Enabling with a mode that is no longer advertised
+    answers DISP_CHANGE_BADMODE (-2) (measured 2026-11-15: registry said
+    2560x1700, the table no longer had it) and a display that was detached
+    stays off the desktop for good.  So the mode is picked from what the
+    driver advertises right now: *prefer* when the caller has a target in
+    mind, otherwise the stored size itself when it is still there, otherwise
+    the advertised size closest to it.
     """
     if enable:
         dm = _base_mode(device_name)
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+        modes = available_modes(device_name)
+        if modes:
+            if prefer is not None:
+                pick = _closest_mode(modes, prefer[0], prefer[1],
+                                     prefer[2] if len(prefer) > 2 else 0)
+            else:
+                pick = _closest_mode(modes, dm.dmPelsWidth, dm.dmPelsHeight,
+                                     dm.dmDisplayFrequency)
+            if pick:
+                dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency = pick
     else:
         dm = _blank_mode()
         dm.dmPelsWidth = 0
@@ -519,7 +568,16 @@ def detach(device_name):
 
 
 def extend_topology():
-    """Win+P 'Extend': switch on every display that is attached but unused."""
+    """Win+P 'Extend': switch on every display that is attached but unused.
+
+    Do not add SDC_ALLOW_CHANGES or SDC_SAVE_TO_DATABASE to this call.  The
+    SDC_TOPOLOGY_* presets reject both: measured 2026-11-15 on the machine
+    below, SetDisplayConfig answered 87 (ERROR_INVALID_PARAMETER) for every
+    round and the virtual screen never reached the desktop, where the bare
+    SDC_TOPOLOGY_EXTEND | SDC_APPLY pair had been working in 1.3 s all along.
+    Those two flags belong to the SDC_USE_SUPPLIED_DISPLAY_CONFIG call that
+    detach() makes, and that one needs them.
+    """
     return user32.SetDisplayConfig(0, None, 0, None, SDC_TOPOLOGY_EXTEND | SDC_APPLY)
 
 

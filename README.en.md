@@ -597,6 +597,11 @@ too large. On a machine that's already affected, clicking
 To check for yourself: in the log under `工具 → 检查更新` (Tools → Check for updates), the driver-ready line shows
 the mode count.
 
+**Q: Are there other reasons for "虚拟显示器无法激活（未上桌面）" (the virtual display can't be activated, not on the desktop)?  (Since 1.9.2 the program tries again by itself.)**
+A: Yes, and they have nothing to do with whether the driver is installed or how big the mode table is.  For a screen that is **not on the desktop**, Windows can only read "the mode you had last time" out of the registry, while the driver's mode table does move (`add_resolution` drops its own lines when the table is full, a re-install overwrites the whole thing).  When the two disagree, `ChangeDisplaySettingsEx` keeps failing with -1 and then -2 and the screen never arrives.  On top of that, `\\.\DISPLAYnn` is not an identity -- one Extend or one driver restart changes it (167 → 172 was measured here), so pinning that name means attaching a screen that no longer exists.
+
+**Since 1.9.2** the program will: (1) pick the closest mode from the table the driver reports **right now** and attach with it; (2) re-resolve the display number every round (the log line "显示号变了：..."); (3) after six failed rounds **restart the driver device node once** and try three more rounds (log lines "重启虚拟屏的设备节点再试" / "重启驱动之后它上桌面了"); (4) if it still fails, print one "诊断：..." line with the driver state, whether the node is on, the adapter, the display count, the usable mode count and the desktop path count.  If it genuinely will not come up, send that "诊断：" line plus ten lines around it in an issue -- that is enough.
+
 **Q: Clicking "安装虚拟显示器驱动（需要管理员）" (Install the virtual display driver) only shows "驱动安装未成功，详见日志" (the driver was not installed -- see the log), and the log is empty?**
 A: **Since 1.8.7 that case explains itself** instead of pointing at an empty log. When the log
 is completely empty and the exit code is `4294901760` (0xFFFF0000), there is almost only one

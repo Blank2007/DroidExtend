@@ -331,6 +331,9 @@ def main():
     ap.add_argument("--notes", help="release 说明的 markdown 文件")
     ap.add_argument("--message", help="提交标题（默认取 release 说明的第一行）")
     ap.add_argument("--build", action="store_true", help="先重建 APK / exe / 安装包")
+    ap.add_argument("--prerelease", action="store_true",
+                    help="标成预发布（beta 一类）：GitHub 的 latest 不会指向它，"
+                         "程序里的「检查更新」也就不会催用户装")
     ap.add_argument("--dry-run", action="store_true", help="只打印将要做什么")
     args = ap.parse_args()
 
@@ -429,7 +432,8 @@ def main():
     if st == 200:
         say("release %s already exists - updating its notes" % tag)
         st, rel = api("PATCH", API + "/releases/%d" % rel["id"], token,
-                      {"body": body, "name": "DroidExtend " + ver})
+                      {"body": body, "name": "DroidExtend " + ver,
+                       "prerelease": bool(args.prerelease)})
         if st != 200:
             die("更新 release 失败: %s" % rel)
     else:
@@ -439,7 +443,7 @@ def main():
             "name": "DroidExtend " + ver,
             "body": body,
             "draft": False,
-            "prerelease": False,
+            "prerelease": bool(args.prerelease),
         })
         if st not in (200, 201):
             die("创建 release 失败: %s" % rel)

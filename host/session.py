@@ -380,33 +380,10 @@ class Session(object):
         if prev:
             self._prev_mode = dict(prev)
 
-        # Put it back on the desktop.  Windows locks the display configuration
-        # for a moment around every topology change, and while it is locked
-        # ChangeDisplaySettingsEx returns DISP_CHANGE_FAILED (-1),
-        # SetDisplayConfig returns ERROR_INVALID_PARAMETER (5), and even
-        # EnumDisplaySettingsEx refuses to answer -- which surfaces as
-        # "OSError: EnumDisplaySettingsEx failed for \\.\DISPLAYxx" from
-        # set_mode().  Retrying clears all three.  Doing it once made
-        # 开始投屏 fail with 出错 the second time the app was opened.
-        for attempt in range(6):
-            if wd.desktop_rect(name):
-                break
-            rc = wd.attach(name, True)
-            self.log("  激活显示器 attach rc=%s%s"
-                     % (rc, "" if attempt == 0 else " (重试 %d)" % attempt))
-            time.sleep(0.5)
-            if wd.desktop_rect(name):
-                break
-            # A display a previous run took out of the topology with
-            # SetDisplayConfig needs the topology switch, not just a mode
-            # change, to come back.
-            rc2 = wd.extend_topology()
-            self.log("  attach 未生效，改用扩展拓扑 rc=%s" % rc2)
-            time.sleep(0.7)
-        if not wd.desktop_rect(name):
-            raise RuntimeError(i18n.t("虚拟显示器 %s 无法激活（未上桌面）",
-                                      "Virtual display %s could not be activated "
-                                      "(not on the desktop)") % name)
+        # Put it back on the desktop, which retries around the display-config
+        # lock, switches the topology, and -- on a machine where all of that
+        # came back empty-handed -- restarts the driver's device node once.
+        name = self._put_on_desktop(name, w, h, hz)
 
         mons = wd.live_monitors()
         primary = next((m for m in mons if m["primary"]), mons[0] if mons else None)
@@ -438,6 +415,146 @@ class Session(object):
             self.log("  手机上是桌面 (%d,%d) 往右 %d 像素那块屏；把窗口拖过去就看得见"
                      % (rect["left"], rect["top"], rect["width"]))
         return rect
+
+    def _vdd_live_name(self, fallback):
+        """Our adapter's display name right now.
+
+        A display number is not an identity: an Extend round and a driver
+        restart both hand the adapter a new one, and every
+        ChangeDisplaySettingsEx call has to be aimed at the name it has *now*.
+        Returns *fallback* when the adapter cannot be found -- it is briefly
+        absent while its device node restarts.
+        """
+        import vdd as vd
+
+        try:
+            a = vd.find_vdd_adapter()
+        except Exception:
+            return fallback
+        if a and a.get("name"):
+            return a["name"]
+        return fallback
+
+    def _put_on_desktop(self, name, w, h, hz):
+        """Get the virtual screen onto the desktop; returns its display name.
+
+        Windows locks the display configuration for a moment around every
+        topology change, and while it is locked ChangeDisplaySettingsEx
+        returns DISP_CHANGE_FAILED (-1), SetDisplayConfig returns
+        ERROR_INVALID_PARAMETER (5), and even EnumDisplaySettingsEx refuses to
+        answer -- which surfaces as "OSError: EnumDisplaySettingsEx failed for
+        \\.\DISPLAYxx" from set_mode().  Retrying clears all three.  Doing it
+        once made 开始投屏 fail with 出错 the second time the app was opened.
+
+        A run can also leave the driver's own state wedged: the adapter
+        enumerates, its mode table reads fine, and Windows still refuses every
+        attach while Win+P Extend answers "0" and changes nothing.  Reported
+        2026-11-15 on another machine, where that state survived six
+        attach/Extend rounds in a row and only a reinstall (or a reboot) put
+        the screen back.  One device-node restart is what a reinstall does
+        first, so it is the last thing tried here before giving up.
+
+        The name the screen ends up under is returned: it changes across an
+        Extend and across a driver restart, and everything after this call has
+        to aim at the new one.
+        """
+        import vdd as vd
+
+        def rounds(count):
+            nonlocal name
+            for attempt in range(count):
+                live = self._vdd_live_name(name)
+                if live != name:
+                    self.log("  显示号变了：%s -> %s" % (name, live))
+                    name = live
+                    self._display_applied = live
+                    self._vdd_ready_name = live
+                if wd.desktop_rect(name):
+                    return True
+                rc = wd.attach(name, True, prefer=(w, h, hz))
+                self.log("  激活显示器 attach rc=%s%s"
+                         % (rc, "" if attempt == 0 else " (重试 %d)" % attempt))
+                time.sleep(0.5)
+                if wd.desktop_rect(name):
+                    return True
+                # A display a previous run took out of the topology with
+                # SetDisplayConfig needs the topology switch, not just a mode
+                # change, to come back.
+                rc2 = wd.extend_topology()
+                self.log("  attach 未生效，改用扩展拓扑 rc=%s" % rc2)
+                time.sleep(0.7)
+            return bool(wd.desktop_rect(name))
+
+        if rounds(4):
+            return name
+
+        self.log(i18n.t(
+            "  重试和扩展拓扑都没把它放上桌面，重启一次虚拟屏的设备节点再试",
+            "  retries and Extend both left it off the desktop; restarting the "
+            "virtual display's device node once and trying again"))
+        ok, _text = vd.restart_device(log=self.log)
+        fresh = vd.wait_adapter(25.0) if ok else None
+        if fresh and fresh.get("name"):
+            if fresh["name"] != name:
+                self.log("  显示号变了：%s -> %s" % (name, fresh["name"]))
+            name = fresh["name"]
+            self._display_applied = name
+            self._vdd_ready_name = name
+            if rounds(3):
+                self.log(i18n.t("  重启驱动之后它上桌面了",
+                                "  it reached the desktop after the driver restart"))
+                return name
+
+        self._log_activation_trouble(name)
+        raise RuntimeError(i18n.t(
+            "虚拟显示器 %s 无法激活：重试、扩展拓扑、重启驱动都试过了，"
+            "Windows 仍然不肯把它放上桌面。\n\n请点「安装虚拟显示器驱动」重装一次"
+            "驱动，或者重启电脑后再点开始投屏。",
+            "Virtual display %s could not be activated: retries, Extend and a "
+            "driver restart were all tried and Windows still keeps it off the "
+            "desktop.\n\nInstall the virtual display driver again from the "
+            "window (安装虚拟显示器驱动), or reboot and start streaming once "
+            "more.") % name)
+
+    def _log_activation_trouble(self, name):
+        """Print what the display subsystem looked like when activation failed.
+
+        Everything here is read-only and cheap; it exists because "could not be
+        activated" on its own gives whoever reads the log nothing to act on.
+        """
+        import vdd as vd
+
+        state = None
+        enabled = None
+        try:
+            st = vd.status()
+            state = st.get("state")
+            enabled = st.get("enabled")
+        except Exception:
+            pass
+        adapter = None
+        try:
+            adapter = vd.find_vdd_adapter()
+        except Exception:
+            pass
+        monitors = len((adapter or {}).get("modes") or ())
+        try:
+            modes = len(wd.available_modes(name))
+        except Exception:
+            modes = -1
+        try:
+            paths = len(wd.active_paths())
+        except Exception:
+            paths = -1
+        self.log(i18n.t(
+            "  诊断：驱动状态 %s，设备节点%s，适配器%s，显示器 %d 个，"
+            "可用模式 %d 个，桌面上 %d 条路径",
+            "  diagnosis: driver state %s, device node %s, adapter %s, "
+            "%d monitor(s), %d usable mode(s), %d path(s) on the desktop")
+            % (state,
+               i18n.t("开着", "on") if enabled else i18n.t("关着", "off"),
+               i18n.t("在", "present") if adapter else i18n.t("不见了", "missing"),
+               monitors, modes, paths))
 
     def _set_mode_retry(self, name, w, h, hz, x, y, attempts=4):
         """ChangeDisplaySettingsEx, retried around Windows' display-config lock.
