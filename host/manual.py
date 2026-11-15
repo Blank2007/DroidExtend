@@ -260,6 +260,8 @@ DroidExtend 使用说明   v{ver}
   · 设置文件： 程序目录里的 settings.json（1.6.6 起所有数据都在安装目录里）
     （菜单 文件 -> 打开数据目录 可以直接打开）
   · 菜单 工具 -> 检查更新 会去 GitHub 上查有没有新版本。
+  · 同一个菜单里的「也检查测试版（beta）」打开后，检查更新会把测试版一起看。
+    测试版是拿来试新东西的，可能不稳；不想尝鲜就别勾。
   · 程序目录里的 README.md 有更完整的说明；开发日志.md 记录了它是怎么做出来的。
 
 【八、它用到的别人的东西（在此致谢）】
@@ -609,6 +611,8 @@ DroidExtend manual   v{ver}
     program writes lives in the install folder)
     (File -> Open data folder opens it for you)
   . Tools -> Check for updates asks GitHub whether a newer version exists.
+  . Tick "Include beta releases" in the same menu and that check looks at betas too.
+    A beta exists to try new things and can be rough -- leave it off if you do not want that.
   . README.md in the program folder has the longer story, and the development log
     (Chinese) records how the thing was built.
 

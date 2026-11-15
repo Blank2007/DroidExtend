@@ -464,6 +464,11 @@ class App(tk.Tk):
                                variable=self.chk_var, command=self._save_settings)
         m_tool.add_command(label=i18n.t("检查更新…", "Check for updates..."),
                            command=lambda: self.on_check_updates(manual=True))
+        # 1.9.4 -- GitHub's /releases/latest never returns a pre-release, so
+        # looking at betas is a separate, opt-in switch.
+        self.pre_upd_var = tk.BooleanVar(value=bool(self.settings.get("check_prerelease", False)))
+        m_tool.add_checkbutton(label=i18n.t("也检查测试版（beta）", "Include beta releases"),
+                               variable=self.pre_upd_var, command=self._save_settings)
         m_tool.add_command(label=i18n.t("更新日志", "Release notes"),
                            command=self.on_show_changelog)
         m_tool.add_separator()
@@ -708,6 +713,8 @@ class App(tk.Tk):
             self.wait_var.set(_wait_caption(int(s.get("auto_stream_wait", 60) or 0)))
         if hasattr(self, "chk_var"):
             self.chk_var.set(bool(s.get("check_updates", True)))
+        if hasattr(self, "pre_upd_var"):
+            self.pre_upd_var.set(bool(s.get("check_prerelease", False)))
         self.pos_x_var.set(str(s.get("pos_x", 0)))
         self.pos_y_var.set(str(s.get("pos_y", 0)))
         self._res_changed()
@@ -774,6 +781,8 @@ class App(tk.Tk):
             s["vdd_off_mode"] = self.off_mode_var.get()
         if hasattr(self, "chk_var"):
             s["check_updates"] = bool(self.chk_var.get())
+        if hasattr(self, "pre_upd_var"):
+            s["check_prerelease"] = bool(self.pre_upd_var.get())
         try:
             if self.state() == "normal":
                 s["window"] = self.geometry()
@@ -2788,11 +2797,13 @@ class App(tk.Tk):
                 self.log("上一次检查还没结束，稍等一下。")
             return
         self.upd_busy = True
+        # 1.9.4 -- the beta channel reads the whole release list (upd.check).
+        pre = bool(self.settings.get("check_prerelease", False))
         if manual:
-            self.log("正在向 GitHub 查询最新版本…")
+            self.log("正在向 GitHub 查询最新版本%s…" % ("（含测试版）" if pre else ""))
 
         def work():
-            r = upd.check()
+            r = upd.check(prerelease=pre)
             self._later(lambda: self._upd_done(r, manual))
 
         threading.Thread(target=work, daemon=True).start()
@@ -2811,7 +2822,9 @@ class App(tk.Tk):
                     % (r["error"], RELEASES_URL), parent=self)
             return
         if r["newer"]:
-            self.log("发现新版本 v%s（当前 v%s）：%s" % (r["latest"], APP_VERSION, r["url"]), "ok")
+            tag = i18n.t("（测试版）", " (beta)") if r.get("pre") else ""
+            self.log("发现新版本 v%s%s（当前 v%s）：%s"
+                     % (r["latest"], tag, APP_VERSION, r["url"]), "ok")
             # 1.9.1 -- the check that runs at startup is not a request for a
             # window: someone who just booted the machine did not ask to read
             # release notes.  It becomes a balloon; the full window is one
@@ -2819,7 +2832,8 @@ class App(tk.Tk):
             if not manual:
                 self._notify(
                     "update",
-                    i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready") % r["latest"],
+                    i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready")
+                    % (r["latest"] + tag),
                     i18n.t("你现在是 v%s。「工具 → 检查更新」可以现在就装。",
                            "You are on v%s. Tools -> Check for updates installs it now.")
                     % APP_VERSION)

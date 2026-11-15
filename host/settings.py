@@ -58,6 +58,10 @@ KEYS = (
 # Extra, non-cfg keys.
 EXTRA = (
     "window", "check_updates", "custom_res",
+    # 1.9.4 -- "check for updates" can also look at pre-releases.  GitHub's
+    # /releases/latest never returns a pre-release, so the beta channel needs
+    # the list endpoint and its own switch.
+    "check_prerelease",
     # 1.6.0 -- choices that belong to the shell rather than to one stream.
     "language",          # "auto" / "zh" / "en", see i18n.resolve
     "privacy_accepted",  # version string of the notice the user agreed to
@@ -99,6 +103,7 @@ EXTRA = (
 _EXTRA_DEFAULTS = {
     "window": "",
     "check_updates": True,
+    "check_prerelease": False,
     "custom_res": "",
     "language": "auto",
     "privacy_accepted": "",

@@ -68,6 +68,7 @@
 | [42](#42-191-why-the-button-stayed-lit-and-a-program-that-should-not-own-a-notification-centre) | 1.9.1: three driver states / uninstall / notification centre | a Chinese comment ate the next line |
 | [43](#43-192-a-virtual-screen-that-would-not-reach-the-desktop) | 1.9.2: activation fallback / stale modes / display numbers | a registry mode goes stale, and so does a name |
 | [44](#44-193-first-make-the-measurement-honest-then-take-the-buffers-out) | 1.9.3: the low-latency rewrite | that 8 ms was never "on the glass" |
+| [45](#45-194-check-for-updates-can-see-the-pre-releases-too) | 1.9.4: the update check can see pre-releases | `/releases/latest` never returns a beta |
 
 ---
 
@@ -4568,6 +4569,39 @@ perf fps=120 mbps=23.20 latency_avg_ms=17 latency_max_ms=61 net_ms=0 dec_ms=19
 2. **A queue is not a buffer, it is delay.**  A 4 MB queue looks like jitter tolerance; it is a licence to be 640 ms late.
 3. **Frames may only be dropped before encoding.**  Any drop after that spoils every frame that references it.
 4. **Watch latency and frame rate together.**  Optimising latency alone buys milliseconds by showing fewer pictures, and the eye notices the stutter immediately.
+
+---
+
+## 45. 1.9.4: "Check for updates" can see the pre-releases too
+
+### 45.1 Half a sentence of a request
+
+The user wrote: release it, and give the update check a "check pre-releases" switch. The first half was 1.9.3-beta; this section is the second half. He owns a beta now and wants to know when it moves on, but the default update check cannot see one.
+
+### 45.2 The problem is the endpoint, not the search
+
+GitHub's `/releases/latest` is documented never to return a pre-release. So the update check was not failing to look for betas: the endpoint it asks does not put 1.9.3-beta in the answer at all, and after the beta went out the stable channel still reported 1.9.1. Seeing a beta means asking a different endpoint, `/releases?per_page=20`, and picking the newest item out of the list.
+
+### 45.3 Comparing version numbers
+
+The old `update.parse()` squeezed every digit out of the string into a tuple (`1.9.3-beta` → `(1, 9, 3)`), so `1.9.3-beta` and `1.9.3` compared equal, and a stable release could never overtake the beta that came before it. `update.ver_key()` now returns a digit triple plus a flag: `1.9.3` is `((1,9,3), 1)`, `1.9.3-beta` is `((1,9,3), 0)`.
+
+One detail: the 2 in `1.9.3-beta2` is a counter on the pre-release, not a fourth version position, so the digits are cut back to three before comparing. Otherwise `1.9.3-beta2` would look newer than the `1.9.3` that follows it.
+
+That leaves one gap: the same digits, both pre-releases. There only a different tag counts as newer, so a beta user is told about beta2 but is not told again and again that the beta already installed is new.
+
+### 45.4 The window
+
+Under the Tools menu, below "Check for updates…", there is now a checkbox, "also check pre-releases (beta)", off by default. It is independent of "check at startup": turning the automatic check off and asking for betas by hand is a valid combination. When the answer is a beta, both the log line and the notification title carry " (beta)" so nobody mistakes it for a stable release.
+
+The setting is `check_prerelease` in settings.json (`settings.EXTRA` and `_EXTRA_DEFAULTS` each gained one line), next to `check_updates`. The in-app note and the README's update Q&A each gained a sentence about it.
+
+### 45.5 Lessons
+
+1. **"Not found" and "not offered" are two different things.** That `/releases/latest` skips pre-releases is in the documentation; it gets read when a user asks.
+2. **Version comparison must consider pre-releases.** A digit-squeezing comparison reads the `-beta2` counter as a fourth version position.
+3. **A preview channel must be opened explicitly.** Defaulting it on pushes unstable builds at everybody; defaulting it off, for the people who ask, is what a beta is for.
+4. **In one class, two attributes with the same name: the last writer wins, quietly.** The new checkbox borrowed @BQ@pre_var@BQ@, which the encoder preset string variable already used -- so the checkbox read @BQ@"p1"@BQ@, @BQ@bool("p1")@BQ@ was always true, and the preset itself was reset to @BQ@veryfast@BQ@. Renaming it @BQ@pre_upd_var@BQ@ settled both.
 
 ---
 

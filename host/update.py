@@ -72,8 +72,39 @@ def parse(v):
     return tuple(int(n) for n in nums[:4]) or (0,)
 
 
+PRE_TAG = re.compile(r"(alpha|beta|rc|pre|preview|dev)", re.IGNORECASE)
+
+
+def is_pre(v):
+    """"1.9.3-beta" -> True; "1.9.3" -> False."""
+    return bool(PRE_TAG.search(str(v or "")))
+
+
+def ver_key(v):
+    """Sort key: 1.9.3 outranks 1.9.3-beta, and 1.10 > 1.9.
+
+    The counter inside a pre-release tag (beta2 / rc3) is not a version
+    component, so it is dropped -- otherwise 1.9.3-beta2 would look newer than
+    the 1.9.3 release that follows it.
+    """
+    s = str(v or "").strip().lstrip("vV")
+    nums = [int(n) for n in re.findall(r"\d+", s)]
+    if is_pre(s) and len(nums) > 3:
+        nums = nums[:3]
+    while len(nums) < 3:
+        nums.append(0)
+    return (tuple(nums[:3]), 0 if is_pre(s) else 1)
+
+
 def newer(latest, current=APP_VERSION):
-    return parse(latest) > parse(current)
+    a, b = ver_key(latest), ver_key(current)
+    if a != b:
+        return a > b
+    # Same numbers, both pre-releases: only a *different* tag counts, so a beta
+    # user is told about beta2 but is not nagged about the beta they run now.
+    la = str(latest or "").strip().lstrip("vV")
+    lb = str(current or "").strip().lstrip("vV")
+    return bool(la) and la != lb and is_pre(la) and is_pre(lb)
 
 
 def _digest_sha(d):
@@ -112,24 +143,53 @@ def host_ok(url):
     return (u.hostname or "").lower() in ASSET_HOSTS
 
 
-def check(timeout=8):
+LIST_API = LATEST_RELEASE_API.rsplit("/", 1)[0] + "?per_page=20"
+
+
+def _latest_from_list(items):
+    """The newest non-draft entry of a /releases response (drafts are private)."""
+    best = None
+    for it in items:
+        if not isinstance(it, dict) or it.get("draft"):
+            continue
+        if best is None or ver_key(it.get("tag_name") or it.get("name")) > ver_key(
+                best.get("tag_name") or best.get("name")):
+            best = it
+    return best
+
+
+def check(timeout=8, prerelease=False):
     """-> dict(ok, latest, newer, url, name, notes, published, setup, error)
 
     ``setup`` is None or dict(name, url, size, sha256); ``sha256`` is "" when
     neither the digest field nor the body table carried one.
     """
     out = {"ok": False, "latest": "", "newer": False, "url": RELEASES_URL,
-           "name": "", "notes": "", "published": "", "setup": None, "error": ""}
-    req = urllib.request.Request(LATEST_RELEASE_API, headers={
-        "User-Agent": USER_AGENT,
-        "Accept": "application/vnd.github+json",
-    })
+           "pre": False, "name": "", "notes": "", "published": "",
+           "setup": None, "error": ""}
+    # GitHub's /releases/latest never returns a pre-release, so the beta
+    # channel reads the whole list instead and picks the newest entry.
+    req = urllib.request.Request(
+        LIST_API if prerelease else LATEST_RELEASE_API, headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "application/vnd.github+json",
+        })
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except Exception as e:
         out["error"] = "%s: %s" % (type(e).__name__, e)
         return out
+    if prerelease:
+        if not isinstance(data, list):
+            out["error"] = i18n.t("返回内容不是版本列表",
+                                  "The response was not a release list")
+            return out
+        data = _latest_from_list(data)
+        if not data:
+            out["error"] = i18n.t("没有找到任何已发布的版本",
+                                  "No published release was found")
+            return out
     if not isinstance(data, dict):
         out["error"] = i18n.t("返回内容不是 JSON 对象",
                               "The response was not a JSON object")
@@ -140,6 +200,7 @@ def check(timeout=8):
     out["name"] = str(data.get("name") or "")
     out["notes"] = str(data.get("body") or "")
     out["published"] = str(data.get("published_at") or "")[:10]
+    out["pre"] = is_pre(out["latest"])
     out["newer"] = newer(out["latest"])
 
     a = pick_asset(data)

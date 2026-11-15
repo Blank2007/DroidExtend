@@ -631,6 +631,10 @@ Before downloading it checks, in order: the URL must be an official GitHub domai
 publish a SHA256, the byte count must match the official one, the SHA256 must match, and the file must start with
 `MZ` — **if any check fails it does not install**, and it tells you right there which one failed.
 
+To see pre-releases, tick "Include beta releases" in the same Tools menu — from then on the check
+looks at betas too.  A beta exists to try new things out and can be rough; leave it unticked if you
+do not want that.
+
 **Q: The updater says "this program has no code signing certificate" — is that unsafe?**
 A: That's the truth, and it needs saying plainly: this project has not bought (and does not intend to buy) a code
 signing certificate, so Windows will not stamp the installer as "signed", and the program **will not pretend**
