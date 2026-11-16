@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "1.9.4-beta"
+#define AppVer "2.0.0-beta"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}
@@ -171,6 +171,8 @@ Source: "{#P}\第三方组件许可.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#P}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#P}\tools\ffmpeg\bin\ffmpeg.exe"; DestDir: "{app}\tools\ffmpeg\bin"; Flags: ignoreversion
+; 2.0.0 原生低延迟采集（DDA -> D3D11 视频处理器 -> NVENC，一帧都不离开显卡）；没有它自动回落到 ffmpeg / 2.0.0 native low-latency capture (DDA -> D3D11 video processor -> NVENC, no frame ever leaves the GPU); falls back to ffmpeg when absent.
+Source: "{#P}\tools\native\DroidCapture.exe"; DestDir: "{app}\tools\native"; Flags: ignoreversion
 Source: "{#P}\tools\platform-tools\adb.exe"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion
 Source: "{#P}\tools\platform-tools\AdbWinApi.dll"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion
 Source: "{#P}\tools\platform-tools\AdbWinUsbApi.dll"; DestDir: "{app}\tools\platform-tools"; Flags: ignoreversion

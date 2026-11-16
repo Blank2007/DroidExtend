@@ -21,6 +21,9 @@ public class VideoDecoder {
     private static final String TAG = "DroidExtend";
     private static final long DEQ_TIMEOUT_US = 10000L;
 
+    /** How long the drain thread sleeps inside the codec when no picture is ready. */
+    private static final long DEQ_OUTPUT_US = 5000L;
+
     /**
      * How long to keep asking for an input buffer before giving up on this
      * frame.  Short enough that a healthy decoder never notices, long enough
@@ -74,8 +77,33 @@ public class VideoDecoder {
     private long netUs = -1;
     private long decodeUs = -1;
     private long shownLatencyMaxUs;
+
+    /**
+     * Rolling window of the last frames' wire-to-glass delay.
+     *
+     * The old log line printed the *last* sample and called it an average,
+     * which made a 3 ms improvement and a 30 ms regression look identical.  A
+     * window keeps the number comparable between builds, and the percentiles
+     * say what the tail is doing, which is what a remote desktop feels.
+     */
+    private static final int LAT_WINDOW = 256;
+    private final long[] latWin = new long[LAT_WINDOW];
+    private int latWinN;
     /** Output buffers thrown away because several were ready for one vsync. */
     private long droppedOutput;
+
+    /**
+     * The thread that takes decoded pictures off the codec and onto the surface.
+     *
+     * Until 2.0.0 this was done from inside the socket reader, right after
+     * feeding the *next* frame -- which meant a picture that became ready 0.1 ms
+     * after the last feed sat in the codec until the following frame arrived, a
+     * whole frame interval later.  Measured on the 120 Hz tablet that was
+     * dec=12-13 ms for a decoder that needs 4 ms: 8.33 ms was pure waiting.
+     * A thread of its own collects each picture as soon as it exists.
+     */
+    private Thread drainThread;
+    private volatile boolean draining;
 
     /**
      * How many frames have really been put on screen.
@@ -101,6 +129,34 @@ public class VideoDecoder {
      */
     public synchronized double shownLatencyMs() {
         return shownLatencyUs < 0 ? -1 : shownLatencyUs / 1000.0;
+    }
+
+    /** Median wire-to-glass delay over the last few hundred frames (ms). */
+    public synchronized double latencyP50Ms() {
+        return percentileMs(50);
+    }
+
+    /** 90th percentile of the same window: what the stutter feels like (ms). */
+    public synchronized double latencyP90Ms() {
+        return percentileMs(90);
+    }
+
+    private double percentileMs(int p) {
+        int n = Math.min(latWinN, LAT_WINDOW);
+        if (n <= 0) {
+            return shownLatencyUs < 0 ? -1 : shownLatencyUs / 1000.0;
+        }
+        long[] a = new long[n];
+        System.arraycopy(latWin, 0, a, 0, n);
+        java.util.Arrays.sort(a);
+        int i = (int) Math.round((n - 1) * p / 100.0);
+        if (i < 0) {
+            i = 0;
+        }
+        if (i >= n) {
+            i = n - 1;
+        }
+        return a[i] / 1000.0;
     }
 
     /** Take the worst wire-to-glass delay since the last call (ms), then reset it. */
@@ -147,6 +203,16 @@ public class VideoDecoder {
     }
 
     public synchronized void setSurface(Surface s) {
+        if (s == null) {
+            // The window is going away, and the codec's output surface dies with
+            // it.  Until 2.0.0 the codec was left running here, so the socket
+            // reader kept feeding a decoder whose surface no longer existed and
+            // the app died with "Invalid to call at Released state" inside
+            // queue().  Tear it down; a new surface reconfigures it.
+            reset();
+            surface = null;
+            return;
+        }
         surface = s;
         if (configured && codec != null && s != null) {
             try {
@@ -164,6 +230,12 @@ public class VideoDecoder {
     }
 
     public synchronized void reset() {
+        // Clear the flag first: the drain thread exits on its own within one
+        // dequeue timeout (5 ms) and must not touch a codec we are about to
+        // release.  No join() -- this method holds the monitor the drain thread
+        // needs to record its latency samples.
+        draining = false;
+        drainThread = null;
         if (codec != null) {
             try { codec.stop(); } catch (Throwable ignored) { }
             try { codec.release(); } catch (Throwable ignored) { }
@@ -210,6 +282,7 @@ public class VideoDecoder {
                 c.start();
                 codec = c;
                 configured = true;
+                startDrain();
                 event("decoder configured " + width + "x" + height
                         + " lowLatency=" + (attempt == 0)
                         + " csd=" + (csdData == null ? 0 : csdData.length));
@@ -284,7 +357,9 @@ public class VideoDecoder {
                 if (idx >= 0) {
                     break;
                 }
-                drain();
+                if (drainThread == null) {
+                    drain();        // no drain thread yet: keep it alive by hand
+                }
                 if (SystemClock.elapsedRealtime() >= deadline) {
                     break;
                 }
@@ -321,7 +396,8 @@ public class VideoDecoder {
                 stamps.clear();
                 recvs.clear();
             }
-            drain();
+            // Nothing to collect here any more: the drain thread takes each
+            // picture the moment the codec produces it (see drainLoop).
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "queue failed", t);
@@ -330,6 +406,112 @@ public class VideoDecoder {
         }
     }
 
+    /** Start (or restart) the thread that moves decoded pictures to the surface. */
+    private void startDrain() {
+        draining = false;
+        Thread old = drainThread;
+        if (old != null && old.isAlive()) {
+            try { old.join(100); } catch (InterruptedException ignored) { }
+        }
+        draining = true;
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                drainLoop();
+            }
+        }, "droidextend-drain");
+        t.setDaemon(true);
+        drainThread = t;
+        t.start();
+    }
+
+    /**
+     * Hand each decoded picture to the surface the instant it exists.
+     *
+     * The 5 ms timeout is the idle cost: the thread sleeps inside the codec, so
+     * this is a blocking wait, not a poll loop.  When several pictures are ready
+     * at once they are all already late -- one vsync can show one picture -- so
+     * the older ones are released without rendering and counted in
+     * droppedOutput, the same way a real-time player skips to the newest frame.
+     */
+    private void drainLoop() {
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        MediaCodec.BufferInfo spare = new MediaCodec.BufferInfo();
+        while (draining) {
+            MediaCodec c = codec;
+            if (c == null) {
+                break;
+            }
+            int idx;
+            try {
+                idx = c.dequeueOutputBuffer(info, DEQ_OUTPUT_US);
+            } catch (Throwable t) {
+                if (draining) {
+                    Log.w(TAG, "dequeueOutputBuffer stopped: " + oneLine(t));
+                }
+                break;
+            }
+            if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                try {
+                    event("decoder output format: " + c.getOutputFormat());
+                } catch (Throwable ignored) { }
+                continue;
+            }
+            if (idx < 0) {
+                continue;
+            }
+            int newest = idx;
+            while (true) {
+                int extra;
+                try {
+                    extra = c.dequeueOutputBuffer(spare, 0);
+                } catch (Throwable t) {
+                    break;
+                }
+                if (extra == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    continue;
+                }
+                if (extra < 0) {
+                    break;
+                }
+                showOne(c, newest, false);
+                newest = extra;
+            }
+            showOne(c, newest, true);
+            boolean first;
+            synchronized (this) {
+                first = (rendered == 1 && !warnedFirstFrame);
+                if (first) {
+                    warnedFirstFrame = true;
+                }
+            }
+            if (first) {
+                event("first frame rendered to the surface");
+            }
+        }
+    }
+
+    /** Release one decoded buffer, rendering it or throwing it away. */
+    private void showOne(MediaCodec c, int idx, boolean render) {
+        try {
+            c.releaseOutputBuffer(idx, render);
+        } catch (Throwable ignored) {
+            return;
+        }
+        long stamp, recv;
+        synchronized (this) {
+            stamp = pollStamp();
+            recv = pollRecv();
+            if (render) {
+                rendered++;
+            } else {
+                droppedOutput++;
+            }
+        }
+        if (render) {
+            noteShown(stamp, recv);
+        }
+    }
     private void drain() {
         if (codec == null || !configured) {
             return;
@@ -388,7 +570,7 @@ public class VideoDecoder {
         return r == null ? 0L : r.longValue();
     }
 
-    private void noteShown(long hostStampUs, long recvUs) {
+    private synchronized void noteShown(long hostStampUs, long recvUs) {
         if (hostStampUs <= 0) {
             return;
         }
@@ -398,12 +580,19 @@ public class VideoDecoder {
             return;     // the two clocks clearly disagree; do not report it
         }
         shownLatencyUs = lat;
+        if (lat > 0) {
+            latWin[latWinN % LAT_WINDOW] = lat;
+            latWinN++;
+        }
         if (lat > shownLatencyMaxUs) {
             shownLatencyMaxUs = lat;
         }
         if (recvUs > 0) {
-            netUs = recvUs - hostStampUs;
-            decodeUs = nowUs - recvUs;
+            // The clock-skew correction eats whatever is left of a sub-millisecond
+            // network hop, which showed up as "net_ms=-1" in the log.  A negative
+            // transfer time is not a measurement, it is a rounding artefact.
+            netUs = Math.max(recvUs - hostStampUs, 0);
+            decodeUs = Math.max(nowUs - recvUs, 0);
         }
     }
 

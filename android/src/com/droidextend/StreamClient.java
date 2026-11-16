@@ -324,7 +324,9 @@ public class StreamClient extends Thread {
                 // frame on the wire -> the frame on the glass.  The old number
                 // stopped at "arrived in this process", which is why it read a
                 // flattering 8 ms while the picture felt far later.
-                double shownMs = decoder.shownLatencyMs();
+                // Median of the last few hundred frames, not the last sample:
+                // one number that can be compared between builds.
+                double shownMs = decoder.latencyP50Ms();
                 st.latencyMs = shownMs >= 0 ? shownMs
                         : (latCount > 0 ? latSum / (double) latCount / 1000.0 : -1);
                 st.latencyMaxMs = decoder.takeShownLatencyMaxMs();
@@ -340,8 +342,10 @@ public class StreamClient extends Thread {
                 if (reportCount % 5 == 0 || dropping) {
                     Log.i(TAG, "perf fps=" + Math.round(st.streamFps)
                             + " mbps=" + String.format(java.util.Locale.US, "%.2f", st.mbps)
-                            + " latency_avg_ms=" + Math.round(st.latencyMs)
+                            + " latency_p50_ms=" + Math.round(st.latencyMs)
+                            + " latency_p90_ms=" + Math.round(decoder.latencyP90Ms())
                             + " latency_max_ms=" + Math.round(st.latencyMaxMs)
+                            + " dropped_out=" + decoder.droppedOutputFrames()
                             + " net_ms=" + Math.round(decoder.transferMs())
                             + " dec_ms=" + Math.round(decoder.decodeMs())
                             + " samples=" + latCount

@@ -39,8 +39,8 @@ DEFAULTS = {
     "quality": 20,           # lower is better; NVENC -cq / x264 -crf
     "encoder": "h264_nvenc",
     "preset": "p4",
-    "backend": "auto",       # auto | ddagrab | gdigrab
-    "draw_mouse": False,
+    "backend": "auto",       # auto | native | ddagrab | gdigrab
+    "draw_mouse": True,
     "spatial_aq": True,
     "gop": 0,                # 0 = 2 seconds
     "mode": "extend",        # extend | mirror
@@ -436,7 +436,7 @@ class Session(object):
         return fallback
 
     def _put_on_desktop(self, name, w, h, hz):
-        """Get the virtual screen onto the desktop; returns its display name.
+        r"""Get the virtual screen onto the desktop; returns its display name.
 
         Windows locks the display configuration for a moment around every
         topology change, and while it is locked ChangeDisplaySettingsEx

@@ -207,6 +207,18 @@ def adb_exe():
     ])
 
 
+def native_exe():
+    """The bundled zero-copy capture/encode helper (tools/native/DroidCapture.exe).
+
+    It is our own binary: Desktop Duplication -> D3D11 video processor -> NVENC
+    in one process, no frame copies and no ffmpeg in the way.
+    """
+    return _first([
+        os.path.join(TOOLS, "native", "DroidCapture.exe"),
+        _on_path("DroidCapture"),
+    ])
+
+
 def ffmpeg_exe():
     return _first([
         os.path.join(TOOLS, "ffmpeg", "bin", "ffmpeg.exe"),

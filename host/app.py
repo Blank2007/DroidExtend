@@ -259,9 +259,11 @@ def _refresh_captions():
                        "CBR -- constant bitrate (steadier under motion)")),
     ]
     BACKENDS[:] = [
-        ("auto", i18n.t("自动（优先 ddagrab）", "Auto (prefers ddagrab)")),
-        ("ddagrab", i18n.t("ddagrab（桌面复制，最快）",
-                           "ddagrab (desktop duplication, fastest)")),
+        ("auto", i18n.t("自动（优先原生低延迟）", "Auto (prefers native)")),
+        ("native", i18n.t("原生低延迟（需 NVIDIA 显卡）",
+                          "Native low latency (needs NVIDIA)")),
+        ("ddagrab", i18n.t("ddagrab（ffmpeg 桌面复制）",
+                           "ddagrab (ffmpeg desktop duplication)")),
         ("gdigrab", i18n.t("gdigrab（GDI，兼容性最好）",
                            "gdigrab (GDI, most compatible)")),
     ]
@@ -701,7 +703,7 @@ class App(tk.Tk):
         self.pre_var.set(s.get("preset", "p4"))
         self.be_var.set(_label_for(BACKENDS, s.get("backend", "auto"), BACKENDS[0][1]))
         self.pos_var.set(_label_for(POSITIONS, s.get("position", "right"), POSITIONS[0][1]))
-        self.mouse_var.set(bool(s.get("draw_mouse", False)))
+        self.mouse_var.set(bool(s.get("draw_mouse", True)))
         self.inst_var.set(bool(s.get("reinstall_apk", False)))
         self.match_var.set(bool(s.get("match_phone", True)))
         # 1.9.0 -- the touch channel, the boot-time stream and its wait.

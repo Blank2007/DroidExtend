@@ -19,7 +19,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 
 * Resolution, refresh rate, frame rate, bitrate and quality are **all configurable**
 * Runs over the USB cable (adb) — **no Wi-Fi, no shared subnet, no third-party app to install**
-* Host side: Python + ffmpeg (NVENC hardware encoding)
+* Host side: Python + the bundled native capturer (desktop duplication -> NVENC hardware encoding, no ffmpeg involved), falling back to ffmpeg ddagrab on a machine without an NVIDIA card
 * Phone side: the bundled `dist/DroidExtend.apk`
 
 ---
@@ -45,10 +45,10 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 |---|---|
 | 🖥️ **A real extended desktop** | Not mirroring. A new display shows up under `Win+P`, windows can be dragged onto it, and the mouse can click right on it |
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
-| ⚡ **Low latency** | **17–31 ms to the glass** (the 1.9.3 definition: the host put it on the wire -> it is really on the screen; of which 0–12 ms transfer and 14–26 ms decode plus present) |
+| ⚡ **Low latency** | **13 ms to the glass** (the 2.0.0 definition: the host put it on the wire -> it is really on the screen, p50 13 ms / p90 19–37 ms; of which 0–2 ms transfer and 12–16 ms decode plus present) |
 | 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
 | 🧹 **Stop and it is gone** | Hit `停止` (Stop), or quit the program, and the virtual display is removed from the system immediately — no ghost monitor left behind. Pulling the cable without stopping leaves the screen in place for now; stop once after reconnecting and it goes |
-| 🎛️ **Fully hardware-accelerated pipeline** | `ddagrab` (desktop capture) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU |
+| 🎛️ **Fully hardware-accelerated pipeline** | Native capture (zero-copy desktop duplication) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU. Without an NVIDIA card it falls back to ffmpeg `ddagrab` automatically |
 | 📦 **Works out of the box** | A 37 MB installer with ffmpeg / adb / the driver / the APK all inside — nothing else to prepare after installing |
 | 🔄 **In-app updates** | "Check for updates" downloads the new version right there in the app and verifies size / SHA256 / file format — **if verification fails, it doesn't install**; no browser required |
 
@@ -167,7 +167,7 @@ grabs the picture and which one encodes it.
 | **Rate control** | `VBR` (quality first — a static desktop uses almost no bandwidth) / `CBR` (constant bitrate, steadier on fast-moving content) |
 | **Quality Q** | Lower is better quality and higher bitrate. `18~20` is essentially visually lossless; from `24` up you can see blocking |
 | **Encoder** | Every entry is **actually test-encoded** before it is offered. Available here: `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` (NVIDIA), `h264_amf` / `hevc_amf` (AMD), `libx264` / `libx265` (pure CPU fallback). Ones that are compiled in but cannot run on this machine (`*_qsv` and `av1_amf` here) are removed from the menu, and the log says so |
-| **Capture** | `auto` picks ddagrab (Desktop Duplication API, zero-copy into NVENC); switch to gdigrab on older GPUs or if something misbehaves |
+| **Capture** | `auto` tries **native low latency** first (the bundled `tools\native\DroidCapture.exe`: Desktop Duplication API, zero-copy into NVENC, no ffmpeg needed), then ddagrab, then gdigrab. Native is the default since 2.0.0 and it **draws the mouse pointer itself**: the cursor shape desktop duplication hands over rides in as a second video-processor input composited through an alpha stream in the same blit, with no extra copy, so position, shape and alpha edges match the desktop and "show the mouse pointer" works on either path |
 | **Capture GPU (read-only)** | Which adapter is actually grabbing the picture. The old ddagrab could only see one card on a two-GPU machine; since 1.8.5 every card's outputs are probed and the log says `采集显卡: 显卡0 "NVIDIA …"（输出 #1） ／ 编码: NVIDIA 显卡的 NVENC` (capture GPU / encoder) |
 | **APK version (read-only)** | The app on the phone is compared with the bundled APK by versionCode; an older phone side asks once for confirmation (see the previous section) |
 | **Screen position** | Place the virtual display to the right / left / above / below the primary screen |
@@ -309,7 +309,7 @@ in Explorer. The status bar at the bottom always shows which directory is in use
 Measured on this machine (RTX 5070 Laptop + Redmi 24091RPADC, Android 16, 1920×1080@60):
 
 ```
-capture ddagrab (desktop duplication) → h264_nvenc (GPU encode) → adb reverse → phone MediaCodec hardware decode
+capture ddagrab (the 1.5-1.9 path) → h264_nvenc (GPU encode) → adb reverse → phone MediaCodec hardware decode
 server: sent 1482 frames  dropped 0  bytes 7,614,539
 phone:  Qin 304  Render 303  Drop 0  Avg 16ms/frame     ← every frame was rendered
 ```
@@ -361,6 +361,7 @@ converts it using the clock offset established during the handshake.  Since 1.9.
 is "host sent it" to "the phone has it", `dec_ms` is "the phone has it" to "on the glass".  Measured here:
 
 ```
+2.0.0 latency_p50_ms 13      latency_p90_ms 23~37  latency_max 43~56  net_ms 0~2  dec_ms 12~16
 1.9.3  latency_avg_ms 17~31   latency_max 44~61   net_ms 0~12   dec_ms 14~26
 1.5.x  latency_avg_ms  5~11   latency_max 26~45   (old definition: only "the phone received it")
 ```
@@ -381,7 +382,7 @@ It now uses `os.read(p.stdout.fileno(), 65536)`, which takes data the moment it'
 * `fps` low, `latency` normal → the **USB cable** is out of bandwidth. Run "Measure the cable speed"
   on the PC; below 40 Mbps, replace the cable (on the same phone we measured a 40× spread:
   13.7 Mbps ↔ 597 Mbps).
-* `fps` normal, `latency` high (since 1.9.3 normal is 17-31 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
+* `fps` normal, `latency` high (since 2.0.0 normal is p50 13 ms / p90 19-37 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
   lighter encoder (`h264_nvenc` is the fastest on our machine), or drop to 30 fps.
 * Both numbers fine but the image still stutters → the phone is thermal-throttling; see "Phone side".
 * Even the PC's own mouse starts to lag → the GPU is saturated by something else; see below.
@@ -485,14 +486,14 @@ droid-extend/
 ├─ host/                          ← Windows side (Python)
 │   ├─ app.py                    the GUI main program
 │   ├─ session.py                one casting session: display → capture → encode → USB → phone
-│   ├─ capture.py                ffmpeg command line, ddagrab output probing, H.264 access unit splitting
+│   ├─ capture.py                ffmpeg command line, native capture helper, ddagrab output probing, H.264 splitting
 │   ├─ server.py                 TCP streaming server (handshake + frame queue + drop policy)
 │   ├─ touch.py                  touch injection service (SendInput absolute coordinates)
 │   ├─ win_display.py            CCD / ChangeDisplaySettingsEx wrappers (display control at the cpp level)
 │   ├─ vdd.py                    virtual display driver install and status checks
 │   ├─ adb.py                    adb wrappers (reverse tunnels, install, launch)
 │   ├─ linkspeed.py              USB link speed test
-│   ├─ paths.py                  locate the bundled adb / ffmpeg / JDK / SDK, plus the data directory
+│   ├─ paths.py                  locate the bundled adb / ffmpeg / native capture helper / JDK / SDK, plus data
 │   ├─ settings.py               settings I/O (atomic write + allowlist + migration from the old location)
 │   ├─ applog.py                 writes DroidExtend.log (2 MB rollover, and a failure never takes the program down)
 │   ├─ apkver.py                 reads versionCode / versionName out of the APK (used to compare the phone side since 1.8.5)
@@ -513,6 +514,7 @@ droid-extend/
 ├─ tools/                         ← bundled toolchain and install scripts
 │   ├─ platform-tools/adb.exe
 │   ├─ ffmpeg/bin/ffmpeg.exe
+│   ├─ native/DroidCapture.exe    ← the default capture helper since 2.0.0 (source in the same folder)
 │   ├─ sdk/                      Android build-tools 34.0.0 + platform 34
 │   ├─ vdd/                      Virtual Display Driver driver files + nefcon
 │   └─ vdd_install.ps1           driver install script (administrator)
@@ -532,8 +534,8 @@ droid-extend/
 ```
 ┌──────────── Windows host ──────────────┐         ┌──── Android ────┐
 │ virtual display driver (IDD)           │         │                 │
-│       ↓ desktop duplication (ddagrab)  │         │  SurfaceView    │
-│   ffmpeg + NVENC hardware H.264        │         │       ↑         │
+│       ↓ desktop duplication (native)   │         │  SurfaceView    │
+│   DroidCapture / ffmpeg + NVENC        │         │       ↑         │
 │       ↓ access units (Annex-B)         │  USB    │  MediaCodec     │
 │   TCP 127.0.0.1:27183 ─────────────────┼────────→│  hardware decode│
 │   TCP 127.0.0.1:27184 ←────────────────┼─────────│  touch events   │
@@ -544,9 +546,11 @@ droid-extend/
 1. **`win_display.py`** uses the Windows CCD API to activate the virtual display and place it next to the primary
    screen, then sets it to the resolution/refresh rate you picked with `ChangeDisplaySettingsEx`; on stop it uses
    `SetDisplayConfig(SDC_USE_SUPPLIED_DISPLAY_CONFIG)` to remove only that one virtual display path.
-2. **`capture.py`** grabs that rectangle from the Desktop Duplication API with ddagrab — the D3D11 texture goes
-   straight into NVENC with no memory copy; at startup it first probes the mapping from `output_idx` to display and
-   drops the leading black frame.
+2. **`capture.py`** grabs that rectangle with the bundled `tools\native\DroidCapture.exe` by default: the desktop
+   duplication texture is converted to NV12 by a video processor and goes straight into NVENC, zero copies end to end,
+   and ffmpeg is not involved at all (that is the default path since 2.0.0). Without an NVIDIA card or H.264 it falls
+   back to ffmpeg's ddagrab — also zero-copy into NVENC, also probing the `output_idx` to display mapping at startup
+   and dropping the leading black frame.
    It reads ffmpeg's output with `os.read()` instead of `read()`, so the 64 KB buffer doesn't push latency up to
    ~100 ms.
    ddagrab only knows DXGI **output indices** (not device names, and it has no desktop-coordinate option), while
@@ -563,7 +567,7 @@ droid-extend/
 4. On the phone, **`VideoDecoder.java`** pulls the SPS/PPS out of the stream itself to configure MediaCodec, and
    renders the hardware-decoded output straight to a `SurfaceView`.  Since 1.9.3 it no longer "jumps to the next
    keyframe when the backlog grows": dropping a P frame smears everything after it.  A phone that reads slowly now
-   pushes back through the TCP window to the host, where ddagrab drops frames before they are encoded.
+   pushes back through the TCP window to the host, where the capture side drops frames before they are encoded.
 5. Touch events travel back over **`tcp:27184`**: the phone normalizes coordinates against the image's aspect
    ratio → the host's **`touch.py`** injects them with `SendInput` in absolute coordinates across the whole virtual
    desktop, as a real mouse.
@@ -761,7 +765,7 @@ The output overwrites `dist\DroidExtend-Setup-<version>.exe` directly (about 20 
 
 The script is at `tools/installer/DroidExtend.iss`; the key points:
 
-* It packs only the files needed **at runtime**: `DroidExtend.exe`, `_internal\`, `tools\ffmpeg`,
+* It packs only the files needed **at runtime**: `DroidExtend.exe`, `_internal\`, `tools\ffmpeg`, `tools\native`,
   `tools\platform-tools`, `tools\vdd`, `tools\vdd_install.ps1`, `dist\DroidExtend.apk`.
   **`tools\sdk` (251 MB) and `tools\vdd\*.zip` are not packed** — they're only needed to rebuild the APK, and they
   are exactly what would blow the project up from 34 MB to 391 MB.
@@ -790,7 +794,8 @@ all:
 | --- | --- | --- | --- |
 | **Virtual Display Driver (VDD)** | Makes Windows genuinely gain an extra virtual display — the foundation of "a real extended desktop" | MIT | [VirtualDrivers/Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) |
 | **nefcon** | Silent install/uninstall of device drivers (instead of opening Device Manager by hand) | MIT | [nefarius/nefcon](https://github.com/nefarius/nefcon) |
-| **FFmpeg** | `ddagrab` desktop duplication + `h264_nvenc` hardware encoding (invoked as a separate process) | GPL-3.0 | [ffmpeg.org](https://ffmpeg.org/) |
+| **FFmpeg** | `ddagrab` desktop duplication + `h264_nvenc` hardware encoding (invoked as a separate process; since 2.0.0 the fallback for the native helper) | GPL-3.0 | [ffmpeg.org](https://ffmpeg.org/) |
+| **NVIDIA Video Codec SDK** | `nvEncodeAPI.h` headers and the zero-copy NVENC interface (`RegisterResource` / `MapInputResource`); the native capturer calls it directly since 2.0.0 | NVIDIA SDK License | [developer.nvidia.com/video-codec-sdk](https://developer.nvidia.com/video-codec-sdk) |
 | **Android SDK Platform-Tools (adb)** | Installing the phone-side APK and establishing the two `adb reverse` tunnels | Apache-2.0 | [developer.android.com](https://developer.android.com/tools/releases/platform-tools) |
 | **R8 / D8** | Compiles Java to dex only **when building** the APK (not distributed at runtime) | BSD-3-Clause | [r8.googlesource.com/r8](https://r8.googlesource.com/r8) |
 | **Python / Tcl-Tk** | The program itself and its GUI | PSF-2.0 / BSD-style | [python.org](https://www.python.org/) · [tcl.tk](https://www.tcl.tk/) |
@@ -802,6 +807,23 @@ The full license texts, copyright notices and exactly what is distributed for ea
 `帮助 → 第三方组件许可` in the app). Licenses like MIT / Apache-2.0 / BSD all require that "the notice be included
 when distributing binaries", so that file travels with the installer — it isn't optional.
 
+### Implementations we learned from
+
+The 2.0.0 native capturer was not invented from nothing. The desktop duplication API hands you a cursor
+shape, and how to put that shape back into the picture -- and how to lay out the whole capture-to-encode
+pipeline -- came from following paths other people had already walked.
+
+| Project | What it gave us |
+| --- | --- |
+| [Microsoft Learn · Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nn-dxgi1_2-idxgioutputduplication) | The semantics of `AcquireNextFrame` / `GetFramePointerShape` / `PointerPosition`, including the rule that trips everybody: the cursor only comes back together with a desktop update |
+| [DirectX-Graphics-Samples · DesktopDuplication](https://github.com/microsoft/DirectX-Graphics-Samples) | The smallest working DDA + D3D11 skeleton, and how to tell a `COLOR` shape from a `MONOCHROME` one |
+| [OBS Studio · win-capture](https://github.com/obsproject/obs-studio/tree/master/plugins/win-capture) | The cursor is its own little image plus a position -- do not count on it being baked into the desktop frame; and take the cursor size from the actual resource, not from system metrics |
+| [Sunshine](https://github.com/LizardByte/Sunshine) | Proves that staying in VRAM (duplication all the way to the encoder, never touching system memory) works; also that drawing the cursor with D3D is the normal approach -- we hand that step to a second video-processor input instead and save the extra draw |
+| [FFmpeg · ddagrab](https://ffmpeg.org/ffmpeg-filters.html#ddagrab) | The capture path from 1.8.5 through 1.9.3, and the thing this release replaces; without it as a reference we would not have known where the time went |
+| [NVIDIA Video Codec SDK samples](https://github.com/NVIDIA/video-codec-sdk) | The NVENC setup sequence (`NV_ENC_PRESET_CONFIG` -> `NV_ENC_INITIALIZE_PARAMS` -> `EncodePicture` -> `LockBitstream`) and what the `P1`-`P7` presets and the `ULTRA_LOW_LATENCY` tuning tier actually mean |
+
+Not one line of code from those projects was copied into this repository; what we borrowed is the **approach**
+and the **traps**.
 This project's own code (the Python in `host/`, the Java in `android/src/`, the scripts in `tools/`, the icons and
 the documentation) is released under the **MIT** license; see [LICENSE](LICENSE).
 The icons are generated pixel by pixel in code by `android/make_icon.py` (the five `mipmap-*` densities on the phone

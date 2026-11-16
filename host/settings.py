@@ -98,6 +98,13 @@ EXTRA = (
     "notify_update",     # a newer version of the program exists
     "notify_apk",        # the phone app is older than the one shipped here
     "notify_misc",       # everything else worth a balloon
+    # 2.0.0 -- "the pointer default has been migrated" marker.  Before this
+    # release draw_mouse defaulted to off and only the ffmpeg capture path could
+    # paint the cursor, so a settings.json written by an older version holds
+    # "no pointer" that was never a decision about this behaviour.  load()
+    # turns it on once and sets this flag; after that the check box is the
+    # user's business again.
+    "pointer_default",
 )
 
 _EXTRA_DEFAULTS = {
@@ -126,6 +133,7 @@ _EXTRA_DEFAULTS = {
     "notify_update": True,
     "notify_apk": True,
     "notify_misc": True,
+    "pointer_default": False,
 }
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}
@@ -165,6 +173,11 @@ def load():
             out[k] = str(v)
         else:
             out[k] = v
+    # 2.0.0 -- see EXTRA.  An old file's draw_mouse=false predates the native
+    # path being able to draw the cursor at all; migrate it once.
+    if not out.get("pointer_default"):
+        out["draw_mouse"] = True
+        out["pointer_default"] = True
     return out
 
 

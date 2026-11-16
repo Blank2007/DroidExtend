@@ -113,7 +113,7 @@ class StreamServer(object):
         self._stop = threading.Event()
         self._accept_thread = None
         self._cv = threading.Condition()
-        # 1.10.0: there is no send queue any more.  put() writes to the socket on
+        # 2.0.0: there is no send queue any more.  put() writes to the socket on
         # the caller's thread; a phone that cannot keep up blocks the caller,
         # which blocks the capture thread, which blocks ffmpeg -- and ffmpeg
         # throwing frames away is the only place a frame can be dropped without

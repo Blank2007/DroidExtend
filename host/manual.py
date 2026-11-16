@@ -19,7 +19,7 @@ DroidExtend 使用说明   v{ver}
   是真扩展桌面，不是投屏镜像： Windows 会多出一块屏，窗口可以拖过去，
   鼠标可以移进去，手机上点一下就是在这块屏上点一下。
 
-  延迟实测 17~31 ms 上屏（主机发出到真的出现在屏幕上，其中传输 0~12 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
+  延迟实测 13 ms 上屏（主机发出到真的出现在屏幕上，其中传输 0~2 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
 
 【二、手机要先准备两件事】
   1. 打开开发者选项
@@ -85,10 +85,10 @@ DroidExtend 使用说明   v{ver}
   画质 Q      越小画质越好、码率越高。18 约等于视觉无损，默认 20。
   编码器      h264_nvenc 用显卡编码（推荐），libx264 用 CPU。
   预设        编码速度档位。p4 / veryfast 是常用的平衡点。
-  采集        ddagrab 走桌面复制（最快），gdigrab 走 GDI（兼容性最好）。
-              默认「自动」：优先 ddagrab，认不出该抓哪块屏时自动退回 gdigrab。
+  采集        原生低延迟用程序自带的采集器（桌面复制、零拷贝进显卡编码器，最快）；ddagrab 走 ffmpeg 的桌面复制（没有 NVIDIA 卡时用它）；gdigrab 走 GDI（兼容性最好）。
+              默认「自动」：先试原生，不行退 ddagrab，再不行退 gdigrab。2.0.0 起原生采集自己把鼠标指针合成进画面（视频处理器第二路输入 + alpha 流），勾不勾「显示鼠标指针」都能走原生。
   屏幕位置    虚拟屏放在主屏的哪一边。放右边就是「往右拖窗口」。
-  显示鼠标指针  把鼠标画进画面里。
+  显示鼠标指针  把鼠标画进画面里，2.0.0 起默认勾选。
   每次重新安装 APK  手机上已经装过就可以取消勾选，开始会快很多。
   手机触摸控制电脑  勾掉之后手机上的触摸不再控制电脑，画面照旧（1.9.0 起）。
   开机自动启动  登录 Windows 后自动在后台起来（托盘图标）。
@@ -119,7 +119,7 @@ DroidExtend 使用说明   v{ver}
        或把帧率降到 30。
      · 两个都正常但还是顿 -> 手机在省电降频。降帧率 / 降分辨率，
        或在手机设置里对本程序关掉省电限制。
-     · 「采集」保持「自动」或 ddagrab。
+     · 「采集」保持「自动」。
 
   Q: 浮窗上的延迟数字用久了会慢慢变大，是不是越来越卡？
   A: 不是。1.6.7 之前那个数字会把两台机器时钟的细微差别也算进去
@@ -130,7 +130,7 @@ DroidExtend 使用说明   v{ver}
   Q: 显卡占用很高，是不是有问题？
   A: 正常，而且和虚拟屏直接有关。虚拟屏不是真屏幕，但 Windows 的桌面合成器
      会把它当成一块真屏去合成——屏幕越大、刷新率越高，每帧要合成的像素越多。
-     采集（ddagrab）和编码也都在显卡上跑。所以任务管理器里看到百分之几到
+     采集和编码也都在显卡上跑。所以任务管理器里看到百分之几到
      十几的 GPU 占用是设计使然。因为虚拟屏的缘故，显卡占用可能比你平时高。
      · 想让占用降下来：优先降分辨率，其次降刷新率（两者是乘算的）。
      · 担心影响游戏：选 h264_nvenc / hevc_nvenc / av1_nvenc 这类硬件编码器，
@@ -297,7 +297,7 @@ DroidExtend manual   v{ver}
   drag windows onto it, move the mouse into it, and a tap on the phone is a
   click on that screen.
 
-  Measured latency is 17-31 ms to the glass.  The picture travels over the USB cable -- never
+  Measured latency is 13 ms to the glass (p50; p90 is 19-37 ms).  The picture travels over the USB cable -- never
   over WiFi, never through a router.
 
 [2] Two things to set up on the phone first
@@ -377,12 +377,16 @@ DroidExtend manual   v{ver}
                  lossless; the default is 20.
   Encoder        h264_nvenc encodes on the GPU (recommended), libx264 on the CPU.
   Preset         Encoder speed step.  p4 / veryfast are the usual balance.
-  Capture        ddagrab uses Desktop Duplication (fastest), gdigrab uses GDI
-                 (most compatible).  "Auto" prefers ddagrab and falls back to
-                 gdigrab when it cannot tell which screen to grab.
+  Capture        Native low latency uses the bundled capture helper (Desktop
+                  Duplication, zero-copy into the GPU encoder, fastest); ddagrab goes
+                  through ffmpeg duplication (use it when there is no NVIDIA card);
+                  gdigrab uses GDI (most compatible).  "Auto" tries native, then
+                  ddagrab, then gdigrab.  Since 2.0.0 the native helper composites
+                  the mouse pointer itself (a second video-processor input through
+                  an alpha stream), so "Draw pointer" works on either path.
   Position       Which side of the main screen the virtual one sits on.  "Right"
                  means you drag windows to the right.
-  Draw pointer   Paints the mouse cursor into the picture.
+  Draw pointer   Paints the mouse cursor into the picture; ticked by default since 2.0.0.
   Reinstall APK  Untick this once the phone already has the app; starting gets
                  much faster.
   Phone touch    Unticking this stops the phone from driving the PC; the picture
@@ -424,7 +428,7 @@ DroidExtend manual   v{ver}
      . Both fine but it still stutters -> the phone is throttling.  Lower the
        frame rate or resolution, or exempt this app from battery optimisation
        in the phone's own settings.
-     . Leave "Capture" on Auto or ddagrab.
+     . Leave "Capture" on Auto.
 
   Q: The latency number on the overlay slowly grows.  Is it getting laggier?
   A: No.  Before 1.6.7 that figure also counted the tiny difference between the two
@@ -438,7 +442,7 @@ DroidExtend manual   v{ver}
   A: No, and it follows directly from the virtual screen.  The virtual screen is
      not a real panel, but the Windows desktop compositor composites it like one
      -- more pixels and a higher refresh rate mean more to composite every
-     frame.  Capture (ddagrab) and encoding run on the card as well.  A few
+     frame.  Capture and encoding run on the card as well.  A few
      percent to a low-teens percent of GPU usage in Task Manager is by design.
      Because of the virtual screen, GPU usage may be higher than you are used to.
      . To bring it down: drop the resolution first, then the refresh rate (the

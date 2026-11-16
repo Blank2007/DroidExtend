@@ -69,6 +69,7 @@
 | [43](#43-192-a-virtual-screen-that-would-not-reach-the-desktop) | 1.9.2: activation fallback / stale modes / display numbers | a registry mode goes stale, and so does a name |
 | [44](#44-193-first-make-the-measurement-honest-then-take-the-buffers-out) | 1.9.3: the low-latency rewrite | that 8 ms was never "on the glass" |
 | [45](#45-194-check-for-updates-can-see-the-pre-releases-too) | 1.9.4: the update check can see pre-releases | `/releases/latest` never returns a beta |
+| [46](#46-200-ffmpeg-out-of-the-path-and-the-frame-the-decoder-was-waiting-for-back-in) | 2.0.0: native capture / decoder drain / pointer compositing | to the glass 17-31 ms -> **13 ms**, pointer included |
 
 ---
 
@@ -495,7 +496,7 @@ the second, after starting, compared item by item whether what it read back was 
 ### 14.2 Checking for updates
 
 `host/update.py` requests the `releases/latest` endpoint, and `re.findall(r"\d+")` extracts a version tuple for the comparison
-(`1.10.0 > 1.9.9`; a string comparison would get it wrong). Every network exception is **returned as data** rather than thrown —
+(`2.0.0 > 1.9.9`; a string comparison would get it wrong). Every network exception is **returned as data** rather than thrown —
 a failed update check is not an error, it is just "nothing found", and it should not throw up a pile of error boxes. It checks quietly once at startup, and the `工具` (Tools) menu can turn it off.
 
 ### 14.3 In-app instructions
@@ -4601,7 +4602,244 @@ The setting is `check_prerelease` in settings.json (`settings.EXTRA` and `_EXTRA
 1. **"Not found" and "not offered" are two different things.** That `/releases/latest` skips pre-releases is in the documentation; it gets read when a user asks.
 2. **Version comparison must consider pre-releases.** A digit-squeezing comparison reads the `-beta2` counter as a fourth version position.
 3. **A preview channel must be opened explicitly.** Defaulting it on pushes unstable builds at everybody; defaulting it off, for the people who ask, is what a beta is for.
-4. **In one class, two attributes with the same name: the last writer wins, quietly.** The new checkbox borrowed @BQ@pre_var@BQ@, which the encoder preset string variable already used -- so the checkbox read @BQ@"p1"@BQ@, @BQ@bool("p1")@BQ@ was always true, and the preset itself was reset to @BQ@veryfast@BQ@. Renaming it @BQ@pre_upd_var@BQ@ settled both.
+4. **In one class, two attributes with the same name: the last writer wins, quietly.** The new checkbox borrowed `pre_var`, which the encoder preset string variable already used -- so the checkbox read `"p1"`, `bool("p1")` was always true, and the preset itself was reset to `veryfast`. Renaming it `pre_upd_var` settled both.
+---
+
+## 46. 2.0.0: ffmpeg out of the path, and the frame the decoder was waiting for back in
+
+### 46.1 What was left after 1.9.3
+
+1.9.3 first made the ruler honest (measuring "actually on the glass" rather than "the phone received it"), then took the
+send queue and the capture queue's middle layer out. The number on the phone went from "8 ms (which was really just
+landing in the phone's memory)" to "17-31 ms (really on the glass)". This release goes after the two segments inside it:
+
+* **Transfer, 0-12 ms** (host puts it on the wire -> the phone has it). On the host side ffmpeg still sat in that path:
+  DDA produced a desktop texture, and it had to travel through CPU memory, a colour conversion and an NVENC upload
+  before an H.264 unit came out. ffmpeg is not wrong -- it just does not know we want latency, and it works at its own
+  thread-pool and queue pace.
+* **Decode and present, 14-26 ms** (the phone has it -> it is on the glass). 8.33 ms of that was **structural**: the
+  decoder had already handed the picture over, nobody collected it, and the picture waited until the *next* frame arrived
+  for the socket thread to collect it in passing.
+
+Both are done in this release.
+
+### 46.2 Those 8.33 ms: the picture was ready long before anybody looked
+
+The 1.9.3 decoder was "whoever reads the socket also collects the output": StreamClient fills one frame, calls feed(),
+and feed() calls drain() in passing. That looks fine, but drain() has two triggers -- "the next frame arrived" and
+"waiting for an input buffer". Between two triggers the thread blocks in readFully waiting on the network. So whenever a
+picture finished decoding, it waited for the *next* feed() before anything looked at it: half a frame on average, a whole
+frame at worst.
+
+The measurement agrees: decoding itself takes about 4 ms (fed 240 fps / 41 Mbps of synthetic stream for 18 seconds and
+never hit "decoder input queue full" once), yet dec_ms stayed at 12-13 ms, which is 8.33 + 4.
+
+The fix is to give "wait for output" its own thread:
+
+    c.dequeueOutputBuffer(info, DEQ_OUTPUT_US);   // block for 5 ms, not a spin loop
+
+A droidextend-drain daemon thread hangs on dequeueOutputBuffer, so the moment the codec produces a picture it is taken.
+The socket thread only feeds input from then on. reset() deliberately does **not** join that thread: reset() holds the
+instance lock, and recording a latency sample needs the same lock, so joining would deadlock. It sets draining = false
+and lets the thread retire on its own.
+
+The same spot fixed a real crash: after the Surface is destroyed (app backgrounded, screen rotated) the socket thread
+keeps calling feed(), so MediaCodec is called in the Released state and throws
+IllegalStateException: Invalid to call at Released state. setSurface(null) now calls reset() before clearing the field,
+so the feeding path never sees a usable codec.
+
+The "several outputs at once" question got settled too: every older picture that is ready is released with
+releaseOutputBuffer(idx, false) and only the newest one is shown. 1.9.3 tried "show only the last picture of a drain",
+which did save 5 ms, but the display rate fell from 120 to 80 -- on a 120 Hz panel that is throwing away every third
+vsync, and the user notices immediately. So the drop now only happens when several pictures really are ready at once;
+the normal case is still one picture per vsync.
+
+### 46.3 The host side: a capture helper of our own
+
+The ffmpeg path looked like this: DDA gets the desktop texture -> copy to system memory -> hand to NVENC (or libx264).
+At 2560x1600@120 one NV12 frame is 6 MB, 120 times a second, 7.7 GB/s of memory bandwidth just to move the picture to
+the encoder.
+
+tools/native/DroidCapture.cpp (one C++17 file, compiled to a 620 KB DroidCapture.exe) wires that up with no copies at all:
+
+    IDXGIFactory1 -> EnumAdapters1 -> EnumOutputs
+      -> ID3D11Device (BGRA + VIDEO)
+      -> IDXGIOutput1::DuplicateOutput
+      -> ID3D11 VideoProcessor (BGRA -> NV12, free scaling)
+      -> NVENC (RegisterResource / MapInputResource / EncodePicture / LockBitstream)
+
+It writes straight to stdout in exactly the format `ffmpeg -f h264 -` produces (Annex-B), so the host only had to swap one
+command line and every line of code behind it (split_access_units, the queue, the back pressure, the sender) stayed
+untouched. That mattered: **a new component only ships if it fits the old interface**, otherwise five error-prone places
+change at once.
+
+Three NV12 surfaces rotate: blit into (last_slot+1)%3, encode last_slot. When the desktop has not changed, the previous
+frame is encoded again (NVENC allows it) so the reference chain never breaks.
+
+### 46.4 Four ways to pace it, and the first three are wrong
+
+This took the longest and is worth writing down.
+
+The target: a 300 Hz desktop, 120 fps requested. The obvious version is AcquireNextFrame(time left until the next tick),
+then encode. It produced 143-190 fps, completely uncontrolled. The reason: DDA's AcquireNextFrame **returns immediately
+whenever there is a new frame**, no matter how long you asked to wait. So the tick had not arrived and a frame was
+encoded anyway, while the next planned time had already moved on -- ahead = next_tick - t_out grew linearly, from 156 us
+at frame 0 to 94 ms at frame 39, until it was "wait 100 ms and encode one frame".
+
+Second attempt: drop the frame when the tick is still far away, then **re-align** with next_tick = t_acq + period.
+125 fps, 4% fast: every early acceptance shortened the grid by the early amount, and the error accumulated.
+
+Third: threshold drop plus an absolute grid (next_tick += period). The rate was right this time, 119.7-120.3 fps, but 20%
+of the intervals were only 2-4 ms, i.e. two frames occasionally left together.
+
+Fourth, and what shipped: a strict threshold (drop the frame when t_acq < next_tick, **without** advancing next_tick, the
+grid keeps running), and when a loop iteration overruns, **fast-forward the grid by whole periods**
+(next_tick += missed * period) -- never "snap to now". That last part is the point: snapping to now makes the next frame
+due immediately, and that is exactly where the 2 ms bursts came from.
+
+Result: --frames 300 at 120 / 60 / 144 / 30 fps measured 120.3 / 59.9 / 144.0 / 30.0 fps. The remaining jitter is the
+beat between a 300 Hz desktop and a 120 fps request (a physical ±1.67 ms floor), and it is no longer chased.
+
+### 46.5 Four traps
+
+1. **DXGI_OUTPUT_DESC.DesktopCoordinates are logical, DPI-scaled coordinates.** A 125% panel reports 2560x1600 as
+   2048x1280. Building an encoder on that encodes a shrunken desktop. The real size is in DXGI_OUTDUPL_DESC.ModeDesc;
+   when enumerating screens the pixel size must come from EnumDisplaySettingsW(..., ENUM_CURRENT_SETTINGS, &dm)
+   (dm.dmPelsWidth / dm.dmPelsHeight).
+2. **Releasing a borrowed texture in the destructor.** view_tex comes from desktop->QueryInterface every frame and is
+   handed back every frame; releasing it once more at teardown is a use-after-free, and the first real run died with
+   exit code 3221225477 (0xC0000005).
+3. **NVENC's 12.0 API has no rc.enableTargetQuality / targetQuality LSB fields.** Those arrived in 13.x and do not
+   compile against the older headers. With -I D:\native_toolchain\include12, CQ can only be expressed through
+   rc.targetQuality.
+4. **Editing a C++ string literal with an edit tool eats the escapes.** gpu="%s" turned into bare quotes and the compiler
+   said missing terminating ". Later patches were written as line-numbered Python scripts instead.
+
+### 46.6 The pointer: a second video-processor input
+
+The desktop texture desktop duplication hands over has **no cursor in it**. The pointer is a hardware cursor, and Windows gives it to you separately: `AcquireNextFrame` reports `PointerPosition` (visible or not, and where), and the shape itself comes from `GetFramePointerShape`. ffmpeg's `ddagrab` paints it because `-draw_mouse 1` tells it to, which is why the first path (ffmpeg) always had a pointer and the capture helper of our own did not.
+
+The first answer was "if Draw pointer is ticked, fall back to ffmpeg", which pushes the choice onto the user: want a cursor, give up the low latency. That answer was rejected:
+
+> 那你就想个办法把指针画出来 没指针有什么意义
+
+So came the second version of the helper from 46.3. The approach is neither a copy to the CPU nor another shader pass: **the cursor becomes a second video-processor input**. `D3D11_VIDEO_PROCESSOR_STREAM` is an array anyway, `MaxInputStreams` is 5 on NVIDIA, and with an alpha stream on that second input (`D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM`) one `VideoProcessorBlt` does both "desktop to NV12" and "cursor blended on top with alpha". Still zero copy; the only addition is an `UpdateSubresource` whenever the shape changes (a 41x39 pointer is 6.4 KB).
+
+Three shape layouts have to be normalised into straight-alpha BGRA before the video processor will take them:
+
+- **COLOR** (32bpp): already BGRA, copied row by row using `info.Pitch`.
+- **MASKED_COLOR** (32bpp with alpha always 0): treat alpha as opaque and pass the colour through.
+- **MONOCHROME** (1bpp): the buffer is twice the pointer height, the top half is the AND mask and the bottom half the XOR mask, so (AND=1, XOR=0) is transparent, (0,0) black, (0,1) white, and (1,1) inverted -- drawn as white, the choice every screen-capture tool makes.
+
+The destination rectangle is converted with `px * W / nativeW` (the virtual screen and the main screen need not be the same size) and must be **clipped to the frame**: with the pointer parked in the bottom-right corner the hot spot plus shape sticks out, and `VideoProcessorBlt` answers `E_INVALIDARG` for any destination rectangle not fully inside the output.
+
+Three traps deserve their own paragraph.
+
+**DPI**. Without declaring DPI awareness, `DXGI_OUTPUT_DESC.DesktopCoordinates` is in scaled logical pixels (a 2560x1600 panel reports 2048x1280) and `GetCursorPos` is logical too. The helper was therefore encoding a shrunken desktop with the pointer offset on top. One `SetProcessDPIAware()` in `main()` makes both physical. This is not in 46.5 because only the pointer work exposed it.
+
+**`PointerPosition` is only valid on frames where the pointer actually moved.** The tell is `fi.LastMouseUpdateTime.QuadPart`: non-zero means a fresh position, and on every other frame `PointerPosition` reads back as `Visible=0, Position=0,0`. Trusting it every frame pinned the arrow to the top-left corner (the `ptr=0,0 vis=0` lines in `--verbose`). The fix: update the position only when `LastMouseUpdateTime` is non-zero and keep the previous one otherwise, plus seed it once at startup from `GetCursorPos` and `GetCursorInfo(CURSOR_SHOWING)`, or there is no pointer until the first move.
+
+**A desktop texture from `AcquireNextFrame` may not be used as an input view once that window closes.** This one took the longest. When the pointer moves over a static desktop the pacing controller usually throws those frames away as "too early"; to keep the pointer from freezing I added a blit on the drop path -- and got `VideoProcessorBlt` failing with `0x80070057` (`E_INVALIDARG`) on the second call, only when a second input was present (a temporary `DX_NOSUB=1` switch that skipped the substream ran 360 frames without a single error). The cause is that the duplicated desktop texture stops being a valid video-processor input once `ReleaseFrame` has been called (usable within the same round, not across rounds); an `AddRef` on the input view only pushed the crash from frame 1 to frame 10, and blitting into a different output slot changed nothing. The answer is one `CopyResource` per frame into a BGRA texture the helper owns (16 MB per frame, about 1.9 GB/s against a few hundred GB/s of memory bandwidth, under 0.3 ms measured), and the blit always points at that owned texture.
+
+The pointer is on by default (`--pointer 0` turns it off), and `draw_mouse` is ticked by default on the host side too, so both backends finally mean the same thing: ticked or not, the native low-latency path runs.
+
+### 46.7 Measured
+
+Host-side unit test (t_cap.py, same desktop, same 2560x1600@120, 8 seconds each):
+
+| | startup | rate | interval p50 / p90 / p99 / max |
+|---|---|---|---|
+| native | **1.37 s** | 119.5 fps | 8.31 / 13.69 / 18.90 / **27.50** ms |
+| ddagrab | 3.65 s | 134.3 fps | 3.85 / 14.47 / 31.33 / **514.34** ms |
+
+That 514 ms is ddagrab's own queue piling up during a hiccup; our capture queue holds 6 frames and then blocks upstream,
+so it cannot pile up.
+
+End to end (same tablet, Extend mode, 20 seconds):
+
+| | p50 to glass | p90 | max | transfer | decode+present | the host log line |
+|---|---|---|---|---|---|---|
+| 1.9.3 | 17-31 (average) | - | 44-61 | 0-12 | 14-26 | `手机 … · 20 ms` |
+| 2.0.0 native | **13** | 19-37 | 43-56 | 0-2 | 12-16 | `采集 118 fps · 发送 14.0 Mbps · 手机 120 fps / 显示 120 fps · 13 ms` |
+| 2.0.0 ddagrab | 13-18 | 19-47 | 47-156 | 0-2 | 12-20 | `采集 121 fps · 发送 22.2 Mbps · 手机 120 fps / 显示 121 fps · 13 ms` |
+
+Two things are worth saying:
+
+* **13 ms is close to the floor of this path.** A stream frame is 8.33 ms apart at 120 fps, decoding is 4 ms, and one
+  vsync alignment on top puts the floor around 12-13 ms. The 8.33 ms that 1.9.3 was wasting is gone.
+* **Native and ddagrab tie on latency.** That contradicts "the shorter path must be faster", and the reason is that from
+  this release on the host is no longer the bottleneck: capture plus encode is 2-4 ms, and everything left is "one frame
+  interval + decode + vsync". The native path pays off elsewhere -- 2.3 seconds faster startup, 7.7 GB/s of memory traffic
+  gone, a stable tail (max around 50 ms where ddagrab spikes past 150 ms) and **it works without ffmpeg installed**.
+
+The phone log line now looks like this (latency_p50_ms is the median of the last 256 frames, no longer the last sample):
+
+    perf fps=119 mbps=13.77 latency_p50_ms=13 latency_p90_ms=34 latency_max_ms=49 dropped_out=13 net_ms=0 dec_ms=14 samples=51
+
+### 46.8 What this release adds, and its edges
+
+* The "采集" (capture) dropdown gained **原生低延迟（需 NVIDIA 显卡）**, and auto now tries native -> ddagrab -> gdigrab.
+* **The pointer is drawn anyway, and on by default.** The helper composites the cursor shape as a second
+  video-processor input (46.6), so whether "show the mouse pointer" is ticked or not, the native path runs;
+  `--pointer 0` turns it off.
+* Pointer measured end to end over 20 seconds: 119 fps / 14.5 Mbps / p50 11-12 ms, with the arrow at virtual-screen
+  (440,500) in a phone screenshot, shape and alpha edges matching the desktop.
+* It needs an NVIDIA card and H.264. Without them the log says "原生采集不可用" once and the old path runs.
+* On multi-GPU machines --list lists every output of every adapter and the host picks by the virtual screen's rectangle
+  (exact position and size, then unique size, then unique position), falling back when nothing matches.
+* dropped_out is a new counter: pictures dropped because several were ready at once. Measured 20-35 in 20 seconds (about
+  1.5 per second) while the display still ran at 120.
+
+### 46.9 The code gets read once more, and a look at how others do it
+
+I did not ship the capturer the day it started working. I had another AI read `tools/native/DroidCapture.cpp` end to end first — nine hundred-odd lines written across two days, with pointer compositing bolted on last, and I did not trust its resource lifetimes. It found more than I expected, three of them real:
+
+**1. The colour range was `UNDEFINED`.** The code said `cs.Nominal_Range = 0` and I read that as "0-255"; `d3d11.h` says the enum is `UNDEFINED = 0`, `16_235 = 1`, `0_255 = 2`. So the conversion was left to the driver: it may guess right, and when it guesses wrong the whites get shaved. The input is now explicitly 0-255 (the desktop texture is full range) and the output explicitly 16-235 (H.264 without a VUI is always read as limited).
+
+**2. The exit codes did not match the documentation.** Exit 3 means "the display mode changed, rebuild the process", but a failing `EnumAdapters1` or `EnumOutputs` also returned 3. The host treats those two in opposite ways: one is fixed by rebuilding, the other fails a hundred rebuilds in a row. Only a real ACCESS_LOST is 3 now; enumeration failures are 2.
+
+**3. `DXGI_ERROR_INVALID_CALL` was treated as a mode change.** In desktop duplication this HRESULT has exactly one source: calling `AcquireNextFrame` again without releasing the previous frame — my own bug, which should not disguise itself as "the monitor was unplugged" and leave the host waiting.
+
+Same pass, smaller things: `DuplicateOutput` now retries 20 times 250 ms apart (lock screen, UAC secure desktop, four duplications already open); `DXGI_ERROR_SESSION_DISCONNECTED` counts as 3; when the pointer input view fails, `pw/ph` are cleared so the next frame can rebuild it (before, `return false` left the cached size blocking every retry); the `MORE_DATA` from `GetFramePointerShape` gets three bounded retries; teardown releases `pview/ptex`; `now_us()` multiplies after dividing (the old `QuadPart * 1000000` overflowed int64 after ten days); `--width 1` is rejected outright; `--list` falls back to the desktop rect when the display mode cannot be read, instead of printing `pixel=0x0`, which the host regex happily accepted.
+
+**A hole I dug myself, worth its own paragraph.** The review pointed out that nothing in the file calls `timeBeginPeriod(1)`, so the millisecond timeouts sit at the mercy of the 15.6 ms timer. That sounded like a free fix, so I added it. It compiled, the frame-rate regression still read 120.1 fps, everything looked fine. Then the end-to-end run before packaging went straight into the ditch: latency to the glass on the phone went from 13 ms to 30 ms, and the bitrate fell from 14 Mbps to 9 Mbps.
+
+The reason took a while to see: the main loop is "emit a frame on the tick; use the newest picture if there is one, otherwise repeat the previous one". With a precise timer the wait really does return after those few remaining milliseconds, and at that instant the desktop has not produced a new frame yet, so the repeat branch runs. The coarse 15.6 ms timer was accidentally doing the right thing: the wait stretched to a dozen milliseconds, and by the time it returned a fresh frame was always there to collect. Measured, frames carrying new content fell from 59-62% to 8%: nine frames out of ten were repeats of the previous picture, which is exactly the lower bitrate and higher latency the phone reported.
+
+So the fix was not to keep `timeBeginPeriod` and patch around it, but to remove it and write down in the code why it must not come back. The right answer is to wait on `IDXGIOutputDuplication::GetFrameLatencyWaitableObject()`, which does not depend on timer granularity at all; this version does not do that, and it is listed under what this version does not do.
+
+
+What was left alone, and why: mixed-DPI `GetCursorPos` versus `fi.PointerPosition` coordinate systems (this only affects the seed position before the first mouse event, after which both come from DDA); `NEED_MORE_INPUT`, which cannot happen with `frameIntervalP=1`; a few unchecked `GetDesc` results; naming nits.
+
+Two regressions after the rebuild: `--frames 360 --fps 120` ran at 120.2 fps with gaps p50 8.29 ms / p90 9.94 ms / max 11.29 ms, and the pointer test reported `ptr=697,497 vis=1 shape=1 41x39` on every frame with the white arrow and its alpha edge intact.
+
+With the code read, I had it go and look at how everybody else puts the pointer back into the picture — six implementations: Sunshine, OBS's win-capture, Microsoft's own DesktopDuplication sample, FFmpeg's ddagrab, RustDesk, and NVIDIA's NvFBC.
+
+The answer was a surprise: **none of them use a second video-processor input.** Five of the six agree with each other — the CPU normalises the shape into "an image with alpha" and "an image to invert with", then draws two quads in their own render pass: one plain src-over, one with `INV_DEST_COLOR` / `INV_SRC_COLOR` reverse blending. RustDesk does not composite the cursor in the capture layer at all and leaves it to the client. Our substream has no precedent in the open-source world.
+
+The cost is specific: a substream blends in exactly one way, src-over, while two of DDA's three pointer shapes need reverse blending — `MASKED_COLOR` pixels with alpha=0xFF are documented as **XOR against the screen pixel**, and so is `MONOCHROME`'s (AND=1, XOR=1) corner. src-over cannot express XOR, so this release approximates: the masked-colour XOR area is drawn opaque in its own colour, and the monochrome invert area is drawn white. The arrow you see every day is a `COLOR` shape (measured `shape=1`) and is not affected at all; only programs that really use an XOR cursor (a few CAD tools, old I-beam cursors) will look slightly off.
+
+I chose not to rewrite it in this release: the structure works, it has been measured, and the latency target is met; adding a shader render pass for one edge-case shape would re-import the risk we just removed. The step that should be taken is written down here instead — the `CopyResource` is already there, so moving the cursor from "second input" to "one quad drawn into that BGRA texture" costs no extra bandwidth, gets all three shapes right, and drops the "only NVIDIA's `ALPHA_STREAM` is reliable" premise.
+
+Three more things came out of the same survey and were left alone in this release:
+
+- **Do not pace at a 2.5× ratio.** A 300 Hz desktop and a 120 fps request means every frame alternates between two vsyncs and three; the average rate is exact but the gap keeps jittering by ±1 vsync. Integer ratios (100 or 150 fps on 300 Hz, 120 on 240 Hz) are the smooth ones.
+- **Waiting for a frame has a better primitive than sleeping.** `IDXGIOutputDuplication::GetFrameLatencyWaitableObject` is DDA's own waitable handle; waiting on it is one layer of jitter less than sleeping to the next grid point.
+- **Do not let the display sleep during a long session.** Display sleep makes DDA rebuild over and over (Sunshine calls `SetThreadExecutionState` for exactly this). Not done here, because "the screen stays awake while mirroring" is a behaviour change and should be asked for first.
+
+> Lesson: exit codes are part of the interface — whatever the documentation promises has to be what the code does. And an `UNDEFINED` default that "the driver sometimes gets right" is luck, not an implementation.
+### 46.10 Lessons
+
+1. **Structural latency and implementation latency are different bills.** 8.33 ms was not "slow code", it was "waiting in
+   the wrong place" -- a thread fixed it, and optimising the loop would not have.
+2. **A new component only ships if it fits the old interface.** The native capture helper emits standard Annex-B and the
+   host swapped one command line; otherwise capture, splitting, queueing, back pressure and sending would all change at
+   once, each with its own way to be wrong.
+3. **"Faster" is not "shorter path".** Both capture paths tied on latency, and the real gains are startup time, memory
+   bandwidth, tail latency and one dependency less. Saying that clearly is worth more than a nicer number.
+4. **Look at jitter through percentiles.** A "last sample" number hides both a 3 ms improvement and a 30 ms regression;
+   p50/p90 tell the truth.
+
 
 ---
 

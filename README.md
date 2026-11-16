@@ -19,7 +19,7 @@
 
 * 画质、帧率、分辨率、刷新率、码率**全部可调**
 * 走 USB 数据线（adb），**不依赖 Wi-Fi、不需要同网段、不装任何第三方 App**
-* 电脑端：Python + ffmpeg（NVENC 硬件编码）
+* 电脑端：Python + 自带的原生采集器（桌面复制 → NVENC 硬件编码，不经过 ffmpeg），没有 NVIDIA 卡时自动用 ffmpeg 的 ddagrab
 * 手机端：随包附带的 `dist/DroidExtend.apk`
 
 ---
@@ -40,10 +40,10 @@
 |---|---|
 | 🖥️ **真扩展桌面** | 不是镜像投屏。`Win+P` 里会多出一块显示器，窗口能拖过去，鼠标能直接在上面点 |
 | 🔌 **纯 USB** | 走 `adb reverse` 隧道，不依赖 Wi-Fi、不用同网段、手机端不装任何第三方 App |
-| ⚡ **低延迟** | 实测 **17–31 ms 上屏**（1.9.3 起的新口径：主机发出 → 真的出现在屏幕上；其中传输 0–12 ms、解码与呈现 14–26 ms） |
+| ⚡ **低延迟** | 实测 **13 ms 上屏**（2.0.0 起的新口径：主机发出 → 真的出现在屏幕上，p50 13 ms / p90 19–37 ms；其中传输 0–2 ms、解码与呈现 12–16 ms） |
 | 👆 **能反控** | 手机上的点按 / 双击 / 拖动 / 长按 0.5 秒=右键 / 双指滚动，直接注入到 Windows |
 | 🧹 **停止即消失** | 点「停止」或直接退出程序，虚拟屏立刻从系统里摘掉，不留幽灵显示器；只拔线没点停止时，屏会先留在系统里，重连后点一次停止就收回 |
-| 🎛️ **全硬件链路** | `ddagrab`(桌面复制) → `h264_nvenc`(GPU 编码) → `MediaCodec`(手机硬解)，采集编码几乎不吃 CPU |
+| 🎛️ **全硬件链路** | 原生采集(零拷贝桌面复制) → `h264_nvenc`(GPU 编码) → `MediaCodec`(手机硬解)，采集编码几乎不吃 CPU；没有 NVIDIA 卡时自动回落 ffmpeg `ddagrab` |
 | 📦 **开箱即用** | 37 MB 的安装包，ffmpeg / adb / 驱动 / APK 全在里面，装完不用再准备任何东西 |
 | 🔄 **程序内更新** | 「检查更新」直接在程序里下载新版本，校验大小 / SHA256 / 文件格式，**校验不过就不装**，不用自己跑浏览器 |
 
@@ -146,7 +146,7 @@
 | **码率控制** | `VBR`（质量优先，静止桌面几乎不占带宽）／`CBR`（恒定码率，剧烈运动画面更稳） |
 | **画质 Q** | 越小画质越好、码率越高。`18~20` 基本视觉无损，`24` 以上能看出块效应 |
 | **编码器** | **逐个实测过**才列出来。本机可用：`h264_nvenc` / `hevc_nvenc` / `av1_nvenc`（NVIDIA）、`h264_amf` / `hevc_amf`（AMD 核显）、`libx264` / `libx265`（纯 CPU 兜底）。编译进去了但这台机器跑不起来的（本机是 `*_qsv` 和 `av1_amf`）会被从菜单里去掉并在日志里说明 |
-| **采集** | `auto` 会自动选 ddagrab（桌面复制 API，零拷贝进 NVENC）；老显卡/异常时改 gdigrab |
+| **采集** | `auto` 先试**原生低延迟**（程序自带的 `tools\native\DroidCapture.exe`，桌面复制 API 零拷贝进 NVENC，不需要 ffmpeg），不可用再退 ddagrab，最后 gdigrab。2.0.0 起默认走原生，而且**原生采集自己画鼠标指针**：桌面复制交来的光标形状被当作视频处理器的第二路输入、按 alpha 流合成进同一次 blit，不额外拷帧，位置、形状、透明边缘都和桌面上一致，所以勾不勾「显示鼠标指针」都能走原生 |
 | **采集显卡（只读）** | 这次是哪块显卡在抓画面。双显卡机器上旧的 ddagrab 只看得到一张卡，1.8.5 起会把每张卡的输出都探一遍，日志里写「采集显卡: 显卡0 "NVIDIA …"（输出 #1） ／ 编码: NVIDIA 显卡的 NVENC」 |
 | **APK 版本（只读）** | 手机上的 App 与随包 APK 比 versionCode，手机端旧了会弹一次确认（见上一节） |
 | **屏幕位置** | 虚拟屏摆在主屏的右／左／上／下 |
@@ -267,7 +267,7 @@ Windows 设置里关掉了本程序的通知、或者开着「专注助手」—
 本机（RTX 5070 Laptop + Redmi 24091RPADC，Android 16，1920×1080@60）实测：
 
 ```
-采集 ddagrab（桌面复制）→ h264_nvenc → adb reverse → 手机 MediaCodec 硬解
+采集 ddagrab（1.5～1.9 的路径）→ h264_nvenc → adb reverse → 手机 MediaCodec 硬解
 server: sent 1482 帧  dropped 0  bytes 7,614,539
 手机:   Qin 304  Render 303  Drop 0  Avg 16ms/frame     ← 全部帧都渲染出来了
 ```
@@ -307,6 +307,7 @@ server: sent 1482 帧  dropped 0  bytes 7,614,539
 并拆成两段：`net_ms` 是「主机发出 → 手机收到」，`dec_ms` 是「手机收到 → 上屏」。本机实测：
 
 ```
+2.0.0 latency_p50_ms 13      latency_p90_ms 23~37  latency_max 43~56  net_ms 0~2  dec_ms 12~16
 1.9.3  latency_avg_ms 17~31   latency_max 44~61   net_ms 0~12   dec_ms 14~26
 1.5.x  latency_avg_ms  5~11   latency_max 26~45   （旧口径：只到「手机收到」）
 ```
@@ -323,7 +324,7 @@ server: sent 1482 帧  dropped 0  bytes 7,614,539
 
 * `fps` 低、`latency` 正常 → **数据线**带宽不够。点电脑端的「测一下数据线速度」，
   低于 40 Mbps 就先换线（实测同一台手机换线能差 40 倍：13.7 Mbps ↔ 597 Mbps）。
-* `fps` 正常、`latency` 高（1.9.3 起正常是 17–31 ms，长期 > 60 ms 就算高）→ 编码或解码在排队。换一个更轻的编码器
+* `fps` 正常、`latency` 高（2.0.0 起正常是 p50 13 ms / p90 19–37 ms，长期 > 60 ms 就算高）→ 编码或解码在排队。换一个更轻的编码器
   （本机最快的是 `h264_nvenc`），或者把帧率降到 30。
 * 两个数字都正常，画面还是一顿一顿 → 手机在省电降频，见下面「手机侧」。
 * 连电脑上鼠标都开始飘 → 显卡被别人占满了，见下一条。
@@ -407,14 +408,14 @@ droid-extend/
 ├─ host/                          ← Windows 端（Python）
 │   ├─ app.py                    GUI 主程序
 │   ├─ session.py                一次投屏会话：显示 → 采集 → 编码 → USB → 手机
-│   ├─ capture.py                ffmpeg 命令行、ddagrab 输出探测、H.264 访问单元切分
+│   ├─ capture.py                ffmpeg 命令行、原生采集器调用、ddagrab 输出探测、H.264 访问单元切分
 │   ├─ server.py                 TCP 推流服务（握手 + 帧队列 + 丢帧策略）
 │   ├─ touch.py                  触摸注入服务（SendInput 绝对坐标）
 │   ├─ win_display.py            CCD / ChangeDisplaySettingsEx 封装（cpp 级显示控制）
 │   ├─ vdd.py                    虚拟显示驱动的安装与状态检查
 │   ├─ adb.py                    adb 封装（reverse 隧道、安装、启动）
 │   ├─ linkspeed.py              USB 链路测速
-│   ├─ paths.py                  定位随包的 adb / ffmpeg / JDK / SDK，以及数据目录
+│   ├─ paths.py                  定位随包的 adb / ffmpeg / 原生采集器 / JDK / SDK，以及数据目录
 │   ├─ settings.py               设置的读写（原子写 + 白名单 + 旧位置迁移）
 │   ├─ applog.py                 写 DroidExtend.log（2 MB 滚动，失败绝不拖垮程序）
 │   ├─ apkver.py                 读 APK 里的 versionCode / versionName（1.8.5 起用来比对手机端）
@@ -435,6 +436,7 @@ droid-extend/
 ├─ tools/                         ← 随包工具链与安装脚本
 │   ├─ platform-tools/adb.exe
 │   ├─ ffmpeg/bin/ffmpeg.exe
+│   ├─ native/DroidCapture.exe    ← 2.0.0 起默认的采集器（源码 DroidCapture.cpp 就在同目录）
 │   ├─ sdk/                      Android build-tools 34.0.0 + platform 34
 │   ├─ vdd/                      Virtual Display Driver 驱动文件 + nefcon
 │   └─ vdd_install.ps1           驱动安装脚本（管理员）
@@ -454,8 +456,8 @@ droid-extend/
 ```
 ┌────────────── Windows ──────────────┐         ┌──── Android ────┐
 │ 虚拟显示驱动 (IDD) → 第二块屏幕       │         │                 │
-│        ↓ 桌面复制 API (ddagrab)      │         │  SurfaceView    │
-│   ffmpeg + NVENC 硬件编码 H.264      │         │      ↑          │
+│        ↓ 桌面复制 API (原生)         │         │  SurfaceView    │
+│   DroidCapture / ffmpeg + NVENC       │         │      ↑          │
 │        ↓ 访问单元 (Annex-B)          │  USB    │  MediaCodec     │
 │   TCP 127.0.0.1:27183 ───────────────┼────────→│  硬件解码        │
 │   TCP 127.0.0.1:27184 ←──────────────┼─────────│  触摸事件        │
@@ -466,8 +468,10 @@ droid-extend/
 1. **`win_display.py`** 用 Windows CCD API 把虚拟屏激活并摆到主屏旁边，
    再用 `ChangeDisplaySettingsEx` 设成你选的分辨率/刷新率；停止时用
    `SetDisplayConfig(SDC_USE_SUPPLIED_DISPLAY_CONFIG)` 只摘掉虚拟屏那一条路径。
-2. **`capture.py`** 用 ddagrab 从桌面复制 API 抓那一块矩形——D3D11 纹理直接进 NVENC，
-   不经过内存拷贝；启动时会先探测 `output_idx` 到显示器的映射，并丢掉首帧黑帧。
+2. **`capture.py`** 默认用自带的 `tools\native\DroidCapture.exe` 抓那一块矩形：桌面复制拿到的 D3D11 纹理
+   经视频处理器转成 NV12 直接进 NVENC，全程零拷贝，也不需要 ffmpeg（这是 2.0.0 起的默认路径）。
+   没有 NVIDIA 卡或 H.264 时退回 ffmpeg 的 ddagrab——同样是零拷贝进 NVENC，也同样是先探测
+   `output_idx` 到显示器的映射、并丢掉首帧黑帧。
    读 ffmpeg 输出用 `os.read()` 而不是 `read()`，避免 64 KB 缓冲把延迟抬到 ~100 ms。
    ddagrab 只认 DXGI **输出索引**（不认设备名，也没有桌面坐标选项），而分辨率**不是身份**：
    `1920x1080` 既是全世界最常见的笔记本屏，也是虚拟屏的默认值。所以当有多个输出尺寸相同时，
@@ -479,7 +483,7 @@ droid-extend/
    每帧前面带一个主机时间戳，手机据此算出端到端延迟并显示出来。
 4. 手机端 **`VideoDecoder.java`** 从码流里自己抓 SPS/PPS 配置 MediaCodec，
    硬解后直接渲染到 `SurfaceView`。1.9.3 起不再「积压就跳到下一个关键帧」—— 丢一个 P 帧会让后面
-   全花；现在是读慢了就让 TCP 窗口把压力一路顶回主机，由 ddagrab 在编码之前丢帧。
+   全花；现在是读慢了就让 TCP 窗口把压力一路顶回主机，由采集端在编码之前丢帧。
 5. 触摸事件反向走 **`tcp:27184`**：手机按画面宽高比归一化坐标 → 主机 **`touch.py`**
    用 `SendInput` 以整块虚拟桌面的绝对坐标注入成真实鼠标。
 
@@ -652,7 +656,7 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 
 脚本在 `tools/installer/DroidExtend.iss`，要点：
 
-* 只打包**运行期**需要的文件：`DroidExtend.exe`、`_internal\`、`tools\ffmpeg`、
+* 只打包**运行期**需要的文件：`DroidExtend.exe`、`_internal\`、`tools\ffmpeg`、`tools\native`、
   `tools\platform-tools`、`tools\vdd`、`tools\vdd_install.ps1`、`dist\DroidExtend.apk`。
   **`tools\sdk`（251 MB）和 `tools\vdd\*.zip` 不打包** —— 它们只在重建 APK 时用得上，
   正是它们把项目从 34 MB 撑到 391 MB。
@@ -677,7 +681,8 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 | --- | --- | --- | --- |
 | **Virtual Display Driver (VDD)** | 让 Windows 真的多出一块虚拟显示器 —— “真扩展桌面”的地基 | MIT | [VirtualDrivers/Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) |
 | **nefcon** | 静默安装／卸载设备驱动（代替手工开设备管理器） | MIT | [nefarius/nefcon](https://github.com/nefarius/nefcon) |
-| **FFmpeg** | `ddagrab` 桌面复制 + `h264_nvenc` 硬件编码（以独立进程调用） | GPL-3.0 | [ffmpeg.org](https://ffmpeg.org/) |
+| **FFmpeg** | `ddagrab` 桌面复制 + `h264_nvenc` 硬件编码（以独立进程调用；2.0.0 起是原生采集器的回落路径） | GPL-3.0 | [ffmpeg.org](https://ffmpeg.org/) |
+| **NVIDIA Video Codec SDK** | `nvEncodeAPI.h` 头文件与 NVENC 零拷贝接口（`RegisterResource` / `MapInputResource`）；2.0.0 起原生采集器直接调它 | NVIDIA SDK License | [developer.nvidia.com/video-codec-sdk](https://developer.nvidia.com/video-codec-sdk) |
 | **Android SDK Platform-Tools (adb)** | 安装手机端 APK、建立两条 `adb reverse` 隧道 | Apache-2.0 | [developer.android.com](https://developer.android.com/tools/releases/platform-tools) |
 | **R8 / D8** | 只在**构建** APK 时把 Java 编成 dex（运行期不分发） | BSD-3-Clause | [r8.googlesource.com/r8](https://r8.googlesource.com/r8) |
 | **Python / Tcl-Tk** | 程序本体与图形界面 | PSF-2.0 / BSD-style | [python.org](https://www.python.org/) · [tcl.tk](https://www.tcl.tk/) |
@@ -689,6 +694,21 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 `帮助 → 第三方组件许可` 可以直接打开）。MIT / Apache-2.0 / BSD 这些许可都要求
 「分发二进制时一并附上声明」，所以这份文件是随安装包一起走的，不是可选项。
 
+### 参考过的实现
+
+2.0.0 的原生采集器不是凭空想出来的。桌面复制 API 自带光标形状，怎么把这块形状贴回画面、
+整条「采集 → 编码」流水线该怎么摆，都是照着别人踩过的路走的。
+
+| 项目 | 它给了什么 |
+| --- | --- |
+| [Microsoft Learn · Desktop Duplication API](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nn-dxgi1_2-idxgioutputduplication) | `AcquireNextFrame` / `GetFramePointerShape` / `PointerPosition` 的语义，包括「光标只随桌面更新一起回来」这条最容易踩空的规则 |
+| [DirectX-Graphics-Samples · DesktopDuplication](https://github.com/microsoft/DirectX-Graphics-Samples) | DDA + D3D11 的最小可用骨架；`COLOR` / `MONOCHROME` 两种光标形状的判定思路 |
+| [OBS Studio · win-capture](https://github.com/obsproject/obs-studio/tree/master/plugins/win-capture) | 光标是「单独一张图 + 一个位置」，不该指望它烧在桌面帧里；光标尺寸要按实际资源的宽高取，不要用系统度量 |
+| [Sunshine](https://github.com/LizardByte/Sunshine) | VRAM 直通（桌面复制 → 编码器全程不落系统内存）这条路走得通；也证明在 D3D 里画光标是常规做法 —— 我们把这一步交给视频处理器的第二路输入，省掉一次额外的绘制 |
+| [FFmpeg · ddagrab](https://ffmpeg.org/ffmpeg-filters.html#ddagrab) | 1.8.5 到 1.9.3 用的采集路径，也是这一版要替换掉的对象；有它做对照才知道慢在哪 |
+| [NVIDIA Video Codec SDK 示例](https://github.com/NVIDIA/video-codec-sdk) | NVENC 的配置流程（`NV_ENC_PRESET_CONFIG` → `NV_ENC_INITIALIZE_PARAMS` → `EncodePicture` → `LockBitstream`）与 `P1`–`P7` 预设、`ULTRA_LOW_LATENCY` 档的含义 |
+
+上面这些项目，代码一行都没有复制进本仓库，参考的是**做法**和**踩过的坑**。
 本项目自己的代码（`host/` 的 Python、`android/src/` 的 Java、`tools/` 的脚本、
 图标和文档）以 **MIT** 许可发布，见 [LICENSE](LICENSE)。
 图标是 `android/make_icon.py` 用代码画像素生成的（手机端五档 mipmap 与根目录的 `DroidExtend.ico`），
