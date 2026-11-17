@@ -70,6 +70,7 @@
 | [44](#44-193-first-make-the-measurement-honest-then-take-the-buffers-out) | 1.9.3: the low-latency rewrite | that 8 ms was never "on the glass" |
 | [45](#45-194-check-for-updates-can-see-the-pre-releases-too) | 1.9.4: the update check can see pre-releases | `/releases/latest` never returns a beta |
 | [46](#46-200-ffmpeg-out-of-the-path-and-the-frame-the-decoder-was-waiting-for-back-in) | 2.0.0: native capture / decoder drain / pointer compositing | to the glass 17-31 ms -> **13 ms**, pointer included |
+| [47](#47-210-frame-pacing-stops-guessing-and-the-encoder-learns-hevc) | 2.1.0: high-resolution frame pacing / HEVC end to end | p90 30-37 ms -> **17-19 ms** |
 
 ---
 
@@ -4839,6 +4840,216 @@ Three more things came out of the same survey and were left alone in this releas
    bandwidth, tail latency and one dependency less. Saying that clearly is worth more than a nicer number.
 4. **Look at jitter through percentiles.** A "last sample" number hides both a 3 ms improvement and a 30 ms regression;
    p50/p90 tell the truth.
+
+
+## 47. 2.1.0: Frame pacing stops guessing, and the encoder learns HEVC
+
+When 2.0.0 went out, the headline said "13 ms to the glass". That number was real, but it only told half the story: the median was 13 ms, the 90th percentile was 30-37 ms. Ten frames in a hundred arrived 30 ms or later. Nobody counts percentiles while using a screen; they say "it stutters sometimes".
+
+This release does two things: it turns "when the next frame is due" from a guess into a calculation, and it opens the encoder up from H.264-only to HEVC. Along the way two of my own bugs came out -- the latency statistic went to zero for a whole session, and the first fix I wrote for it doubled the tail latency again.
+
+### 47.1 Where those thirty milliseconds came from
+
+2.0.0 paced the capture loop like this: work out when the next frame is due (`next_tick`), advance an absolute grid, take a frame with `AcquireNextFrame` when the time comes, and re-encode the previous frame when there is nothing new. The weak part was "when the time comes": it was approximated with `AcquireNextFrame(timeout_ms)` and `std::this_thread::sleep_for`, and the default Windows timer resolution is 15.625 ms.
+
+A 120 fps frame has a budget of 8.33 ms. When something ran one beat late, the grid skipped a whole period and that frame's budget vanished -- that is where those ten frames came from. It should not happen at all: the capture thread has almost nothing to do (2-3 ms of encoding, the rest is waiting).
+
+### 47.2 Four ways to wait, three of them worse
+
+The obvious answer is `IDXGIOutputDuplication::GetFrameLatencyWaitableObject()`. The documentation is clear: wait on that handle and you know a frame is available, no timeout guessing. The problem is that MinGW's `dxgi1_2.h` declares `IDXGIOutputDuplication` only up to `GetFramePointerShape`, without that method. Calling it through raw vtable slots, out of curiosity: slot 12 returned `0x80070057` (E_INVALIDARG), slots 13 and 14 returned `0x887a0001` (DXGI_ERROR_INVALID_CALL), slot 15 handed back something that is not a handle at all, and slot 16 crashed. That route does not exist on this DXGI runtime. Written down here so nobody tries it again.
+
+So the clock had to be fixed in user space. `timeBeginPeriod(1)` first? It was a disaster: latency went from 13 ms to 30 ms and the bitrate fell from 14 Mbps to 9 Mbps. The cause was quick to find -- the loop means "one frame per tick: use a new picture if there is one, otherwise re-encode the previous one". With a finer timer, `AcquireNextFrame(remaining_ms)` really did wake up after two or three milliseconds, before the desktop had produced anything, so nine out of ten output frames were repeats. The coarse 15.6 ms timer had been accidentally doing the right thing by stretching the wait.
+
+Second attempt: sleep precisely until `next_tick` with a waitable timer, then give `AcquireNextFrame` half a period as a timeout. On a single machine it looked perfect (119.8-120.1 fps, 0-1% repeat frames). End to end it fell apart: capture dropped to 92 fps and latency went up. The 2 ms timeout was the reason -- paying 2 ms per frame squeezed out the blit and encode budget and the whole period got skipped. A quarter period plus an idle fallback only got back to 102 fps.
+
+The version that shipped is "high-resolution timer plus zero-timeout sampling": sleep until `next_tick` with a `CreateWaitableTimerExW` opened with `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, then call `AcquireNextFrame(0)` -- take the new picture if there is one, otherwise re-encode the previous frame, which costs a few KB as a P frame.
+
+```cpp
+static HANDLE g_timer;
+
+static bool timer_open() {
+    g_timer = CreateWaitableTimerExW(nullptr, nullptr,
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    return g_timer != nullptr;
+}
+
+// Sleep until due_us, then return the time actually woken.
+static uint64_t wait_until(uint64_t due_us) {
+    uint64_t now = now_us();
+    if (!g_timer || due_us <= now) return now;
+    LARGE_INTEGER li;
+    li.QuadPart = -(LONGLONG)((due_us - now) * 10);   // 100 ns units, relative
+    if (!SetWaitableTimer(g_timer, &li, 0, nullptr, nullptr, FALSE)) return now;
+    WaitForSingleObject(g_timer, INFINITE);
+    return now_us();
+}
+```
+
+`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` only exists after Windows 10 1803, so older SDK headers do not have it and the code carries an `#ifndef` fallback. `timeapi.h` is still included but `timeBeginPeriod` is never called -- the comment in `clock_init()` is there for the next person who thinks about adding it back "as an optimisation":
+
+> Deliberately NO timeBeginPeriod(1): it made the whole pipeline slower, see the note in the loop.
+
+### 47.3 With the timeout at zero, pacing is really pacing
+
+Single machine (main screen 2560x1600@300Hz, no network in the way):
+
+```text
+frames 360  span 2987.7 ms -> 120.2 fps (asked 120)
+gap ms: p50 8.29  p90 9.94  max 11.29  min 5.19
+```
+
+The gap between frames sits on the 8.33 ms grid, and 90% of frames are within 1.6 ms of it. End to end came back as well: 120 fps captured, 15-17 Mbps sent, 120 fps on the phone, and p90 fell from 30-37 ms to 17-19 ms.
+
+### 47.4 HEVC: one GUID on the capture side, one MIME on the phone
+
+The 2.0.0 capturer only produced H.264. HEVC carries the same picture in fewer bits, and the request was "do not trade picture quality", so opening HEVC up is the direct win.
+
+The NVENC side is small: `codecGUID` becomes `NV_ENC_CODEC_HEVC_GUID`, the profile becomes `NV_ENC_HEVC_PROFILE_MAIN_GUID`, and the encoder config switches from `h264Config` to `hevcConfig` (with `chromaFormatIDC = 1` for 4:2:0). Preset, tuning, GOP, VBR/CBR and CQ are unchanged. A new `--codec h264|hevc` flag, still defaulting to h264.
+
+The phone side was less pleasant: `VideoDecoder` had `video/avc` baked in.
+
+- The MIME follows `setCodec(bool)` to `video/hevc`.
+- Unit type detection moves from H.264's `d[0] & 0x1F` to HEVC's two-byte header `(d[0] >> 1) & 0x3F`.
+- Keyframe detection: H.264 only counts 5 (IDR), HEVC has to count 16-21 (BLA / IDR / CRA are all random access points), otherwise "skip to the next keyframe" would wait forever after a stall.
+- CSD assembly: H.264 needs SPS + PPS, HEVC needs VPS + SPS + PPS (32/33/34). A missing VPS can be tolerated; a missing SPS or PPS cannot configure a decoder.
+- When to switch: no protocol change needed -- the handshake note already carries the encoder name (`NVENC HEVC VBR Q20 - 40Mbps`), so the client just looks for `HEVC`.
+
+The first run worked: `decoder configured video/hevc 2560x1600 lowLatency=true csd=90`, `first frame rendered to the surface`, 120 fps, 15 Mbps, latency identical to H.264.
+
+### 47.5 A quieter trap: the latency statistic going to zero, and me breaking it once more
+
+After HEVC landed I ran two sessions back to back, and the second one looked odd: the host line read `120 fps, 15.3 Mbps, phone 120 fps / shown 120 fps, 0 ms`, and the phone reported `samples=0`, `latency_p50_ms=-1`. The picture was fine. The measurement was gone.
+
+The number is built like this: the host stamps each frame with when it was produced (host clock), and the phone subtracts that from "now". The two machines' clocks differ, so the handshake computes the offset once:
+
+```java
+clockSkewUs = SystemClock.elapsedRealtimeNanos() / 1000 - hostNowUs;
+```
+
+The catch is that `hostNowUs` is taken at the moment the host *stamps* the header, and the header is written to the socket afterwards. Whatever the host did in between ends up in the offset. Usually that is a few hundred microseconds; that day the host was busy and it was ten-odd milliseconds -- so every frame came out negative.
+
+Two gates in the old code assumed a positive latency: `if (lat < 0) return;` in the decoder and `if (latUs > 0 && latUs < 5000000L)` in the receive loop. Both closed together, the sample count went to zero, and worse: the drift correction only updated its reference from positive samples, so it never got a chance to heal -- once the offset was wrong, it stayed wrong for the whole session.
+
+**The first fix was wrong, and it is worth writing down.** I added "use the smallest latency of the first 20 frames as the anchor" and corrected the offset once if that minimum was more than 2 ms off. Samples came back (240 of them), but end-to-end p90 jumped from 17-19 ms to 40-68 ms while the median got *lower*. The reason: that correction was taken from the minimum of the first 20 frames, and a minimum can itself be a negative error. One jump pushed the offset to the other side, the existing slow drift correction then pulled it back, and the two controllers fought each other -- so the latency distribution became bimodal: most frames early, a handful very late.
+
+The second version is the one that works, and the idea is **one controller only**:
+
+- `latMin` keeps its old meaning (positive samples only) and the drift correction is untouched;
+- a separate `latMinAll` is allowed to be negative and only acts when it falls below -3 ms -- that means the whole session is offset, not jitter -- and the correction is clamped to 20 ms, after which the samples and the drift reference are reset.
+
+After that p90 went straight back to 17-19 ms with a full 240 samples.
+
+### 47.6 Measurements
+
+The conditions are always the same: a Xiaomi Pad 24091RPADC (2136x3200, 120 Hz panel), a 2560x1600@120 virtual extended screen to the right of the host desktop, the capturer bound to that output, 20 second sessions, numbers read from the `perf` line on the phone.
+
+| Version | Capture / encoder | Host line | On glass p50 | p90 | Decode + present |
+| --- | --- | --- | --- | --- | --- |
+| 2.0.0-beta | native / H.264 | 120 fps, 13.7 Mbps, 14 ms | 13-15 ms | 30-37 ms | 10-15 ms |
+| 2.1.0 | native / H.264 | 120 fps, 12.1 Mbps, 14 ms | 13-15 ms | 18-19 ms | 10-16 ms |
+| 2.1.0 | native / HEVC | 120 fps, 15.5 Mbps, 14 ms | 14-15 ms | 17-19 ms | 10-13 ms |
+
+One thing has to be admitted here: when this release went back and measured the 2.0.0 APK as a control, `samples` was only 9-26 per two seconds, because the old code was throwing most samples away as negative. In other words the p50/p90 2.0.0 reported came from the surviving samples and looked better than it was. This release counts all 240, so the 2.1.0 rows are the stricter measurement -- not a regression, just a more honest ruler.
+
+
+**Additional verification, 2026-11-17** (same conditions; every group received a full 120 fps with `skipped=0`):
+
+- The quality scale: H.264 Q17 sent 20.1 Mbps (p50 13, p90 17-30), Q20 sent 15.8 Mbps (p50 15-16, p90 20), Q26 sent **5.6 Mbps** (p50 14-15, p90 19-20) - all at 120 fps, a 3.6x spread in bit rate with latency barely moving.
+- Mirror mode (capturing the primary output `\\.\DISPLAY1`): 120 fps, 10.8 Mbps, 13 ms, p50 12-13 / p90 16 - neither the extended nor the mirrored path was broken by this release.
+- HEVC for 60 seconds straight: all fifteen reporting windows at p50 15-16 / p90 19-20 with `samples` above 240 and no drift; `clock fix` fired exactly once within 0.1 s of the stream starting, for `-3.754 ms`, and never again - the 437 ms problem is confirmed not to come back.
+- A real moving picture (a 1600x1000 borderless window on the extended screen, repainted by an 8 ms timer: black background, a travelling light ball, a scrolling orange bar and a frame counter) for 45 seconds: HEVC sent **5.9 Mbps** at p50 **12** / p90 **15** / max 40-48 with the phone showing 120 fps; the still-desktop control at the same moment (H.264 Q20) was p50 15 / p90 20 at 15.5 Mbps. The moving case uses less bit rate because that window is mostly black while the still case captured a desktop that was repainting itself - which also shows that under CQ the bit rate follows the content and has nothing to do with latency.
+- That run's first two-second window read `fps=44 p50=13 p90=81 max=141`. Not a statistics bug: the host stalled for about a second while the window painted for the first time on the extended screen, so those frames really were 80 ms late. From the second window on it settled back to p50 12 / p90 15.
+
+### 47.7 Encoder presets: why the default is still P1
+
+The presets got measured too, 600 frames, 2560x1600, CQ 20, real content on the main screen:
+
+| Encoder | Preset | Bitrate | Encode p50 | Encode p90 |
+| --- | --- | --- | --- | --- |
+| H.264 | P1 | 11.21 Mbps | 2.23 ms | 2.65 ms |
+| H.264 | P4 | 10.64 Mbps | 3.88 ms | 4.55 ms |
+| H.264 | P5 | 12.69 Mbps | 6.54 ms | 7.14 ms |
+| HEVC | P1 | 13.90 Mbps | 2.10 ms | 2.62 ms |
+| HEVC | P4 | 12.60 Mbps | 4.42 ms | 5.24 ms |
+| HEVC | P5 | 11.89 Mbps | 4.41 ms | 5.29 ms |
+
+(Bitrates in different rows cannot be compared -- the desktop content differs between runs. Encode times can.)
+
+The 8.33 ms budget still has to hold `CopyResource` and the blit, so P5's 6.5 ms is too tight. The default stays P1; anyone who wants fewer bits can set the preset to `p4` in the settings.
+
+### 47.8 Another p50=0: this time the offset itself was off by 437 ms
+
+The latency figure on the phone suddenly read 0, with `latency_p90_ms=-1`, `net_ms=-1` and `dec_ms=-1`, while the picture itself was perfectly fine. Not the first time -- 47.5 was my own gate throwing every negative sample away, this one is different. The log carried one line every two seconds:
+
+```
+clock fix: frames arrived -20.0 ms before they were sent, offset corrected
+```
+
+Always exactly -20.0, a dozen lines in a row. The line means "the fastest frame in this window arrived before it was sent", i.e. the two clocks are offset and offset in the negative direction. The problem is that `-20.0` is a clamp: one correction may move the offset by at most 20 ms, which was meant to stop a single jittery frame from dragging the whole estimate. When the real offset is far larger than 20 ms, that rule simply never catches up -- 20 ms every two seconds, and the overlay reads 0 for the entire session.
+
+Raising the clamp to two seconds made the first correction tell the truth:
+
+```
+clock fix: frames arrived -437.002 ms before they were sent, offset corrected
+```
+
+**437 milliseconds.** Corrected in one go; the next reporting window read `latency_p50_ms=16 latency_p90_ms=21`, the one after that was back to 15 / 20, the normal range.
+
+Where those 437 ms come from: the handshake lines the two clocks up exactly once, from a timestamp the host takes just before it writes the header. At that moment the host is starting the capture, spinning up the encoder, with the disk busy -- several hundred milliseconds can pass between reading the clock and actually pushing the header into the socket, and that pause is then taken for a clock offset and applied to every frame on the phone. The path is not slow; the measuring stick is wrong.
+
+Two more things changed here. The check used to run only in the two-second reporting window, so the first two seconds showed 0 ms; it now runs every ten frames starting at frame 10 (about every 0.08 s) and keeps going until it has corrected once -- one measured run hit the stall 300 ms after the handshake, so checking only at frame 10 walked past it and the whole first window was wasted on `fps=41` with a `p90` of 82 ms. And the window is now thrown away after a correction and restarted: the samples taken before it were negative and got counted as zero, which made the very first report print `latency_p50_ms=0 latency_p90_ms=-1` -- "not measured yet" posing as a latency figure. After the change the first report reads `p50=15 p90=20 samples=240 fps=120` (HEVC: `p50=15 p90=19`): the zero and the -1 are both gone, and `fps` is no longer inflated to 164 by the frames counted before the correction.
+
+**Tried and left out**: replacing `releaseOutputBuffer(idx, true)` with `releaseOutputBuffer(idx, System.nanoTime())` so SurfaceFlinger schedules against a timestamp, which should save one vsync of waiting. The first run read p50 0 -- almost believed it, but that was the 437 ms offset above colliding with the measurement. Retested after the offset was fixed: the timestamp version gave p50 13 / p90 18 and the `(idx, true)` version p50 15 / p90 19-21, a 1-2 ms difference inside the noise. No measurable gain, so the code stays as it was.
+### 47.9 One real quality knob: CQ, not the preset, not 4:2:0
+
+The requirement was "don't trade away picture quality, just cut the latency to the floor". So all three knobs got measured, one after another.
+
+**The preset stays put.** 47.7 already timed the encoder itself (P1 2.2 ms, P5 6.5 ms -- P5 does not fit an 8.33 ms frame budget). This round adds two more measurements. Throughput: 240 frames of `testsrc2 2560x1600@120` each -- P1 2.48x (~298 fps), P3 2.05x, P5 2.04x, P7 1.51x (181 fps). Even the slowest preset runs at 1.5x real time. Compression efficiency: same desktop, same CQ 20, 1.5 s each -- P1 versus P5 came out at H.264 12.38 / 12.80 Mbps and HEVC 14.81 / 14.79 Mbps, i.e. inside the noise. Same efficiency, lowest latency: the default stays P1.
+
+**CQ is the only knob that actually does something.** Production path (`DroidCapture.exe` talking straight to NVENC, same desktop, 1.5 s, P1, vbr):
+
+| Codec | CQ 17 | CQ 20 (default) | CQ 26 |
+| --- | --- | --- | --- |
+| H.264 | 12.38 Mbps | 11.37 Mbps | 5.43 Mbps |
+| HEVC | 14.81 Mbps | 10.90 Mbps | 5.18 Mbps |
+
+For the picture side, a synthetic 2560x1600 frame (8 px grid plus two lines of 15/18 px text, which is what an interface looks like) was encoded with H.264 NVENC P1 and compared against the source:
+
+| CQ | I frame | PSNR | SSIM |
+| --- | --- | --- | --- |
+| 17 | 1.71 MB | 33.82 dB | 0.9823 |
+| 20 | 1.33 MB | 32.44 dB | 0.9760 |
+| 23 | 0.97 MB | 32.03 dB | 0.9710 |
+| 26 | 0.74 MB | 30.35 dB | 0.9548 |
+
+Going 20 -> 17 buys 1.38 dB and 0.6 thousandths of SSIM for 28% more bytes; going 20 -> 23 loses 0.41 dB and saves 27%. The default of 20 sits right on the knee, so it stays. Anyone who wants a sharper picture can set the quality to 17 in the settings -- the USB link has no trouble at 15 Mbps.
+
+**On the real device**: same tablet, USB, 20 s each - H.264 Q20 sent 15.8 Mbps at p50 15-16 / p90 20; Q17 sent **20.1 Mbps** at p50 13 / p90 17-30; HEVC Q20 sent 15.5 Mbps at p50 14-15 / p90 17-19. All three received 120 fps and displayed 120 fps; the extra 4 Mbps does not trouble the USB link at all.
+
+**Chroma stays at 4:2:0, and not out of laziness.** 4:4:4 was tried: `hevc_nvenc -profile main444 -pix_fmt yuv444p` fails with `Error initializing output stream` on this RTX 5070 -- consumer NVENC has no HEVC 4:4:4 encoder. H.264 High444 does encode (189 fps), but Android hardware decoders only understand 4:2:0 in H.264 High and HEVC Main; shipping 4:4:4 means the phone either decodes in software (double the latency, and it heats up) or shows nothing at all. 4:2:0 is the only profile the phone decodes in hardware -- that is not a compromise, it is the target.
+
+One trap worth recording: `hevc_nvenc -cq` in ffmpeg shows no difference at all -- all three values produce exactly 4 536 254 bytes. That is ffmpeg failing to pass `-cq` through, not NVENC: the same CQ value through DroidCapture's direct API does change the bitrate. Do not use ffmpeg as the reference for this measurement again.
+
+### 47.10 What this version did not do
+
+Three directions were evaluated and all three dropped. The reasons go here so they do not have to be re-derived next time:
+
+- **Compositing the cursor in VRAM.** Today the shape comes from `GetFramePointerShape` and the CPU draws the monochrome mask into the frame with XOR semantics. Turning that into a graphics pass would need a scratch texture in the desktop's exact format, and the result still has to be `CopyResource`d back - **that copy is not saved**; all that goes away is the CPU-side XOR, which does not show up end to end. On top of that, the DDA cursor interface is already unreliable across alt-tab, exclusive fullscreen and some remote-desktop setups; another layer would just be another place to fix. The gain is semantic correctness, not speed.
+- **Scheduling on vsync timestamps on the phone.** `releaseOutputBuffer(idx, System.nanoTime())` was tried, hoping SurfaceFlinger would honour the timeline. Measured after the clock calibration was fixed (otherwise the 437 ms offset skews everything): timestamp version p50 13 / p90 18, `(idx, true)` version p50 15 / p90 19-21 - a 1-2 ms difference, inside the noise. With no measurable gain the code was reverted; `VideoDecoder.java` still calls `releaseOutputBuffer(idx, render)`.
+- **Draining the decoder so only the newest frame is shown.** Latency dropped to 12-22 ms, but the displayed frame rate fell from 120 to 80 - on a 120 Hz panel that means every third vsync is thrown away, and it is visible. Reverted.
+
+If you want a lower bit rate later, use CQ; if you want a sharper picture, also CQ (17 in the settings). Neither requires a code change.
+
+### 47.11 Lessons
+
+> A "just wait a bit" construct can score full marks on a single machine and still fail end to end. A single-machine test measures the capturer; an end-to-end test measures the whole chain -- and every link in that chain is fighting over the same 8.33 ms.
+
+- Never pass a positive timeout to `AcquireNextFrame`: either 0, or a real frame handle to wait on. Waiting for an event with a guessed timeout is trading sleep for jitter.
+- Before raising the system timer resolution, check whether the code depends on it being coarse. Here `timeBeginPeriod(1)` doubled the latency.
+- Percentiles in a report are not decoration. A good p50 does not mean smooth; p90 is the "it stutters sometimes" the user actually feels.
+- **One quantity, one controller.** A one-shot calibration plus a slow drift correction, both writing the same offset, produces a bimodal distribution -- and it is especially easy to do while fixing a bug.
+- When the measurement itself changes, re-measure the baseline. The old build only counted surviving samples and therefore looked better; using it as a baseline leads to exactly the wrong conclusion.
+- Enabling an encoder is not just a GUID swap: the set of keyframe types, which parameter sets the CSD needs, and the NALU header length will all bite.
 
 
 ---

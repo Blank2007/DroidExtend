@@ -93,6 +93,21 @@ public class VideoDecoder {
     private long droppedOutput;
 
     /**
+     * True while every unit except the next IDR is thrown away.
+     *
+     * Set when this process falls behind (see skipToNextKey).  Nothing but an
+     * IDR may be fed while it is set: the P frames around it reference pictures
+     * the codec never decoded, and feeding them would paint garbage.
+     */
+    private boolean awaitKey;
+    /** HEVC instead of H.264: different NAL header, different csd layout. */
+    private boolean hevc;
+    /** Units thrown away while waiting for that IDR, for the log line. */
+    private long skippedUnits;
+    /** Consecutive "input queue full" answers; three in a row means we are behind. */
+    private int queueFullRun;
+
+    /**
      * The thread that takes decoded pictures off the codec and onto the surface.
      *
      * Until 2.0.0 this was done from inside the socket reader, right after
@@ -116,6 +131,85 @@ public class VideoDecoder {
      */
     public synchronized long renderedFrames() {
         return rendered;
+    }
+
+    /**
+     * Throw the queued pictures away and wait for the next IDR.
+     *
+     * The host writes straight to the socket, so when this process stops reading
+     * for a moment -- the window was hidden, the system stalled, the codec got
+     * stuck -- every frame not read stays in the TCP buffer, and all of it is
+     * old.  Reading it back one frame at a time can never catch up: the encoder
+     * keeps producing at the same rate we consume, so the delay stays as large
+     * as the stall was.  That is the "latency jumps to a second and stays
+     * there" failure; before, the only way out was to reconnect.
+     *
+     * Skipping to the next IDR costs one GOP of frozen picture and then the
+     * delay is back to a frame interval.  One second without new pictures beats
+     * a second of pictures that are already a second old.
+     */
+    public synchronized void skipToNextKey(String why) {
+        if (awaitKey) {
+            return;
+        }
+        awaitKey = true;
+        try {
+            if (codec != null) {
+                codec.flush();
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "flush after falling behind failed, resetting: " + oneLine(t));
+            reset();
+        }
+        stamps.clear();
+        recvs.clear();
+        // Samples taken before the jump describe a pipeline that no longer
+        // exists; without this the overlay keeps showing the old second long
+        // after the picture is fast again.
+        latWinN = 0;
+        shownLatencyUs = -1;
+        if (codec != null) {
+            startDrain();       // the old drain thread may have exited on the flush
+        }
+        event("behind (" + why + "), skipping to the next keyframe");
+    }
+
+    /**
+     * Forget the latency samples collected so far.  Used when the clock offset
+     * is corrected mid-stream: the older samples were taken against the old
+     * offset and would keep the median wrong for a couple of seconds.
+     */
+    public synchronized void clearLatency() {
+        latWinN = 0;
+        shownLatencyUs = -1;
+        shownLatencyMaxUs = 0;
+    }
+
+    /** Units thrown away while waiting for a keyframe. */
+    public synchronized long skipped() {
+        return skippedUnits;
+    }
+
+    /** Is this access unit an IDR?  The only unit allowed after a flush. */
+    private boolean isKeyUnit(byte[] d, int off, int len) {
+        int end = off + len;
+        int i = off;
+        int hlen = hevc ? 2 : 1;
+        while (i < end - 3) {
+            if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
+                int hdr = i + 3;
+                int type = nalType(d, hdr, end);
+                // H.264: IDR slice (5).  HEVC: any IRAP picture, BLA/IDR/CRA
+                // (16..21) -- all of them start a fresh reference chain.
+                if (hevc ? (type >= 16 && type <= 21) : type == 5) {
+                    return true;
+                }
+                i = hdr + hlen;
+            } else {
+                i++;
+            }
+        }
+        return false;
     }
 
     /** Line the host clock up with this process's clock (called after the handshake). */
@@ -261,7 +355,7 @@ public class VideoDecoder {
         // set we retry once without rather than looping forever.
         for (int attempt = 0; attempt < 2; attempt++) {
             try {
-                MediaFormat fmt = MediaFormat.createVideoFormat("video/avc", width, height);
+                MediaFormat fmt = MediaFormat.createVideoFormat(mime(), width, height);
                 if (csdData != null) {
                     fmt.setByteBuffer("csd-0", ByteBuffer.wrap(csdData));
                 }
@@ -277,13 +371,13 @@ public class VideoDecoder {
                 if (attempt == 0) {
                     try { fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1); } catch (Throwable ignored) { }
                 }
-                MediaCodec c = MediaCodec.createDecoderByType("video/avc");
+                MediaCodec c = MediaCodec.createDecoderByType(mime());
                 c.configure(fmt, surface, null, 0);
                 c.start();
                 codec = c;
                 configured = true;
                 startDrain();
-                event("decoder configured " + width + "x" + height
+                event("decoder configured " + mime() + " " + width + "x" + height
                         + " lowLatency=" + (attempt == 0)
                         + " csd=" + (csdData == null ? 0 : csdData.length));
                 return;
@@ -299,6 +393,39 @@ public class VideoDecoder {
                 }
             }
         }
+    }
+
+    /**
+     * Which codec the host is sending.  Called from the handshake before the
+     * first access unit arrives, so the decoder is opened with the matching
+     * MIME type instead of always guessing H.264.
+     */
+    public synchronized void setCodec(boolean isHevc) {
+        if (hevc == isHevc) {
+            return;
+        }
+        hevc = isHevc;
+        // reset() drops the configured codec; the next access unit rebuilds it
+        // with the new MIME type.
+        reset();
+    }
+
+    private String mime() {
+        return hevc ? "video/hevc" : "video/avc";
+    }
+
+    /** NAL unit type, H.264 or HEVC depending on the stream. */
+    private int nalType(byte[] d, int hdr, int end) {
+        if (hevc) {
+            if (hdr + 1 >= end) {
+                return -1;
+            }
+            return (d[hdr] >> 1) & 0x3F;
+        }
+        if (hdr >= end) {
+            return -1;
+        }
+        return d[hdr] & 0x1F;
     }
 
     /** Announce the stream geometry (from the host handshake). */
@@ -349,6 +476,14 @@ public class VideoDecoder {
         if (inputDone) {
             return true;
         }
+        if (awaitKey) {
+            if (!isKeyUnit(data, offset, length)) {
+                skippedUnits++;
+                return true;        // thrown away on purpose, nothing is wrong
+            }
+            awaitKey = false;
+            queueFullRun = 0;
+        }
         try {
             int idx = -1;
             long deadline = SystemClock.elapsedRealtime() + QUEUE_WAIT_MS;
@@ -376,6 +511,13 @@ public class VideoDecoder {
                     warnedQueueFull = true;
                     event("decoder input queue full, waiting for it to drain");
                 }
+                // Three refusals in a row is not a burst, it is a decoder that
+                // cannot keep up.  Waiting longer only grows the backlog, so
+                // jump to the next IDR and start again.
+                if (++queueFullRun >= 3) {
+                    queueFullRun = 0;
+                    skipToNextKey("input queue full");
+                }
                 return false;
             }
             ByteBuffer buf = codec.getInputBuffer(idx);
@@ -387,6 +529,7 @@ public class VideoDecoder {
             buf.put(data, offset, n);
             long pts = frameIndex * 1000000L / Math.max(fps, 1);
             codec.queueInputBuffer(idx, 0, n, pts, 0);
+            queueFullRun = 0;
             frameIndex++;
             stamps.addLast(hostStampUs);
             recvs.addLast(recvUs);
@@ -576,8 +719,14 @@ public class VideoDecoder {
         }
         long nowUs = SystemClock.elapsedRealtimeNanos() / 1000L - clockSkewUs;
         long lat = nowUs - hostStampUs;
-        if (lat < 0 || lat > 10L * 1000 * 1000) {
+        if (lat > 10L * 1000 * 1000) {
             return;     // the two clocks clearly disagree; do not report it
+        }
+        if (lat < -2000L) {
+            return;     // more than 2 ms of clock offset is not a measurement
+        }
+        if (lat < 0) {
+            lat = 0;    // sub-millisecond offset: StreamClient re-zeros it anyway
         }
         shownLatencyUs = lat;
         if (lat > 0) {
@@ -603,46 +752,74 @@ public class VideoDecoder {
         return m.length() > 120 ? m.substring(0, 120) : m;
     }
 
-    /** Walk the Annex-B unit looking for SPS(7)+PPS(8) to build csd-0. */
+    /**
+     * Walk the Annex-B unit looking for the parameter sets MediaCodec needs in
+     * csd-0: SPS(7)+PPS(8) for H.264, VPS(32)+SPS(33)+PPS(34) for HEVC.
+     */
     private byte[] scanCsd(byte[] d, int off, int len) {
         int end = off + len;
-        int spsStart = -1, spsEnd = -1, ppsStart = -1, ppsEnd = -1;
+        int hlen = hevc ? 2 : 1;
+        // Wanted NAL types, in the order they have to appear in csd-0.
+        int[] want = hevc ? new int[]{32, 33, 34} : new int[]{7, 8};
+        int[] starts = new int[want.length];
+        int[] ends = new int[want.length];
+        for (int k = 0; k < want.length; k++) {
+            starts[k] = -1;
+            ends[k] = -1;
+        }
         int i = off;
         int nalStart = -1;
         while (i < end - 3) {
             if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
-                int sc = 3;
-                if (i > off && d[i - 1] == 0) {
-                    // 4-byte start code already consumed as part of the previous header
-                }
-                int hdr = i + sc;
-                if (nalStart >= 0 && hdr - sc > nalStart) {
-                    int type = d[nalStart] & 0x1F;
-                    if (type == 7 && spsStart < 0) { spsStart = nalStart; spsEnd = hdr - sc; }
-                    if (type == 8 && ppsStart < 0) { ppsStart = nalStart; ppsEnd = hdr - sc; }
+                int hdr = i + 3;
+                if (nalStart >= 0 && hdr > nalStart) {
+                    int type = nalType(d, nalStart, end);
+                    for (int k = 0; k < want.length; k++) {
+                        if (type == want[k] && starts[k] < 0) {
+                            starts[k] = nalStart;
+                            ends[k] = i;
+                        }
+                    }
                 }
                 nalStart = hdr;
-                i = hdr + 1;
+                i = hdr + hlen;
                 continue;
             }
             i++;
         }
         if (nalStart >= 0 && nalStart < end) {
-            int type = d[nalStart] & 0x1F;
-            if (type == 7 && spsStart < 0) { spsStart = nalStart; spsEnd = end; }
-            if (type == 8 && ppsStart < 0) { ppsStart = nalStart; ppsEnd = end; }
+            int type = nalType(d, nalStart, end);
+            for (int k = 0; k < want.length; k++) {
+                if (type == want[k] && starts[k] < 0) {
+                    starts[k] = nalStart;
+                    ends[k] = end;
+                }
+            }
         }
-        if (spsStart < 0 || ppsStart < 0) {
-            return null;
+        // SPS and PPS are mandatory; a missing VPS is tolerated (some encoders
+        // only repeat it in-band), so csd-0 simply starts at the SPS.
+        int first = hevc ? 1 : 0;
+        for (int k = first; k < want.length; k++) {
+            if (starts[k] < 0) {
+                return null;
+            }
         }
-        int n = (spsEnd - spsStart) + (ppsEnd - ppsStart) + 8;
+        int n = 0;
+        for (int k = 0; k < want.length; k++) {
+            if (starts[k] >= 0) {
+                n += 4 + (ends[k] - starts[k]);
+            }
+        }
         byte[] out = new byte[n];
         int p = 0;
-        out[p++] = 0; out[p++] = 0; out[p++] = 0; out[p++] = 1;
-        System.arraycopy(d, spsStart, out, p, spsEnd - spsStart);
-        p += spsEnd - spsStart;
-        out[p++] = 0; out[p++] = 0; out[p++] = 0; out[p++] = 1;
-        System.arraycopy(d, ppsStart, out, p, ppsEnd - ppsStart);
+        for (int k = 0; k < want.length; k++) {
+            if (starts[k] < 0) {
+                continue;
+            }
+            out[p++] = 0; out[p++] = 0; out[p++] = 0; out[p++] = 1;
+            System.arraycopy(d, starts[k], out, p, ends[k] - starts[k]);
+            p += ends[k] - starts[k];
+        }
         return out;
     }
 }

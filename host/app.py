@@ -100,7 +100,7 @@ RESOLUTIONS = [
 HZ_CHOICES = ["30", "60", "75", "90", "120", "144", "165", "240"]
 FPS_CHOICES = ["24", "30", "40", "48", "50", "60", "75", "90", "120", "144"]
 BITRATE_CHOICES = ["4", "6", "8", "10", "12", "16", "20", "25", "30", "40", "50", "80", "120"]
-QUALITY_CHOICES = ["14", "16", "18", "20", "22", "24", "26", "28", "32", "36"]
+QUALITY_CHOICES = ["14", "16", "17", "18", "20", "22", "23", "24", "26", "28", "32", "36"]
 # (value, caption) tables for the three dropdowns whose caption is translated.
 # The values are what settings.json stores and what session.py switches on, and
 # they never change; only the captions follow the language.  Because of that the

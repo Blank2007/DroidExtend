@@ -988,7 +988,11 @@ class Capture(object):
                 # 2.0.0: the capture side composites the hardware cursor as a
                 # second video-processor stream, so "draw pointer" means the same
                 # thing on both backends now.
-                "--pointer", "1" if c.get("draw_mouse") else "0"]
+                "--pointer", "1" if c.get("draw_mouse") else "0",
+                # h264 | hevc: the codec GUID the encoder is opened with.  The
+                # phone has to know which one it is -- MediaCodec wants the
+                # matching MIME type -- so the handshake note carries it.
+                "--codec", "hevc" if self.codec == CODEC_HEVC else "h264"]
 
     # -- command line ------------------------------------------------------
     def command(self, backend):
@@ -1166,7 +1170,11 @@ class Capture(object):
         # never leaves the GPU, so it measures 2-3 ms from desktop read to
         # encoded access unit where the ffmpeg chain needs 6-11 ms.  Preferred
         # whenever the hardware encoder is in use; "auto" still falls back.
-        native_ok = bool(hw and self.codec == CODEC_H264 and paths.native_exe())
+        # H.264 and HEVC both: DroidCapture talks to NVENC directly and picks
+        # the codec GUID from --codec, so there is no reason to leave HEVC on
+        # the slower ffmpeg path.
+        native_ok = bool(hw and self.codec in (CODEC_H264, CODEC_HEVC)
+                         and paths.native_exe())
         if want == "auto":
             order = (["native"] if native_ok else []) + \
                     (["ddagrab", "gdigrab"] if hw else ["gdigrab", "ddagrab"])
@@ -1174,7 +1182,7 @@ class Capture(object):
             if native_ok:
                 order = ["native"]
             else:
-                self.log("原生采集不可用（需要 NVIDIA 显卡 + H.264），改用 ffmpeg")
+                self.log("原生采集不可用（需要 NVIDIA 显卡 + H.264/HEVC），改用 ffmpeg")
                 order = ["ddagrab", "gdigrab"] if hw else ["gdigrab"]
         else:
             order = [want]
@@ -1186,8 +1194,8 @@ class Capture(object):
                 self.log("  ffmpeg.exe 未找到，跳过 " + backend)
                 continue
             if backend == "native":
-                if self.codec != CODEC_H264:
-                    self.log("原生采集目前只支持 H.264，跳过")
+                if self.codec not in (CODEC_H264, CODEC_HEVC):
+                    self.log("原生采集只支持 H.264 和 HEVC，跳过")
                     continue
                 # Swept again rather than reused: the virtual display only shows
                 # up in the list after the session has attached it.

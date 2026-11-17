@@ -45,7 +45,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 |---|---|
 | 🖥️ **A real extended desktop** | Not mirroring. A new display shows up under `Win+P`, windows can be dragged onto it, and the mouse can click right on it |
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
-| ⚡ **Low latency** | **13 ms to the glass** (the 2.0.0 definition: the host put it on the wire -> it is really on the screen, p50 13 ms / p90 19–37 ms; of which 0–2 ms transfer and 12–16 ms decode plus present) |
+| ⚡ **Low latency** | **13 ms to the glass** (the 2.0.0 definition: the host put it on the wire -> it is really on the screen; 2.1.0 measured p50 13-15 ms / p90 17-19 ms, of which 0-2 ms transfer and 10-16 ms decode plus present) |
 | 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
 | 🧹 **Stop and it is gone** | Hit `停止` (Stop), or quit the program, and the virtual display is removed from the system immediately — no ghost monitor left behind. Pulling the cable without stopping leaves the screen in place for now; stop once after reconnecting and it goes |
 | 🎛️ **Fully hardware-accelerated pipeline** | Native capture (zero-copy desktop duplication) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU. Without an NVIDIA card it falls back to ffmpeg `ddagrab` automatically |
@@ -165,9 +165,9 @@ grabs the picture and which one encodes it.
 | **Frame rate fps** | Encoding frame rate, 24 ~ 144. **What actually gets used is the smaller of your setting and the phone's panel rate**: when the phone can only present 120 frames a second, sending 144 just piles up into stutter. From 1.7.0 on this is aligned automatically, and the log says "编码帧率 144 → 120 fps" |
 | **Bitrate cap Mbps** | Upper bound on the encoding bitrate; under VBR it's a ceiling, not a constant |
 | **Rate control** | `VBR` (quality first — a static desktop uses almost no bandwidth) / `CBR` (constant bitrate, steadier on fast-moving content) |
-| **Quality Q** | Lower is better quality and higher bitrate. `18~20` is essentially visually lossless; from `24` up you can see blocking |
+| **Quality Q** | Lower is better quality and higher bitrate. Default `20`; `18~20` is essentially visually lossless, and from `24` up you can see blocking. For a sharper 120 fps picture try `17` (measured: 15.8 -> 20.1 Mbps, latency unchanged) |
 | **Encoder** | Every entry is **actually test-encoded** before it is offered. Available here: `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` (NVIDIA), `h264_amf` / `hevc_amf` (AMD), `libx264` / `libx265` (pure CPU fallback). Ones that are compiled in but cannot run on this machine (`*_qsv` and `av1_amf` here) are removed from the menu, and the log says so |
-| **Capture** | `auto` tries **native low latency** first (the bundled `tools\native\DroidCapture.exe`: Desktop Duplication API, zero-copy into NVENC, no ffmpeg needed), then ddagrab, then gdigrab. Native is the default since 2.0.0 and it **draws the mouse pointer itself**: the cursor shape desktop duplication hands over rides in as a second video-processor input composited through an alpha stream in the same blit, with no extra copy, so position, shape and alpha edges match the desktop and "show the mouse pointer" works on either path |
+| **Capture** | `auto` tries **native low latency** first (the bundled `tools\native\DroidCapture.exe`: Desktop Duplication API, zero-copy into NVENC, no ffmpeg needed), then ddagrab, then gdigrab. Native is the default since 2.0.0 and it **draws the mouse pointer itself**: the cursor shape desktop duplication hands over rides in as a second video-processor input composited through an alpha stream in the same blit, with no extra copy, so position, shape and alpha edges match the desktop and "show the mouse pointer" works on either path |. Since 2.1.0 the native path encodes H.264 or HEVC: pick `hevc_nvenc` and the capturer switches its codec, while the phone changes decoder from the encoder name in the handshake note (HEVC keyframe types and the VPS/SPS/PPS parameter sets are handled)
 | **Capture GPU (read-only)** | Which adapter is actually grabbing the picture. The old ddagrab could only see one card on a two-GPU machine; since 1.8.5 every card's outputs are probed and the log says `采集显卡: 显卡0 "NVIDIA …"（输出 #1） ／ 编码: NVIDIA 显卡的 NVENC` (capture GPU / encoder) |
 | **APK version (read-only)** | The app on the phone is compared with the bundled APK by versionCode; an older phone side asks once for confirmation (see the previous section) |
 | **Screen position** | Place the virtual display to the right / left / above / below the primary screen |
@@ -362,6 +362,7 @@ is "host sent it" to "the phone has it", `dec_ms` is "the phone has it" to "on t
 
 ```
 2.0.0 latency_p50_ms 13      latency_p90_ms 23~37  latency_max 43~56  net_ms 0~2  dec_ms 12~16
+2.1.0 latency_p50_ms 13~15   latency_p90_ms 17~19  latency_max 46~55  net_ms 0~2  dec_ms 10~16
 1.9.3  latency_avg_ms 17~31   latency_max 44~61   net_ms 0~12   dec_ms 14~26
 1.5.x  latency_avg_ms  5~11   latency_max 26~45   (old definition: only "the phone received it")
 ```
@@ -382,7 +383,7 @@ It now uses `os.read(p.stdout.fileno(), 65536)`, which takes data the moment it'
 * `fps` low, `latency` normal → the **USB cable** is out of bandwidth. Run "Measure the cable speed"
   on the PC; below 40 Mbps, replace the cable (on the same phone we measured a 40× spread:
   13.7 Mbps ↔ 597 Mbps).
-* `fps` normal, `latency` high (since 2.0.0 normal is p50 13 ms / p90 19-37 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
+* `fps` normal, `latency` high (since 2.1.0 normal is p50 13-15 ms / p90 17-19 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
   lighter encoder (`h264_nvenc` is the fastest on our machine), or drop to 30 fps.
 * Both numbers fine but the image still stutters → the phone is thermal-throttling; see "Phone side".
 * Even the PC's own mouse starts to lag → the GPU is saturated by something else; see below.

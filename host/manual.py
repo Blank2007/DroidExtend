@@ -19,7 +19,7 @@ DroidExtend 使用说明   v{ver}
   是真扩展桌面，不是投屏镜像： Windows 会多出一块屏，窗口可以拖过去，
   鼠标可以移进去，手机上点一下就是在这块屏上点一下。
 
-  延迟实测 13 ms 上屏（主机发出到真的出现在屏幕上，其中传输 0~2 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
+延迟实测 13 ms 上屏（主机发出到真的出现在屏幕上，2.1.0 实测 p50 13~15 ms、p90 17~19 ms，其中传输 0~2 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
 
 【二、手机要先准备两件事】
   1. 打开开发者选项
@@ -82,11 +82,11 @@ DroidExtend 使用说明   v{ver}
               不确定就先点「测一下数据线速度」，程序会告诉你建议值。
   码率控制    VBR 质量优先：静止桌面省带宽（推荐）
               CBR 恒定码率：运动画面更稳
-  画质 Q      越小画质越好、码率越高。18 约等于视觉无损，默认 20。
+  画质 Q      越小画质越好、码率越高。18 约等于视觉无损，默认 20；想更锐可试 17。
   编码器      h264_nvenc 用显卡编码（推荐），libx264 用 CPU。
   预设        编码速度档位。p4 / veryfast 是常用的平衡点。
   采集        原生低延迟用程序自带的采集器（桌面复制、零拷贝进显卡编码器，最快）；ddagrab 走 ffmpeg 的桌面复制（没有 NVIDIA 卡时用它）；gdigrab 走 GDI（兼容性最好）。
-              默认「自动」：先试原生，不行退 ddagrab，再不行退 gdigrab。2.0.0 起原生采集自己把鼠标指针合成进画面（视频处理器第二路输入 + alpha 流），勾不勾「显示鼠标指针」都能走原生。
+              默认「自动」：先试原生，不行退 ddagrab，再不行退 gdigrab。2.0.0 起原生采集自己把鼠标指针合成进画面（视频处理器第二路输入 + alpha 流），勾不勾「显示鼠标指针」都能走原生。2.1.0 起两种编码都行：编码器选 hevc_nvenc 就用 HEVC，手机端会自动换解码器。
   屏幕位置    虚拟屏放在主屏的哪一边。放右边就是「往右拖窗口」。
   显示鼠标指针  把鼠标画进画面里，2.0.0 起默认勾选。
   每次重新安装 APK  手机上已经装过就可以取消勾选，开始会快很多。
@@ -297,7 +297,7 @@ DroidExtend manual   v{ver}
   drag windows onto it, move the mouse into it, and a tap on the phone is a
   click on that screen.
 
-  Measured latency is 13 ms to the glass (p50; p90 is 19-37 ms).  The picture travels over the USB cable -- never
+  Measured latency is 13 ms to the glass (2.1.0: p50 13-15 ms, p90 17-19 ms).  The picture travels over the USB cable -- never
   over WiFi, never through a router.
 
 [2] Two things to set up on the phone first
@@ -374,14 +374,14 @@ DroidExtend manual   v{ver}
   Rate control   VBR, quality first: an idle desktop costs less bandwidth
                  (recommended).  CBR, constant bitrate: steadier under motion.
   Quality Q      Lower looks better and costs more bitrate.  18 is visually
-                 lossless; the default is 20.
+                 lossless; the default is 20.  Try 17 for more sharpness.
   Encoder        h264_nvenc encodes on the GPU (recommended), libx264 on the CPU.
   Preset         Encoder speed step.  p4 / veryfast are the usual balance.
   Capture        Native low latency uses the bundled capture helper (Desktop
                   Duplication, zero-copy into the GPU encoder, fastest); ddagrab goes
                   through ffmpeg duplication (use it when there is no NVIDIA card);
                   gdigrab uses GDI (most compatible).  "Auto" tries native, then
-                  ddagrab, then gdigrab.  Since 2.0.0 the native helper composites
+                  ddagrab, then gdigrab.  Since 2.0.0 the native helper compositesSince 2.1.0 it encodes H.264 or HEVC; choosing hevc_nvenc switches the capturer and the phone follows the encoder name in the handshake.
                   the mouse pointer itself (a second video-processor input through
                   an alpha stream), so "Draw pointer" works on either path.
   Position       Which side of the main screen the virtual one sits on.  "Right"

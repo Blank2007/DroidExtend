@@ -32,6 +32,8 @@
 #include <vector>
 #include <algorithm>
 #include <timeapi.h>
+#include <thread>
+#include <chrono>
 #include <io.h>
 #include <fcntl.h>
 #include "nvEncodeAPI.h"
@@ -79,17 +81,19 @@ static void hr_ok(const char* what, HRESULT hr, int code = 2) {
 // monotonic clock
 // ---------------------------------------------------------------------------
 static LARGE_INTEGER g_freq;
+static bool timer_open();
+static void timer_close();
+static uint64_t wait_until(uint64_t due_us);
 static void clock_init() {
     QueryPerformanceFrequency(&g_freq);
-    // Deliberately NO timeBeginPeriod(1) here. It reads like the obvious fix
-    // for the whole-millisecond per-tick timeout below, but measured on a
-    // 300 Hz desktop it made the picture older: with a 1 ms timer the wait
-    // returns on time to find no new desktop frame yet, so 92% of the encoded
-    // frames became repeats of the previous picture (38% before), the bitrate
-    // dropped from 14 to 9 Mbps and the phone measured 30 ms to the glass
-    // instead of 13 ms. The coarse 15.6 ms timer is what lets one acquisition
-    // gather a fresh frame. Waiting on GetFrameLatencyWaitableObject() is the
-    // proper answer and is not implemented yet.
+    // Deliberately NO timeBeginPeriod(1) here. Raising the global timer
+    // resolution made the per-tick wait come back on time to find no new
+    // desktop frame yet, so 92% of the encoded frames became repeats of the
+    // previous picture, the bitrate fell from 14 to 9 Mbps and the phone
+    // measured 30 ms to the glass instead of 13. The main loop now sleeps on a
+    // high-resolution waitable timer and only then asks for a frame, so the
+    // resolution belongs to the wait instead of the whole process.
+    timer_open();
 }
 static uint64_t now_us() {
     LARGE_INTEGER t;
@@ -99,6 +103,52 @@ static uint64_t now_us() {
     // wreck the absolute tick grid the main loop depends on.
     const LONGLONG q = g_freq.QuadPart;
     return (uint64_t)((t.QuadPart / q) * 1000000 + (t.QuadPart % q) * 1000000 / q);
+}
+
+// ---------------------------------------------------------------------------
+// precise sleeping
+// ---------------------------------------------------------------------------
+// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803+) is the only way to
+// sleep for a fraction of a millisecond without raising the global timer
+// resolution with timeBeginPeriod, which is what made every wait come back
+// before the desktop had a new picture (see clock_init).
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+static HANDLE g_timer = nullptr;
+
+static bool timer_open() {
+    if (g_timer) return true;
+    g_timer = CreateWaitableTimerExW(nullptr, nullptr,
+                                     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!g_timer) g_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    return g_timer != nullptr;
+}
+static void timer_close() {
+    if (g_timer) { CloseHandle(g_timer); g_timer = nullptr; }
+}
+
+// Sleep until the absolute monotonic time due_us, then report when we woke.
+// The caller re-checks the time, so an early wake costs nothing.
+static uint64_t wait_until(uint64_t due_us) {
+    uint64_t now = now_us();
+    if (due_us <= now + 50) {                       // already due (or late)
+        if (due_us > now)
+            std::this_thread::sleep_for(std::chrono::microseconds(due_us - now));
+        return now_us();
+    }
+    if (!g_timer) {
+        std::this_thread::sleep_for(std::chrono::microseconds(due_us - now));
+        return now_us();
+    }
+    LARGE_INTEGER li;
+    li.QuadPart = -(LONGLONG)((due_us - now) * 10);   // relative, 100 ns units
+    if (!SetWaitableTimer(g_timer, &li, 0, nullptr, nullptr, FALSE)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(due_us - now));
+        return now_us();
+    }
+    WaitForSingleObject(g_timer, INFINITE);
+    return now_us();
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +183,7 @@ struct Args {
     bool verbose = false;
     bool list = false;              // print the adapters/outputs and exit
     bool pointer = true;            // draw the mouse pointer into the picture
+    std::string codec = "h264";     // h264 | hevc
     int frames = 0;                 // >0: stop after this many (self test)
 };
 
@@ -156,6 +207,7 @@ static bool parse(int argc, char** argv, Args& a) {
         else if (k == "--verbose") a.verbose = true;
         else if (k == "--list") a.list = true;
         else if (k == "--pointer") a.pointer = next() != "0";
+        else if (k == "--codec") a.codec = next();
         else if (k == "--help" || k == "-h") return false;
         else {
             say("unknown option: %s", k.c_str());
@@ -169,6 +221,7 @@ static bool parse(int argc, char** argv, Args& a) {
     if (a.preset > 7) a.preset = 7;
     if (a.width < 0 || a.width > 7680) { say("bad --width"); return false; }
     if (a.height < 0 || a.height > 4320) { say("bad --height"); return false; }
+    if (a.codec != "h264" && a.codec != "hevc") { say("bad --codec (h264|hevc)"); return false; }
     if (a.gop <= 0) a.gop = a.fps;
     return true;
 }
@@ -268,6 +321,18 @@ static GUID preset_guid(int p) {
 // One line per output.  The pixel size comes from EnumDisplaySettings, not from
 // DesktopCoordinates: that rect is in DPI-scaled virtual units and reports
 // 2048x1280 for this 2560x1600 panel at 125%.
+// MinGW's dxgi1_2.h stops at GetFramePointerShape: MapDesktopSurface,
+// UnMapDesktopSurface and GetFrameLatencyWaitableObject are missing from the
+// interface, though they are part of DXGI 1.2 and the COM object implements
+// them.  Slot 15 of the vtable is the frame-ready handle; call it through the
+// vtable rather than dropping the feature.
+static HANDLE dupl_frame_handle(IDXGIOutputDuplication* d) {
+    typedef HANDLE (STDMETHODCALLTYPE *PFN)(IDXGIOutputDuplication*);
+    void** vt = *(void***)d;
+    PFN f = (PFN)vt[15];
+    return f ? f(d) : nullptr;
+}
+
 static int list_outputs() {
     IDXGIFactory1* f = nullptr;
     if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f)) || !f) {
@@ -332,7 +397,7 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, a)) {
         say("DroidCapture --adapter N --output M --fps F [--width W --height H] "
             "[--cq Q] [--mbps M] [--gop G] [--preset 1-7] [--rc vbr|cbr]"
-            " [--pointer 0|1]");
+            " [--pointer 0|1] [--codec h264|hevc]");
         return 2;
     }
     _setmode(1, _O_BINARY);
@@ -382,6 +447,18 @@ int main(int argc, char** argv) {
             (unsigned)DXGI_ERROR_NOT_CURRENTLY_AVAILABLE, (unsigned)E_ACCESSDENIED);
         return 2;
     }
+    // Two ways to pace this loop were measured end to end on a 2560x1600@120
+    // extended screen.  Asking the duplication for a picture with a timed
+    // acquisition whenever the tick came round (a quarter of a tick, then half)
+    // cost more than it bought: the wait ate the budget the blit and the encode
+    // needed, whole periods got skipped and the phone settled at 92-102 fps with
+    // 15-16 ms to the glass.  Sampling the tick with a zero timeout keeps the
+    // grid exact -- 120 fps, 12 ms, and the p90 to the glass halved from 30-37 to
+    // 16-17 ms -- because a tick with no new picture just repeats the previous
+    // one for a couple of kB.  IDXGIOutputDuplication::GetFrameLatencyWaitableObject
+    // would remove the guesswork entirely, but MinGW's dxgi1_2.h predates it and
+    // probing the vtable by hand returned a plain object pointer rather than a
+    // handle (GetHandleInformation rejected it).
     DXGI_OUTDUPL_DESC dd{};
     dup->GetDesc(&dd);
     // The duplication reports the *pixel* size of the mode.  DesktopCoordinates
@@ -456,14 +533,18 @@ int main(int argc, char** argv) {
     oep.apiVersion = NVENCAPI_VERSION;
     NV_OK(nv.nvEncOpenEncodeSessionEx(&oep, &sess));
 
+    // HEVC at the same CQ spends far fewer bits for the same picture, and it is
+    // the one quality lever the native path was missing; the host passes
+    // --codec hevc when the user picked a hevc_* encoder.
+    const GUID codecGuid = (a.codec == "hevc") ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
     GUID presetGuid = preset_guid(a.preset);
     NV_ENC_PRESET_CONFIG pc{ NV_ENC_PRESET_CONFIG_VER };
     pc.presetCfg = { NV_ENC_CONFIG_VER };
-    NV_OK(nv.nvEncGetEncodePresetConfigEx(sess, NV_ENC_CODEC_H264_GUID, presetGuid,
+    NV_OK(nv.nvEncGetEncodePresetConfigEx(sess, codecGuid, presetGuid,
                                           NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &pc));
     NV_ENC_CONFIG cfg = pc.presetCfg;
     NV_ENC_INITIALIZE_PARAMS ip{ NV_ENC_INITIALIZE_PARAMS_VER };
-    ip.encodeGUID = NV_ENC_CODEC_H264_GUID;
+    ip.encodeGUID = codecGuid;
     ip.presetGUID = presetGuid;
     ip.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     ip.encodeWidth = (uint32_t)W;
@@ -475,7 +556,8 @@ int main(int argc, char** argv) {
     ip.enablePTD = 1;
     ip.encodeConfig = &cfg;
 
-    cfg.profileGUID = NV_ENC_H264_PROFILE_HIGH_GUID;
+    cfg.profileGUID = (codecGuid == NV_ENC_CODEC_HEVC_GUID) ? NV_ENC_HEVC_PROFILE_MAIN_GUID
+                                                          : NV_ENC_H264_PROFILE_HIGH_GUID;
     cfg.gopLength = (uint32_t)a.gop;
     cfg.frameIntervalP = 1;                       // no B frames: nothing to reorder
     NV_ENC_RC_PARAMS& rc = cfg.rcParams;
@@ -495,18 +577,27 @@ int main(int argc, char** argv) {
     }
     rc.lookaheadDepth = 0;
     rc.multiPass = NV_ENC_MULTI_PASS_DISABLED;
-    cfg.encodeCodecConfig.h264Config.outputAUD = 0;
-    cfg.encodeCodecConfig.h264Config.repeatSPSPPS = 1;   // every IDR is a resync point
-    cfg.encodeCodecConfig.h264Config.idrPeriod = (uint32_t)a.gop;
-    cfg.encodeCodecConfig.h264Config.chromaFormatIDC = 1;
+    if (codecGuid == NV_ENC_CODEC_HEVC_GUID) {
+        NV_ENC_CONFIG_HEVC& hc = cfg.encodeCodecConfig.hevcConfig;
+        hc.outputAUD = 0;
+        hc.repeatSPSPPS = 1;                              // VPS/SPS/PPS before every IDR
+        hc.idrPeriod = (uint32_t)a.gop;
+        hc.chromaFormatIDC = 1;
+    } else {
+        NV_ENC_CONFIG_H264& hc = cfg.encodeCodecConfig.h264Config;
+        hc.outputAUD = 0;
+        hc.repeatSPSPPS = 1;                              // every IDR is a resync point
+        hc.idrPeriod = (uint32_t)a.gop;
+        hc.chromaFormatIDC = 1;
+    }
 
     NVENCSTATUS ist = nv.nvEncInitializeEncoder(sess, &ip);
     if (ist != NV_ENC_SUCCESS) {
         say("FATAL nvEncInitializeEncoder -> %s (%d)", nv_str(ist), (int)ist);
         return 2;
     }
-    say("nvenc %dx%d @%d fps p%d %s cq=%d cap=%d Mbps gop=%d",
-        W, H, a.fps, a.preset, a.cbr ? "cbr" : "vbr", a.cq, a.mbps, a.gop);
+    say("nvenc %s %dx%d @%d fps p%d %s cq=%d cap=%d Mbps gop=%d",
+        a.codec.c_str(), W, H, a.fps, a.preset, a.cbr ? "cbr" : "vbr", a.cq, a.mbps, a.gop);
 
     NV_ENC_REGISTERED_PTR reg[NSURF] = {};
     for (int i = 0; i < NSURF; i++) {
@@ -758,15 +849,14 @@ int main(int argc, char** argv) {
     };
 
     for (;;) {
-        uint64_t t_now = now_us();
-        uint64_t wait_us = (next_tick > t_now) ? (next_tick - t_now) : 0;
-        UINT timeout = (UINT)((wait_us + 999) / 1000);
-        uint64_t dbg_wait = wait_us;
-        UINT dbg_timeout = timeout;
+        // Sleep out the tick with sub-millisecond accuracy.
+        uint64_t t_wake = wait_until(next_tick);
+        uint64_t dbg_wait = (t_wake > next_tick) ? (t_wake - next_tick) : 0;
+        const UINT dbg_timeout = 0;
 
         DXGI_OUTDUPL_FRAME_INFO fi{};
         IDXGIResource* res = nullptr;
-        HRESULT hr = dup->AcquireNextFrame(timeout, &fi, &res);
+        HRESULT hr = dup->AcquireNextFrame(0, &fi, &res);
         bool fresh = false;
         uint64_t t_acq = 0;
         int blit_slot = last_slot;
@@ -774,6 +864,7 @@ int main(int argc, char** argv) {
         if (hr == S_OK) {
             t_acq = now_us();
             fresh = true;
+        } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         } else if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
             // Nothing moved.  Repeat the last picture so the phone's vsync
             // cadence stays steady (this is what ddagrab's framerate option
@@ -1014,6 +1105,7 @@ int main(int argc, char** argv) {
 
     // ---- teardown (best effort; the process is about to go) ----
     say("stopped after %d frames", encoded);
+    timer_close();
     if (pview) pview->Release();
     if (ptex) ptex->Release();
     if (bg_tex) bg_tex->Release();

@@ -33,6 +33,11 @@ public class StreamClient extends Thread {
     // latency, and then the new level becomes the reference instead.
     private static final long DRIFT_MIN_US = 50;     // below this it is just jitter
     private static final long DRIFT_CAP_US = 1500;   // above this it cannot be drift
+    // A frame that left the host longer ago than this is stale, and so is every
+    // frame behind it in the socket; see VideoDecoder.skipToNextKey.  250 ms is
+    // far above the normal 0-2 ms and far below the point where the picture
+    // starts to feel late, so it can only fire when we really lost ground.
+    private static final long STALE_SKIP_US = 250000;
 
     public interface Listener {
         void onStatus(String text, boolean streaming);
@@ -229,6 +234,10 @@ public class StreamClient extends Thread {
         control.write(facing);
         control.flush();
         decoder.setClockSkew(clockSkewUs);
+        // The note names the encoder ("NVENC HEVC", "x265", "AMF HEVC", ...), so
+        // it is also how the phone learns which MIME type to decode.  H.264 is
+        // the default and the only thing older hosts send.
+        decoder.setCodec(note.contains("HEVC") || note.contains("x265"));
         decoder.setFormat(w, h, fps);
         videoSize(w, h, fps);
         if (listener != null) {
@@ -252,6 +261,23 @@ public class StreamClient extends Thread {
         long latSum = 0;
         int latCount = 0;
         long latMin = Long.MAX_VALUE;
+        // The handshake timestamp is taken on the host before the header is
+        // written, so anything the host did between the two lands in the clock
+        // offset.  Measured: it is usually under a millisecond, but it once came
+        // out 10 ms the wrong way and every latency sample was then negative --
+        // the overlay showed 0 ms and not a single sample was counted.  So the
+        // absolute minimum is watched as well: latMin above only follows
+        // positive samples (the drift correction needs that), while latMinAll
+        // below includes negative ones and is used to catch a handshake that
+        // landed on the wrong side of zero.
+        long latMinAll = Long.MAX_VALUE;
+        // Once the offset has been corrected there is nothing left to correct:
+        // a handshake lands on the wrong side of zero at most once per session.
+        // Until then the early check runs every ten frames, because the stall
+        // that spoils the handshake does not always happen in the first tenth
+        // of a second (measured: one run wasted the whole first window at
+        // fps=41 with a p90 of 82 ms because the stall came 300 ms in).
+        boolean clockFixed = false;
         // The reference the drift is measured against: the window minimum of a
         // window that looked trustworthy.  It is only moved when the level
         // genuinely changes, never to "keep up" with the drift.
@@ -274,15 +300,68 @@ public class StreamClient extends Thread {
             // the only place a frame can go missing without corrupting the P
             // frames that reference it.
             long recvUs = SystemClock.elapsedRealtimeNanos() / 1000 - clockSkewUs;
+            long latUs = recvUs - stampUs;
+            // Falling behind shows up here first: this frame left the host far
+            // too long ago to be worth decoding, and everything behind it in the
+            // socket is just as old.  Left alone, the delay stays at whatever the
+            // stall was for as long as the stream runs.
+            if (latUs > STALE_SKIP_US) {
+                decoder.skipToNextKey("behind by " + (latUs / 1000) + " ms");
+            }
             decoder.feed(unit, 0, len, stampUs, recvUs);
             frames++;
-            long latUs = recvUs - stampUs;
-            if (latUs > 0 && latUs < 5000000L) {
-                latSum += latUs;
+            // A slightly negative latUs is not a frame that went back in time,
+            // it is the two clocks disagreeing; the correction below pulls that
+            // towards zero.  Dropping those samples used to make the whole
+            // statistic vanish whenever the handshake landed the other way.
+            if (latUs > -1000000L && latUs < 5000000L) {
+                latSum += latUs > 0 ? latUs : 0;
                 latCount++;
-                if (latUs < latMin) {
+                // latMin keeps its old meaning on purpose: the smallest
+                // *positive* transfer time seen.  The drift correction below
+                // compares it with the floor of the first window, so feeding it
+                // small negative samples would make that correction chase
+                // noise and pull the clock offset back and forth.
+                if (latUs > 0 && latUs < latMin) {
                     latMin = latUs;
                 }
+                if (latUs < latMinAll) {
+                    latMinAll = latUs;
+                }
+            }
+
+            // The handshake puts the two clocks together exactly once, from a
+            // timestamp the host reads just before it writes the header.  When
+            // the host happens to stall right there (starting the encoder, a
+            // busy disk) the offset lands hundreds of milliseconds the wrong
+            // side and every frame looks like it arrived before it was sent.
+            // Waiting for the two-second report would leave the overlay
+            // reading 0 ms for the first two seconds, so look every ten frames
+            // (a twelfth of a second) until it has been corrected once.
+            if (!clockFixed && frames % 10 == 0 && frames <= 120
+                    && latMinAll != Long.MAX_VALUE && latMinAll < -3000L) {
+                long fix = Math.max(latMinAll, -2000000L);
+                clockSkewUs += fix;
+                decoder.setClockSkew(clockSkewUs);
+                decoder.clearLatency();
+                Log.i(TAG, "clock fix (early): frames arrived " + (fix / 1000.0)
+                        + " ms before they were sent, offset corrected");
+                clockFixed = true;
+                latMinAll = Long.MAX_VALUE;
+                latFloorUs = Long.MIN_VALUE;
+                latMin = Long.MAX_VALUE;
+                // The samples taken before the fix were all negative and got
+                // counted as zero, so this first two-second window used to
+                // report p50 0 ms and a p90 of -1 -- "not measured yet"
+                // dressed up as a latency figure.  Start the window over --
+                // including the frame and byte counters, or the first report
+                // counts frames from before the correction against a window
+                // that only starts now (it read 164 fps for a 120 fps stream).
+                latSum = 0;
+                latCount = 0;
+                frames = 0;
+                bytes = 0;
+                lastReport = System.currentTimeMillis();
             }
 
             long now = System.currentTimeMillis();
@@ -291,6 +370,34 @@ public class StreamClient extends Thread {
                 // Correct accumulated clock drift before reporting, so the number
                 // means "how fast is the pipeline" rather than "how long have we
                 // been connected".
+                // A whole connection of negative samples means the handshake
+                // offset is wrong, not that frames arrive before they are sent.
+                // Correct it in one go and start the drift reference over.
+                // The old cap was 20 ms per window, which never catches up
+                // when the handshake lands more than that the wrong side:
+                // every window corrects another 20 ms, the samples stay
+                // negative, and the overlay reads 0 ms for the whole session.
+                if (latMinAll != Long.MAX_VALUE && latMinAll < -3000L) {
+                    long fix = Math.max(latMinAll, -2000000L);
+                    clockSkewUs += fix;
+                    decoder.setClockSkew(clockSkewUs);
+                    decoder.clearLatency();
+                    clockFixed = true;
+                    Log.i(TAG, "clock fix: frames arrived " + (fix / 1000.0)
+                            + " ms before they were sent, offset corrected");
+                    latMinAll = Long.MAX_VALUE;
+                    latFloorUs = Long.MIN_VALUE;
+                    latMin = Long.MAX_VALUE;
+                    // Report nothing this window: everything in it predates
+                    // the corrected offset.  Wait another two seconds and
+                    // publish a number that was measured with the right clock.
+                    latSum = 0;
+                    latCount = 0;
+                    frames = 0;
+                    bytes = 0;
+                    lastReport = now;
+                    continue;
+                }
                 if (latMin != Long.MAX_VALUE) {
                     if (latFloorUs == Long.MIN_VALUE) {
                         latFloorUs = latMin;
@@ -346,6 +453,7 @@ public class StreamClient extends Thread {
                             + " latency_p90_ms=" + Math.round(decoder.latencyP90Ms())
                             + " latency_max_ms=" + Math.round(st.latencyMaxMs)
                             + " dropped_out=" + decoder.droppedOutputFrames()
+                            + " skipped=" + decoder.skipped()
                             + " net_ms=" + Math.round(decoder.transferMs())
                             + " dec_ms=" + Math.round(decoder.decodeMs())
                             + " samples=" + latCount
