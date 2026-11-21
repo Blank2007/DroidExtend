@@ -19,7 +19,7 @@ DroidExtend 使用说明   v{ver}
   是真扩展桌面，不是投屏镜像： Windows 会多出一块屏，窗口可以拖过去，
   鼠标可以移进去，手机上点一下就是在这块屏上点一下。
 
-延迟实测 13 ms 上屏（主机发出到真的出现在屏幕上，2.1.0 实测 p50 13~15 ms、p90 17~19 ms，其中传输 0~2 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
+延迟实测 15 ms 上屏（主机发出到真的出现在屏幕上，2.1.1 实测 p50 15 ms、p90 18~20 ms，其中传输 0~2 ms），画面走 USB 线，不经过 WiFi、不经过路由器。
 
 【二、手机要先准备两件事】
   1. 打开开发者选项
@@ -224,6 +224,7 @@ DroidExtend 使用说明   v{ver}
   Q: 开机自动开始投屏，结果一直没开始 / 没画面？（1.9.0）
   A: 两个勾都要在：右栏「开机自动启动」和「开机后自动开始投屏」。
      「开机后最多等手机」默认 60 秒，可以改 30 秒 / 2 分钟 / 5 分钟 / 一直等。
+     等手机的时候虚拟屏不会先挂上桌面（2.1.1 起），没插手机桌面一块多余的屏都不会出现。
      等到会自己开始并点亮手机屏幕；等不到会弹一条 Windows 通知
      （窗口在托盘里也看得见）。手动点「开始投屏」或「停止」会立刻让这套自动
      流程退开，不跟人抢按钮。通知里如果说虚拟屏没准备好，先点左栏那个「启用…」
@@ -297,7 +298,7 @@ DroidExtend manual   v{ver}
   drag windows onto it, move the mouse into it, and a tap on the phone is a
   click on that screen.
 
-  Measured latency is 13 ms to the glass (2.1.0: p50 13-15 ms, p90 17-19 ms).  The picture travels over the USB cable -- never
+  Measured latency is 15 ms to the glass (2.1.1: p50 15 ms, p90 18-20 ms).  The picture travels over the USB cable -- never
   over WiFi, never through a router.
 
 [2] Two things to set up on the phone first

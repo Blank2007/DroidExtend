@@ -773,6 +773,35 @@ class Session(object):
         return True
 
     # -------------------------------------------------------------- 2. device
+    def probe_device(self):
+        """看看有没有能用的手机，**不碰屏幕、不装包、不建反向隧道**。
+
+        2.1.2：开机自动投屏必须先知道手机在不在，然后才决定要不要把虚拟屏
+        挂上桌面。探一次 adb devices 只要十几毫秒，失败也只是返回一句人话，
+        屏幕上什么都不会动。返回 (row, why)：找到时 why 是 None。
+        """
+        from adb import Adb
+        try:
+            if self.adb is None:
+                self.adb = Adb()
+            rows = self.adb.devices()
+        except Exception as e:
+            return None, i18n.t("adb 没有应答：%s", "adb did not answer: %s") % e
+        ready = [r for r in rows if r["state"] == "device"]
+        if ready:
+            self.serial = ready[0]["serial"]
+            return ready[0], None
+        if not rows:
+            return None, i18n.t("数据线上没有设备（也可能 USB 调试没打开）",
+                                "there is no device on the cable "
+                                "(or USB debugging is off)")
+        if any(r["state"] == "unauthorized" for r in rows):
+            return None, i18n.t("手机还没授权这台电脑，在手机上点「允许」",
+                                "the phone has not authorised this PC yet -- "
+                                "tap Allow on the phone")
+        states = ", ".join("%s=%s" % (r["serial"], r["state"]) for r in rows)
+        return None, i18n.t("设备状态不对：%s", "the device is in the wrong state: %s") % states
+
     def find_device(self):
         from adb import Adb
         self.adb = Adb()

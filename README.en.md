@@ -45,7 +45,7 @@ You can drag windows off your laptop screen onto the phone and drive them with t
 |---|---|
 | 🖥️ **A real extended desktop** | Not mirroring. A new display shows up under `Win+P`, windows can be dragged onto it, and the mouse can click right on it |
 | 🔌 **Pure USB** | Runs over an `adb reverse` tunnel: no Wi-Fi, no shared subnet, no third-party app on the phone |
-| ⚡ **Low latency** | **13 ms to the glass** (the 2.0.0 definition: the host put it on the wire -> it is really on the screen; 2.1.0 measured p50 13-15 ms / p90 17-19 ms, of which 0-2 ms transfer and 10-16 ms decode plus present) |
+| ⚡ **Low latency** | **15 ms to the glass** (the 2.0.0 definition: the host put it on the wire -> it is really on the screen; 2.1.1 measured p50 15 ms / p90 18-20 ms, of which 0-2 ms transfer and 11-18 ms decode plus present, and it stays there for the whole session) |
 | 👆 **Reverse control** | Taps / drags / a half-second hold = right click / two-finger scrolling on the phone are injected straight into Windows |
 | 🧹 **Stop and it is gone** | Hit `停止` (Stop), or quit the program, and the virtual display is removed from the system immediately — no ghost monitor left behind. Pulling the cable without stopping leaves the screen in place for now; stop once after reconnecting and it goes |
 | 🎛️ **Fully hardware-accelerated pipeline** | Native capture (zero-copy desktop duplication) → `h264_nvenc` (GPU encoding) → `MediaCodec` (phone hardware decoding); capture and encoding barely touch the CPU. Without an NVIDIA card it falls back to ffmpeg `ddagrab` automatically |
@@ -230,6 +230,10 @@ the program comes up in the background at logon and starts waiting for the phone
 * If it never turns up, or a step fails on the way, a **Windows notification** says so (a tray balloon when
   there is a tray icon) instead of a lone message box nobody is there to see
 
+While it waits the **virtual screen is not put on the desktop at all** (since 2.1.1): `adb devices` has to
+see a phone first, and only then does the screen go up. During those minutes without a phone the desktop no
+longer gains an extra screen and loses it every five seconds, and the pointer is not dragged to the far side.
+
 Pressing `开始投屏` (Start) or `停止` (Stop) by hand makes it stand down at once. A round that found
 nothing (say 60 seconds) can always be followed by starting by hand as usual.
 
@@ -361,6 +365,7 @@ converts it using the clock offset established during the handshake.  Since 1.9.
 is "host sent it" to "the phone has it", `dec_ms` is "the phone has it" to "on the glass".  Measured here:
 
 ```
+2.1.1 latency_p50_ms 15      latency_p90_ms 18~20  latency_max 45~55  net_ms 0~2  dec_ms 11~18
 2.0.0 latency_p50_ms 13      latency_p90_ms 23~37  latency_max 43~56  net_ms 0~2  dec_ms 12~16
 2.1.0 latency_p50_ms 13~15   latency_p90_ms 17~19  latency_max 46~55  net_ms 0~2  dec_ms 10~16
 1.9.3  latency_avg_ms 17~31   latency_max 44~61   net_ms 0~12   dec_ms 14~26
@@ -383,7 +388,7 @@ It now uses `os.read(p.stdout.fileno(), 65536)`, which takes data the moment it'
 * `fps` low, `latency` normal → the **USB cable** is out of bandwidth. Run "Measure the cable speed"
   on the PC; below 40 Mbps, replace the cable (on the same phone we measured a 40× spread:
   13.7 Mbps ↔ 597 Mbps).
-* `fps` normal, `latency` high (since 2.1.0 normal is p50 13-15 ms / p90 17-19 ms; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
+* `fps` normal, `latency` high (since 2.1.1 normal is p50 15 ms / p90 18-20 ms; a number that **keeps climbing over one session** instead of hovering is decoder input queue backlog, which 2.1.1 fixed -- if you still see it, send the logcat; sustained > 60 ms counts as high) → the encoder or decoder is queueing. Pick a
   lighter encoder (`h264_nvenc` is the fastest on our machine), or drop to 30 fps.
 * Both numbers fine but the image still stutters → the phone is thermal-throttling; see "Phone side".
 * Even the PC's own mouse starts to lag → the GPU is saturated by something else; see below.

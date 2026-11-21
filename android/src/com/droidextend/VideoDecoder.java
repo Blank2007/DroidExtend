@@ -19,17 +19,36 @@ import java.util.ArrayDeque;
 public class VideoDecoder {
 
     private static final String TAG = "DroidExtend";
-    private static final long DEQ_TIMEOUT_US = 10000L;
+    /**
+     * How long one "give me a free input buffer" call may block.
+     *
+     * This used to be 10 ms, which quietly overrode QUEUE_WAIT_MS: the very
+     * first call could sleep ten milliseconds before answering "no room", so a
+     * full input queue stalled the socket reader for a whole frame plus change
+     * on every frame.  One millisecond answers the same question and leaves the
+     * wait budget to QUEUE_WAIT_MS.
+     */
+    private static final long DEQ_TIMEOUT_US = 1000L;
 
     /** How long the drain thread sleeps inside the codec when no picture is ready. */
     private static final long DEQ_OUTPUT_US = 5000L;
 
     /**
      * How long to keep asking for an input buffer before giving up on this
-     * frame.  Short enough that a healthy decoder never notices, long enough
-     * to bridge the millisecond-scale gaps between the decoder's own threads.
+     * frame -- 2 ms, not 40.
+     *
+     * This number used to be 40 ms, and it was the engine of the drift that
+     * made the overlay climb from 15 ms to 43 ms over one session: whenever the
+     * decoder's input queue was full the socket reader slept for 40 ms, the
+     * host kept writing five more frames in that time, the TCP buffer filled up
+     * with frames nobody had read yet, and the next frame was older still.  The
+     * wait did not make the decoder faster, it only moved the backlog from the
+     * decoder into the socket, where nothing ever drained it.  Two milliseconds
+     * is under a quarter of a 120 Hz frame: long enough to ride out the
+     * codec's own thread hand-off, short enough that a full queue costs less
+     * than a frame and the reader keeps up with the wire.
      */
-    private static final long QUEUE_WAIT_MS = 40L;
+    private static final long QUEUE_WAIT_MS = 2L;
 
     /**
      * Where decoder events go so the host can write them into its own log.

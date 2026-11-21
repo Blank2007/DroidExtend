@@ -5051,6 +5051,138 @@ If you want a lower bit rate later, use CQ; if you want a sharper picture, also 
 - When the measurement itself changes, re-measure the baseline. The old build only counted surviving samples and therefore looked better; using it as a baseline leads to exactly the wrong conclusion.
 - Enabling an encoder is not just a GUID swap: the set of keyframe types, which parameter sets the CSD needs, and the NALU header length will all bite.
 
+## 48. 2.1.1: The delay climbs on its own, because it was waited into existence
+
+### 48.1 One sentence sent me back to the logs
+
+The day 2.1.0 shipped, the user said the delay still creeps upward, from 15 ms at the start to 43 ms.
+
+Every measurement I had run was 15 to 60 seconds long. In a 60-second window the delay is flat, of course: climbing from 15 to 43 takes much longer than that. He was playing a game, which means fifteen minutes.
+
+### 48.2 Start with the log from his own machine
+
+`D:\DroidExtend\DroidExtend.log`, v2.1.0, versionCode 42, virtual screen 2560x1700@120:
+
+```
+20:24:14 拓展屏就绪: \\.\DISPLAY22 -> 2560x1700@120 at (-2560,0)
+20:24:28 采集 120 fps · 发送 16.6 Mbps · 手机 收 120 fps / 显示 120 fps · 14 ms
+20:24:40 手机: behind (behind by 2048 ms), skipping to the next keyframe
+20:24:40 手机: behind (behind by 1871 ms), skipping to the next keyframe
+20:24:51 采集 120 fps · 发送 20.4 Mbps · 手机 收 120 fps / 显示 119 fps · 24 ms
+20:36:28 采集 120 fps · 发送 13.0 Mbps · 手机 收 120 fps / 显示 119 fps · 23 ms
+```
+
+Twenty-five seconds after start, the phone is two seconds behind. After one keyframe skip the delay goes from 14 to 24 and never returns to 14 for the rest of the session. The same log holds the disaster records of earlier builds: 4569 ms at 19:58, 6151 ms at 20:01, 7032 ms at 20:17 -- all the same chain, after it had given up catching up.
+
+The shape of the bug is visible: **the delay is not added up, it is waited into existence, and every wait raises the floor for good.**
+
+### 48.3 How a 40 ms wait becomes two seconds of backlog
+
+The decoder's input queue is finite (Android AVC/HEVC decoders usually expose 4 to 8 buffers). Once it is full, `dequeueInputBuffer` hands out nothing, and the old code waited in two places:
+
+```java
+private static final long DEQ_TIMEOUT_US = 10000L;   // one call may sleep 10 ms
+private static final long QUEUE_WAIT_MS = 40L;       // up to 40 ms per frame
+```
+
+That looks like "wait a moment and there will be room". What it really means: the socket reader spends those 40 to 50 milliseconds **not reading the socket**, while the host keeps writing 5 or 6 more frames at 120 fps. The next frame finds the queue full again, so it waits another 40 milliseconds -- and every round starts further behind. It is a positive feedback loop: the longer it waits, the deeper it stacks; the deeper it stacks, the longer it waits. Only one external condition breaks it, and the code had it at "this frame is more than 250 ms old, jump to the next keyframe".
+
+A keyframe skip fixes the picture, not the backlog: it flushes the decoder, while the hundreds of kilobytes already in the socket stay there and have to be read and thrown away one by one. That is why the delay comes back higher than it started -- what is left in the socket becomes the new baseline.
+
+There is a second, smaller, same-direction problem. The slow drift correction runs every 2 seconds and adjusts `StreamClient.clockSkewUs`; the number on the overlay is computed from the copy inside `VideoDecoder`, and that copy had not been updated since the handshake. The comment in the code already said it: a few dozen ppm of crystal difference is tens of milliseconds in half an hour. The backlog lifts the baseline to 24, the drift keeps adding on top, and the user sees a line climbing steadily.
+
+### 48.4 Four changes
+
+1. `VideoDecoder.DEQ_TIMEOUT_US`: 10000 -> 1000. It had been silently overriding `QUEUE_WAIT_MS`: the very first call could sleep the full 10 ms, so "wait at most 2 ms" never existed.
+2. `VideoDecoder.QUEUE_WAIT_MS`: 40 -> 2. Two milliseconds absorbs jitter from NVENC or the decoder, and is not enough to move the backlog into the socket.
+3. The return value of `decoder.feed(...)` in `StreamClient` used to be **thrown away** -- the comment inside `VideoDecoder` says "the caller waits briefly and retries", and no caller ever waited. The reader thread now really waits: up to 100 ms, retrying the same access unit every 1 ms, and only then `skipToNextKey("decoder busy")`. This is the load-bearing change: **only when the reader stops does the host's `write` block, the capture queue fill up, and NVENC drop the frame before encoding it.** Dropping before encoding is the only drop that does not break the reference chain.
+4. `StreamClient.STALE_SKIP_US`: 250000 -> 120000 -- one frame deep is deep enough to correct, no need to wait for two seconds. The drift branch also calls `decoder.setClockSkew(clockSkewUs)` now, so the overlay and net_ms share one offset.
+
+In one line: **the old code traded frames for sleep, the new code pushes the pressure back to the host.**
+
+### 48.5 Measurements
+
+Mirror mode on this machine (capturing the primary screen, 2560x1600@120, USB, tablet 24091RPADC, versionCode 44), three runs:
+
+| Scenario | Length | Host line | p50 | p90 | behind / queue-full events |
+| --- | --- | --- | --- | --- | --- |
+| Idle desktop | 6 minutes | 采集 120 fps · 12~16 Mbps · 手机 120/120 fps · 15 ms | 15.4 -> 15.4 -> 15.0 | 18~20 | **0** |
+| Moving window (1600x1000, repainted every 8 ms) | 200 s of it | same | 15 | 18~20 | **0** |
+| Full-screen noise + Q14 | 5 minutes | 采集 120 fps · 33 Mbps · 手机 120/120 fps · 17 ms | 15 -> 17~18 | 22~33 | **0** |
+| Idle desktop, **20 minutes** | 1217 s | 采集 120 fps · 12~16 Mbps · 手机 120/120 fps · 15 ms | 15.2 -> 14.6 -> 14.0 (first/mid/last 5 windows) | 18~20 | **0** |
+| **Extended screen 2560x1700, 20 minutes** (same resolution as his) | 1225 s | 采集 120 fps · 发送 17.2 -> 15.3 Mbps · 手机 120/119 fps · 15 ms | 15.6 -> 15.8 -> 15.4 | 20~21 | **0** |
+| **Extended screen 2560x1700, 40 minutes** | 2427 s | 采集 120 fps · 发送 14 Mbps · 手机 120 fps · 15 ms | 15.6 -> 15.0 -> 15.6 | 20~21 | **0** |
+
+The 20-minute run is the direct answer to the complaint: across 59 report windows p50 never went below 13 or above 16 --
+15.2 over the first five windows, 14.6 over the middle five, 14.0 over the last five -- with no monotonic rise anywhere,
+and `skipped` parked at the single start-up value (255) the whole time, meaning not one keyframe jump happened mid-run.
+
+The last row was built to match his setup: the virtual extended screen was created at **exactly his 2560x1700@120** and left running for 20 minutes (1225 s).
+Across 30 report windows p50 was 15.6 over the first five, 15.8 over the middle five and 15.4 over the last five -- min 15, max 16,
+p90 20~21, max 44~53 -- and `skipped` was one constant (119, the start-up one) with no `behind` at all.
+A second run of 40 minutes (2427 s, 55 windows) gave 15.6 -> 15.0 -> 15.6, again with min 15 and max 16 and `skipped` still 119.
+In other words, **at his resolution nothing crept up in forty minutes**. The two-second backlog in his log was the start of this whole thread,
+and it happened on 2.1.0: 25 seconds in, already two seconds behind. Same resolution now, twenty minutes, not one millisecond more.
+
+All four hold the same number from the first window to the last. Bitrate doubles, p90 rises to 33, `net_ms` goes from 1 to 2~4, and p50 still does not climb; `skipped` is a constant throughout (the one from start-up) and there is not a single `behind` event.
+
+The control run is the same mode on the same machine before the change: 5 minutes, p50 17 to 18, and one `behind by 122 ms` in the middle.
+
+### 48.6 Putting the screen up before looking for the phone
+
+Auto-start streaming (since 1.9.0) has always gone in this order: call `apply_display()` to put the virtual screen on the desktop, then `find_device()` to look for the phone. One sentence from the user cut it apart:
+
+> 开机后你应该先检测设备是否链接再激活虚拟屏 而不是先拉起屏幕再检测手机 这个逻辑很有问题
+
+(You should check whether the device is connected before activating the virtual screen, not raise the screen first and detect the phone afterwards. This logic is really wrong.)
+
+He was right. When no phone is connected, `_auto_stream_worker()` retries every `AUTO_RETRY` (5 s), and every attempt is: mount the screen → fail to find the phone → `session.stop()` takes the screen down → wait five seconds → again. Worse, mounting the screen is not cheap: it picks a size from the phone's resolution, sometimes writes that size into the driver mode table and restarts the driver (~4 s), and `_put_on_desktop()` switches the topology on top of that. So during the minutes without a phone the desktop flashed every five seconds, the pointer was dragged to the x=3200 side, and the driver restarted over and over.
+
+The order was also wrong functionally: `_match_phone()` already contained `if self.adb is None: self.find_device()` — the size of the screen was read from the phone in the first place. Screen-first was doing that work backwards.
+
+Two changes:
+
+1. In `_start_work()`, `find_device()` now runs before `apply_display()`. The manual "start streaming" button goes through the same path, so clicking it without a phone no longer lights up a screen either.
+2. In `_auto_stream_worker()`, every retry first calls the new `Session.probe_device()`: it only runs `adb devices` — no APK install, no reverse tunnel, no touch of the virtual screen. With no usable device it never enters `_start_work()`, the screen does not move, and the log says why.
+
+`probe_device()` returns `(row, why)`, where `why` is a human sentence meant for the log:
+
+| Situation | `why` |
+| --- | --- |
+| Device online | `None` (`row` is the device row) |
+| `adb devices` returns an empty list | 数据线上没有设备（也可能 USB 调试没打开） |
+| State is `unauthorized` | 手机还没授权这台电脑，在手机上点「允许」 |
+| Any other state (`offline` etc.) | 设备状态不对：`<serial>=<state>` |
+| adb itself cannot start | adb 没有应答：`<exception>` |
+
+Log lines are rate limited: the first two attempts say it plainly, then once every twelve retries (about a minute); when the phone appears the log adds "手机上线了（…），开始准备拓展屏". Both states are legible in the log.
+
+### Measurements: not one extra screen ever appeared
+
+**Phone unreachable** — point `ADB_SERVER_SOCKET` at a port nobody listens on (`tcp:127.0.0.1:1`); the adb client then finds no device. That is equivalent to "the phone had not woken up yet at boot" and is easier to automate than unplugging a cable. Start with `--stream` and wait 26 seconds:
+
+```
+22:42:57 开机自动投屏：开始等手机（最多等 30 秒）。
+22:42:59 开机自动投屏：还没看到手机（设备状态不对：adb.exe:=?），虚拟屏先不动。
+22:43:00 虚拟显示器状态: 设备节点存在，但屏幕未激活
+22:43:06 开机自动投屏：还没看到手机（设备状态不对：adb.exe:=?），虚拟屏先不动。
+```
+
+The monitor list was `[{"name": "\\\\.\\DISPLAY1", "w": 2560, "h": 1600, "primary": true}]` before and after — not one extra pixel. The old build would have shown a 2560x1700 virtual screen here and removed it five seconds later.
+
+**Phone present**: `22:43:56 开机自动投屏：第 1 次尝试` → `22:43:57 设备: 24091RPADC  [device]  d1de99c4` → `22:43:57 虚拟显示器状态: …`. Device first, screen second — the order it should have had. In this run the virtual-screen node was still in the deep-off state, so `apply_display()` reached "正在请求管理员权限" and stopped there because nobody clicked the UAC prompt; this round therefore verified the order only, and the streaming numbers remain those of 48.5.
+
+**A lesson about isolation**: running `python host/app.py` from source makes `paths.data_dir()` fall back to the repository root — it wrote `settings.json` and `DroidExtend.log` into the repo and `_sync_autostart()` rewrote `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DroidExtend` to `"C:\Python314\pythonw.exe" "...\\host\\app.py" --minimized --stream`. Tests must set `DROIDEXTEND_HOME` to a temporary directory, and the registry value has to be restored to the installed `"D:\DroidExtend\DroidExtend.exe" --minimized --stream` afterwards.
+
+### 48.7 Lessons
+
+> "Wait a moment" is polite on a single machine and is debt on a chain. The chain does not stop because you wait; it turns that time into a queue.
+
+- Every blocking point must **pass the pressure back**, otherwise it is a buffer. A decoder that waits 40 ms is a 40 ms buffer bolted onto the socket.
+- A contract nobody honours is not written: the comment said "the caller retries", the caller did not, so every frame was dropped and dropped silently.
+- Set the threshold by "one frame", not by "how much I can stand". 120 ms is already 14 frames at 8.33 ms.
+- Two clock offsets are two truths. The overlay had one, the statistics had another, and only one of them was being corrected.
+- When a user reports "it keeps climbing", do not re-run another 60 seconds -- **change the time scale**. This culprit fired first at 25 seconds and again at 20 minutes.
 
 ---
 

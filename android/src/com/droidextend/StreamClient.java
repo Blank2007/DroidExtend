@@ -34,10 +34,17 @@ public class StreamClient extends Thread {
     private static final long DRIFT_MIN_US = 50;     // below this it is just jitter
     private static final long DRIFT_CAP_US = 1500;   // above this it cannot be drift
     // A frame that left the host longer ago than this is stale, and so is every
-    // frame behind it in the socket; see VideoDecoder.skipToNextKey.  250 ms is
-    // far above the normal 0-2 ms and far below the point where the picture
-    // starts to feel late, so it can only fire when we really lost ground.
-    private static final long STALE_SKIP_US = 250000;
+    // frame behind it in the socket; see VideoDecoder.skipToNextKey.  120 ms is
+    // far above the normal 0-2 ms and low enough that a backlog gets caught
+    // while it is still one frame deep instead of two seconds deep; firing this
+    // late used to cost a visible stutter and left the delay permanently higher.
+    private static final long STALE_SKIP_US = 120000;
+    // How long to sit on one access unit while the decoder says "no room yet".
+    // Waiting here is not the same as sleeping: while this thread is not reading
+    // the socket, the host's write blocks and its encoder drops the frame
+    // *before* encoding it, which is the only place a frame can go missing
+    // without corrupting the P frames that follow.  See VideoDecoder.queue().
+    private static final long FEED_RETRY_MS = 100;
 
     public interface Listener {
         void onStatus(String text, boolean streaming);
@@ -308,7 +315,24 @@ public class StreamClient extends Thread {
             if (latUs > STALE_SKIP_US) {
                 decoder.skipToNextKey("behind by " + (latUs / 1000) + " ms");
             }
-            decoder.feed(unit, 0, len, stampUs, recvUs);
+            // feed() answers false when the decoder has no free input buffer at
+            // this instant.  The comment inside VideoDecoder says the caller
+            // waits and retries, and this is that caller: throwing the unit away
+            // instead puts a hole in the P-frame chain *and* leaves the socket
+            // backlog growing at full speed, which is exactly how the delay used
+            // to climb from 15 ms to 40 ms over a few minutes and never come
+            // back down.  Stopping the reads for a moment pushes the pressure
+            // back up to the host, where dropping is free.
+            long retryUntil = SystemClock.elapsedRealtime() + FEED_RETRY_MS;
+            while (running && !decoder.feed(unit, 0, len, stampUs, recvUs)) {
+                if (SystemClock.elapsedRealtime() >= retryUntil) {
+                    // The decoder cannot keep up at all, not even a burst:
+                    // resynchronise on the next IDR rather than smearing.
+                    decoder.skipToNextKey("decoder busy");
+                    break;
+                }
+                SystemClock.sleep(1);
+            }
             frames++;
             // A slightly negative latUs is not a frame that went back in time,
             // it is the two clocks disagreeing; the correction below pulls that
@@ -409,6 +433,15 @@ public class StreamClient extends Thread {
                             latFloorUs = latMin;
                         } else if (Math.abs(excess) > DRIFT_MIN_US) {
                             clockSkewUs += excess;
+                            // The decoder measures the *same* wire-to-glass time
+                            // for the overlay, against its own copy of the
+                            // offset.  Correcting only this side left the two
+                            // copies drifting apart at the crystal rate: the
+                            // overlay kept climbing (measured: 15 ms -> 43 ms in
+                            // one session) while net_ms looked healthy, because
+                            // net is computed here and the shown delay is
+                            // computed there.
+                            decoder.setClockSkew(clockSkewUs);
                             Log.i(TAG, "clock resync: the two clocks drifted "
                                     + (excess / 1000.0) + " ms, offset corrected");
                         }

@@ -2194,11 +2194,18 @@ class App(tk.Tk):
         self.run_bg(self._start_work)
 
     def _start_work(self):
+        # 2.1.2 -- 先找手机，再把虚拟屏放上桌面。
+        # 反过来做的代价是用户实测报的那个顺序问题：手机还没连上就
+        # apply_display()，虚拟屏已经挂到桌面上（要改分辨率时还得重启驱动，
+        # 四秒多），然后 find_device() 失败，又得把屏摘掉；开机自动投屏每
+        # AUTO_RETRY 秒重来一次，于是桌面每隔五秒就多一块没人看的屏、鼠标被
+        # 拖到 3200 那一侧、驱动反复重启。现在设备没就位时一块屏都不会出现。
+        self._later(lambda: self.stat_var.set(i18n.t("连接手机…",
+                                                     "Connecting to the phone...")))
+        self.session.find_device()
         self._later(lambda: self.stat_var.set(i18n.t("准备拓展屏…",
                                                      "Preparing the extended display...")))
         self.session.apply_display()
-        self._later(lambda: self.stat_var.set(i18n.t("连接手机…", "Connecting to the phone...")))
-        self.session.find_device()
         self.session.prepare_device()
         self._later(lambda: self.stat_var.set(i18n.t("启动编码…", "Starting the encoder...")))
         self.session.start_stream()
@@ -2336,7 +2343,10 @@ class App(tk.Tk):
         wait = self._wait_value()
         t0 = time.time()
         attempt = 0
+        quiet = 0
         fatal = None
+        if self.session is None:
+            return
         while not self._auto_cancel.is_set():
             if self.busy:
                 # 有人在用（手动点了按钮，或者环境刷新在跑）：让开，别抢按钮。
@@ -2344,6 +2354,29 @@ class App(tk.Tk):
                 continue
             if wait > 0 and time.time() - t0 >= wait:
                 break
+            # 2.1.2 -- 先问一句「手机在吗」，看清楚再动屏幕。
+            # 这条探测只跑 adb devices，不装包、不建隧道、不碰虚拟屏，所以
+            # 手机还没上线的这几分钟里桌面完全不会变；旧顺序是先把屏挂上
+            # 桌面（要改分辨率时还会重启一次驱动），发现没手机再摘掉，五秒
+            # 后从头再来一遍。
+            row, why = self.session.probe_device()
+            if row is None:
+                quiet += 1
+                # 前两次说清楚，之后每十二次（约一分钟）提一下，别刷屏。
+                if quiet <= 2 or quiet % 12 == 0:
+                    self.log("开机自动投屏：还没看到手机（%s），虚拟屏先不动。" % why,
+                             "err" if quiet <= 2 else None)
+                    self._later(lambda: self.stat_var.set(
+                        i18n.t("等手机…", "Waiting for the phone...")))
+                left = wait - (time.time() - t0)
+                if wait > 0 and left <= 0:
+                    break
+                self._auto_cancel.wait(AUTO_RETRY if wait <= 0
+                                       else max(1.0, min(AUTO_RETRY, left)))
+                continue
+            if quiet:
+                self.log("开机自动投屏：手机上线了（%s），开始准备拓展屏。" % row["label"])
+                quiet = 0
             attempt += 1
             self.busy = True
             self._later(lambda: self.btn_start.configure(state="disabled"))
@@ -2393,7 +2426,7 @@ class App(tk.Tk):
                                 "The virtual display is not ready -- press \"%s\" first.")
                          % _install_driver_label())
             return
-        self.log("开机自动投屏：%s没等到手机，先放弃。"
+        self.log("开机自动投屏：%s没等到手机，先放弃（虚拟屏一次都没挂上桌面）。"
                  % ((i18n.t("等了 %d 秒" % wait, "after %d s" % wait) + " ") if wait > 0 else ""),
                  "err")
         self._notify("fail",
