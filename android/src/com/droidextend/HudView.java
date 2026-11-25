@@ -3,6 +3,7 @@ package com.droidextend;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -48,6 +49,7 @@ public class HudView extends View {
     private final Paint gearPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gearBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gearPressBg = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint gearEdgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint centrePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint centreSubPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
@@ -118,10 +120,15 @@ public class HudView extends View {
         gearPaint.setColor(cText);
         gearPaint.setStyle(Paint.Style.STROKE);
         gearPaint.setStrokeCap(Paint.Cap.ROUND);
-        gearBgPaint.setColor(0x40060C18);
+        // The button sits on live video, so it keeps a translucent fill -- but
+        // a neutral charcoal rather than the old blue-black, and a hairline
+        // edge so it reads as a control instead of a smudge.
+        gearBgPaint.setColor(0x800E0F12);
         gearBgPaint.setStyle(Paint.Style.FILL);
-        gearPressBg.setColor(0x70060C18);
+        gearPressBg.setColor(0xB30E0F12);
         gearPressBg.setStyle(Paint.Style.FILL);
+        gearEdgePaint.setStyle(Paint.Style.STROKE);
+        gearEdgePaint.setStrokeWidth(dp(1));
 
         centrePaint.setColor(cText);
         centrePaint.setTextSize(sp(19));
@@ -355,14 +362,22 @@ public class HudView extends View {
      * A "tune" glyph: three sliders, each with a knob at a different position.
      * A cog drawn from eight radial stubs reads as a ship's wheel at this size;
      * sliders stay legible and cost three lines and three dots.
+     *
+     * The plate under it is a rounded square, not a circle: the host window's
+     * controls are all rounded rectangles with a 1px edge, and a square sits
+     * flush in a corner the way a circle refuses to.
      */
     private void drawGear(Canvas c) {
         // Pressed state, so a press that has not moved yet still answers.  The
         // button used to only light up while dragging, which made a normal tap
         // feel like the app had not heard it.
         int ink = dragging ? cGood : cText;
-        c.drawCircle(gearCx, gearCy, gearR * (dragging ? 1.08f : 1f),
-                dragging ? gearPressBg : gearBgPaint);
+        float half = gearR * (dragging ? 1.06f : 1f);
+        float rad = dp(8);
+        RectF box = new RectF(gearCx - half, gearCy - half, gearCx + half, gearCy + half);
+        c.drawRoundRect(box, rad, rad, dragging ? gearPressBg : gearBgPaint);
+        gearEdgePaint.setColor(dragging ? 0x66FFFFFF : 0x33FFFFFF);
+        c.drawRoundRect(box, rad, rad, gearEdgePaint);
         gearPaint.setStyle(Paint.Style.STROKE);
         gearPaint.setStrokeWidth(dp(dragging ? 2.6f : 2.1f));
         gearPaint.setColor(ink);
@@ -379,16 +394,16 @@ public class HudView extends View {
     /**
      * Is this touch on the button?
      *
-     * The target is deliberately larger than the drawn circle: 28dp was hard
-     * to hit with a finger on glass, and this button is the only way back into
-     * the settings once the read-out covers something.  34dp is the smallest
+     * The target is deliberately larger than the drawn plate: 28dp was hard to
+     * hit with a finger on glass, and this button is the only way back into the
+     * settings once the read-out covers something.  34dp across is the smallest
      * that still feels like a button rather than a skilful aim.
      */
     private boolean onGear(MotionEvent e) {
-        float dx = e.getX() - gearCx;
-        float dy = e.getY() - gearCy;
-        float r = Math.max(gearR * 1.5f, dp(34f));
-        return dx * dx + dy * dy <= r * r;
+        float dx = Math.abs(e.getX() - gearCx);
+        float dy = Math.abs(e.getY() - gearCy);
+        float half = Math.max(gearR * 1.25f, dp(17f));
+        return dx <= half && dy <= half;
     }
 
     @Override

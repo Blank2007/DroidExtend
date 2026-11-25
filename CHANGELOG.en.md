@@ -5184,6 +5184,131 @@ The monitor list was `[{"name": "\\\\.\\DISPLAY1", "w": 2560, "h": 1600, "primar
 - Two clock offsets are two truths. The overlay had one, the statistics had another, and only one of them was being corrected.
 - When a user reports "it keeps climbing", do not re-run another 60 seconds -- **change the time scale**. This culprit fired first at 25 seconds and again at 20 minutes.
 
+## 49. 2.2.0: rebuilding the interface, backwards from a mockup
+
+### 49.1 It started with "this looks bad"
+
+The first thing the user said after 2.1.1 shipped that was not about latency was about the window: the interface is ugly, redo it -- keep it spare, and follow Windows light/dark.
+
+That was hard to argue with. The 2.1.1 window was stock tkinter: ttk themed buttons, the system white title bar, blue-grey group frames. In dark mode it was worse -- the content was black, the title bar was white, the menu bar was white. Three programs stacked on top of each other. Every row worked; none of them had been designed.
+
+### 49.2 Mockups first, code second
+
+The first thing I did was not to touch the code. I laid out two dozen HTML mockups in `ui_mock/`, because tkinter cannot draw anywhere near as much as a browser can: designing while coding means both sides compromise and neither is what you wanted. Having the target on paper first tells you which parts of it tkinter can reach and which ones have to be dropped.
+
+Round one was three layouts: A, status first (one big dot and four numbers across the top); B, a two-card chain (capture side, phone side); C, a sidebar. The user did not pick any of them. He said: draw a few more in the codex design style.
+
+So I looked up the published OpenAI brand values and pinned down what could be pinned: Charcoal `#0E0F12`, Mist `#F5F7FA`, Steel `#9EA1AA`, green `#10A37F`, a 4px grid, 12px card radius, 14px body. That gave D (cards), E (dividers plus a black terminal-style log), and F (a left nav rail). The user picked E.
+
+E also happened to be the one tkinter could actually reach: almost no nested rounding, mostly 1px rules and one flat log panel. D and F are "cards inside cards inside buttons" -- about 85% reachable in Tk. E was about 95%.
+
+(Later he added "drop the dividers too". So the shipped window draws none of the `.sep` rules and separates groups with whitespace alone. That is the one deliberate difference from the mockup.)
+
+### 49.3 Why the framework stayed
+
+PySide6, PyQt6 and pywebview were all evaluated and all rejected:
+
+1. **Size.** The PyQt6 runtime adds roughly forty megabytes; the whole 2.1.1 installer is 37 MB. Doubling the download to look nicer is a bad trade.
+2. **Type.** I tried to bring Inter in from rsms/inter v4.1. Thirty megabytes, and both attempts were killed by a 120-second tool timeout, leaving an incomplete zip (`ZipFile` reported "end-of-central-directory record not found"). Gave up and kept `Microsoft YaHei UI`.
+3. **Rounded corners.** The plan was Pillow-drawn corner tiles with alpha. This machine's Python 3.14 has no Pillow (`ModuleNotFoundError`). So corners became `tk.PhotoImage` pixels blended by hand -- no alpha channel needed if you know the background colour.
+
+### 49.4 `ui_kit.py`: design pixels, in Tk
+
+`host/ui_kit.py` (851 lines), one class per widget. The rules that matter:
+
+**Font sizes are negative pixels.** `tkfont.Font(family="Microsoft YaHei UI", size=-px(12.5))`. A positive size in Tk is points and gets multiplied by the system scaling again; a negative one is pixels. Together with `SetProcessDpiAwareness(2)` and `uk.set_scale(root.winfo_fpixels("1i") / 96.0)`, a 12.5px mockup value lands as 12.5px at 125% scaling -- neither blurry nor inflated.
+
+**Corners are 12x12 tiles.** `corner_image(radius, fill, bg, border=None, corner="tl")` computes per-pixel coverage around the arc centre and blends, so the edges are anti-aliased. Radius 8 to 12, used for the window, cards, buttons and fields.
+
+Trap one: the arc centre has to sit on the *inner* corner of that tile -- `(size, size)` for top-left, `(0, size)` top-right, `(size, 0)` bottom-left, `(0, 0)` bottom-right. I wrote `(0.5, 0.5)` first, which turns every corner into a solid square, and it looks exactly like "rounded corners did not apply".
+
+Trap two: you cannot assign `self._w` on a `tk.Canvas` subclass. tkinter stores the widget path there and overwrites it with your value, after which everything fails with `_tkinter.TclError: invalid command name "45"` -- 45 being my own width.
+
+The set: `Card` (1px border, four corners, inner padding), `RoundButton` (primary / soft / ghost / icon), `RoundCheck`, `RoundRadio`, `RoundSelect` (with `editable=True` for the bitrate cap), `RoundEntry`, `Pill`.
+
+One more `Card` detail: the inner fill rectangle covers the corners into right angles unless it is inset. `max(1, int(r * 0.34))` is enough to cover the border and not enough to eat the radius; the first version used `pw or 1` and the log card had square corners for a day.
+
+### 49.5 Four things about a borderless window
+
+**One, remove the frame.** `overrideredirect(True)`, then draw the title bar: `DroidExtend`, "安卓拓展屏", the version pill, and ⚙ / minimise / maximise / close on the right.
+
+**Two, drag it yourself.** `press` records `event.x_root - winfo_x()`; `move` calls `geometry("+%d+%d")`. Position and size go into `settings.json` under `window` (app.py:933) and come back through `_safe_geometry()` on the next start. A 12x12 grip at the bottom right resizes it.
+
+**Three, round the window.** DWM first: `DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, DWMWCP_ROUND=2)`. That works on normal windows and **does nothing at all for an `overrideredirect` window** -- measured: the borders were clipped, the four corners stayed square. The only way left is `gdi32.CreateRoundRectRgn` plus `user32.SetWindowRgn`, radius `12 * DPI`, swapped for `CreateRectRgn` when maximised. It has to be re-applied whenever the size changes, so `<Configure>` carries a 120 ms-throttled `_fix_corners()`.
+
+**Four, a dark title bar.** `DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, 1)`, then attribute 34 for the border colour out of the active palette. Timing matters: it only takes effect after the window is mapped, so `_build()` schedules it twice, at `after(120)` and `after(900)`.
+
+### 49.6 The menu bar: `tk.Menu` is always a white strip when dark
+
+Used as a menu bar, `tk.Menu` is drawn by Windows, follows the system theme, and in dark mode is a permanent white band -- the loudest thing on the window.
+
+It became one `ttk.Frame` row of five classic `tk.Menubutton`s: `bg=pal["bg"], fg=pal["dim"], bd=0, relief="flat", highlightthickness=0`, hover swapping to `pal["hover"]`.
+
+Not `ttk.Menubutton`, because the clam theme paints the dropdown arrow about a centimetre to the right of the label and no style option moves it. The classic `Menubutton` has no arrow at all. The dropdowns themselves are still `tk.Menu(tearoff=0)`, but `bg / fg / activebackground / activeforeground / selectcolor` all come from the palette.
+
+The whole row later moved under the `≡` at the left of the title bar -- the mockup has no menu row, so the window lost a row of height.
+
+### 49.7 Settings moved into the same window
+
+The user said: "try to put the settings inside the same window".
+
+So `_open_settings` no longer creates a Toplevel. It unhooks `view_main` and packs `view_set` into the same body, with "← back" at the top left and "Done" at the top right; visually it is a page swap.
+
+The layout is a 150px nav rail (six ghost buttons, the active one light-grey and bold) plus the page area; all six pages share `grid(row=0, column=0)` and switch with `grid_remove`, so none of them is rebuilt. Window height follows the current page's `winfo_reqheight()` (`_fit_settings()`), and closing settings returns it to 640 logical pixels.
+
+The ttk checkboxes, radios and comboboxes went the same way: the clam indicator paints a cross (not a check) when selected, and it ignores the palette entirely. `ttk.Combobox` has the same problem.
+
+### 49.8 Three rounds of rework
+
+1. **"Sort the hierarchy out, use the light greys like codex does."** Section titles went from 13px in the foreground colour to 12.5px in `dim`; checkbox and radio selection went from near-black to `chk` (`#191A1E` light, `#3B3E44` dark). The only saturated colour left in the window is the status dot.
+2. **"Put the settings icon back."** I had replaced ⚙ with a canvas-drawn gear. The user did not want it; it is a character again.
+3. **"Where did the rounded corners go?"** Half a real bug, half my own bad screenshot. The real bug is 49.5 -- DWM does not round borderless windows. The bad screenshot was taken while the window sat behind another one, so `ImageGrab` captured the occluded pixels and the corners were square by definition. **Lesson: `attributes("-topmost", True)` before every capture.**
+
+### 49.9 The phone app, same greys
+
+Once the host window went grey, the phone still had the old palette: a blue accent, system-blue checkboxes, Material grey buttons. One product, two colour schemes.
+
+The palette came straight out of the host's dark set: `#0E0F12` panel, `#ECECEC` primary text, `#9EA1AA` secondary, `#2A2C31` border, `#141519` row, `#3FD1A5` good, `#E0A93B` warning. All of it into `android/res/values/colors.xml`, with `accent` changed from blue to white (`#FFECECEC`) and `accent_ink` -- the text on a selected control -- set to the panel colour.
+
+**Trap: an XML comment may not contain `--`.** I wrote `greys -- one saturated colour` above the palette and aapt2 answered `colors.xml:0: error: xml parser error: not well-formed (invalid token)`, pointing at line 0, which is no help at all.
+
+The gear in the corner of the overlay used to be a translucent circle; the host uses rounded squares now, so:
+
+- `drawGear` went from `drawCircle` to `drawRoundRect(box, dp(8), dp(8), …)` with a 1 dp stroke (`0x33FFFFFF` idle, `0x66FFFFFF` pressed).
+- The hit test followed: a circle measures a radius, a square measures a rectangle, `Math.max(gearR * 1.25f, dp(17f))`.
+
+The settings sheet (`MainActivity`):
+
+- Card `setCornerRadius(dp(16))`, a 1 dp `sheet_line` stroke, `dp(18)` padding.
+- Section titles 12 to 12.5 sp in `hud_dim`.
+- Segmented controls (orientation, button size): a `dp(10)` rounded frame with a stroke and a `dp(8)` selected block in white on black -- the same segmented control as the host settings pages.
+- Checkboxes: `setButtonTintList` from accent to `check_tint` (`#B9BCC2`), no longer system blue.
+- Buttons: Material's `Button` is grey and all-caps by default, so they are `GradientDrawable` pills now (`0x1FFFFFFF` fill, radius 8, `0x26FFFFFF` stroke, `setAllCaps(false)`). "Close" is the only primary button on the sheet (white on black), because it is the one people press.
+- System dialogs (uninstall confirmation and friends) got a theme too: `Theme.DroidExtend.Dialog` on `@android:style/Theme.Material.Dialog.Alert`, background `#17181B`, text `#ECECEC`, secondary `#9EA1AA`. Works on minSdk 21.
+
+Measured on the tablet (24091RPADC, 2136x3200, density 352), the overlay reads
+
+```
+● 2560 × 1600 · display 120 fps (panel 120 Hz)
+  20.72 Mbps · 14 ms
+  NVENC VBR Q20 · 40Mbps
+```
+
+and the host line is `capture 120 fps · send 22.0 Mbps · phone 120 fps / display 120 fps · 11 ms`.
+
+Two traps worth keeping:
+
+1. **The end-to-end script runs against the test copy** (`D:\probe_test\droid-extend`). I rebuilt the repository's APK only, so the copy installed the old one -- the log said `reinstalling the APK per settings (2.1.1)` -- and I took a full screenshot of the old blue sheet before noticing.
+2. **The timeline has to be relative to "connected", not "started".** The handshake takes about 15 seconds, so the actions I had scheduled on absolute time all fired before the phone had even connected. The first attempt produced "waiting for the desktop", the old sheet, and an empty screen.
+
+### 49.10 Lessons
+
+- Mockups are not decoration. Twenty-seven of them bought one clear judgement -- "E is the one tkinter can reach" -- and that judgement saved far more rework than the drawing cost.
+- When something visual "does not apply" in Tk, suspect coordinates and stacking before suspecting the API. Corner centres, inset amounts and DPI scaling were all coordinate problems.
+- Screenshots are the easiest place to lie to yourself. No topmost, or `PrintWindow` on a window with transparency, both produce a plausible picture that is completely wrong. I mis-called "the corners are gone" that way, and made the user ask about it.
+- Do not round-trip large files through the `read` tool: it truncates each line at 2000 characters, and one read-write pass over an HTML mockup cost me half a page.
+- `RoundSelect`'s `width` is pixels, not characters. `width=10` produced a 12px-wide empty strip, and it took half an hour to notice that the parameter means something different from ttk's `Combobox`.
+
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from tkinter import ttk, messagebox, filedialog
 
@@ -60,6 +61,8 @@ import manual as mn                                                             
 import paths                                                                      # noqa: E402
 import privacy as priv                                                            # noqa: E402
 import settings as st                                                             # noqa: E402
+import ui_kit as uk                                                               # noqa: E402
+import theme                                                                      # noqa: E402
 import touch as tu                                                                # noqa: E402
 import tray as tray_mod                                                           # noqa: E402
 import update as upd                                                              # noqa: E402
@@ -290,13 +293,13 @@ def _refresh_captions():
 _refresh_captions()
 
 
-def _safe_geometry(s, fallback="980x760"):
+def _safe_geometry(s, fallback="1000x640"):
     """Only trust a saved geometry that is a sane size and on this screen."""
     m = re.match(r"^(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?$", str(s or "").strip())
     if not m:
         return fallback
     w, h = int(m.group(1)), int(m.group(2))
-    if not (760 <= w <= 8000 and 540 <= h <= 6000):
+    if not (860 <= w <= 8000 and 560 <= h <= 6000):
         return fallback
     if m.group(3) is None:
         return "%dx%d" % (w, h)
@@ -304,6 +307,102 @@ def _safe_geometry(s, fallback="980x760"):
     if abs(x) > 12000 or abs(y) > 12000:
         return "%dx%d" % (w, h)
     return "%dx%d+%d+%d" % (w, h, x, y)
+
+
+def _work_area():
+    """The desktop area the taskbar does not cover, in pixels."""
+
+    class _Rect(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    rect = _Rect()
+    try:
+        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0,
+                                                   ctypes.byref(rect), 0)
+        if rect.right > rect.left and rect.bottom > rect.top:
+            return (rect.left, rect.top, rect.right - rect.left,
+                    rect.bottom - rect.top)
+    except Exception:
+        pass
+    return (0, 0, 1280, 800)
+
+
+def _borderless(win):
+    """Take the system frame off a window and keep its taskbar button.
+
+    overrideredirect() is the only way to drop the frame in Tk, and it also
+    takes the window off the taskbar and out of Alt+Tab.  Windows puts the
+    taskbar entry back when the frame window carries WS_EX_APPWINDOW; that has
+    to be set on the parent of Tk's own window, and it has to be set again
+    after every deiconify, which is why this is called from _show_window() too.
+    """
+    try:
+        win.overrideredirect(True)
+    except Exception:
+        return
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                              (ex & ~WS_EX_TOOLWINDOW) | WS_EX_APPWINDOW)
+    except Exception:
+        pass
+    try:
+        win.after(150, lambda: _round_win(win))
+    except Exception:
+        pass
+
+
+def _round_win(win, maxed=False):
+    """Put the rounded corners back on a window that has no system frame.
+
+    Dropping the frame with overrideredirect() also drops the Windows 11
+    rounded corners, and the drawing has 12px corners everywhere -- a square
+    window around rounded content looks broken.  DWM's corner preference is
+    asked for first (it anti-aliases and keeps the shadow); a window region is
+    set as well, because a frameless WS_POPUP window on some builds ignores the
+    DWM setting outright.
+    """
+    if os.name != "nt":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+    except Exception:
+        return
+    if not hwnd:
+        return
+    try:
+        pref = ctypes.c_int(2)          # DWMWCP_ROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(hwnd), 33, ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass
+    if os.environ.get("DX_ROUND_REGION", "1") == "0":
+        return
+    try:
+        gdi32 = ctypes.windll.gdi32
+        gdi32.CreateRoundRectRgn.restype = ctypes.c_void_p
+        gdi32.CreateRectRgn.restype = ctypes.c_void_p
+        user32.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_bool]
+        w = win.winfo_width()
+        h = win.winfo_height()
+        if w < 16 or h < 16:
+            return
+        if maxed:
+            rgn = gdi32.CreateRectRgn(0, 0, w + 1, h + 1)
+        else:
+            r = int(round(12.0 * win.winfo_fpixels("1i") / 96.0))
+            rgn = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, r * 2, r * 2)
+        user32.SetWindowRgn(ctypes.c_void_p(hwnd), ctypes.c_void_p(rgn), True)
+    except Exception:
+        pass
 
 
 class App(tk.Tk):
@@ -349,13 +448,36 @@ class App(tk.Tk):
         # "install" / "enable" / "done", see _driver_button().
         self._drv_action = "install"
 
+        # 2.2.0 -- theme state.  self.pal is the colour dict that every widget
+        # built from here down reads from, so it has to exist before _build()
+        # runs; it is also the only thing that changes when the colours do.
+        self.theme_mode = str(self.settings.get("theme", "auto") or "").strip().lower()
+        if self.theme_mode not in theme.MODES:
+            self.theme_mode = "auto"
+        self._theme_kind = theme.resolve(self.theme_mode)
+        self.pal = theme.PALETTES[self._theme_kind]
+        self.theme_var = tk.StringVar(value=self.theme_mode)
+        self._theme_job = None
+        # The settings window (built hidden by _build(), opened on demand) and
+        # the page it was last on -- kept across a rebuild so that changing the
+        # language or the colours leaves you on the page you were reading.
+        self._settings_win = None
+        self._page = "picture"
+        self._pages = {}
+        self._nav_btns = {}
+
         # app_title() and not the APP_TITLE constant: the constant was evaluated
         # when version.py was first imported (line 64), which is before the
         # set_lang() call above -- so it would always read as Chinese.
         self.title("%s — %s   v%s" % (APP_NAME, app_title(), APP_VERSION))
-        self.configure(bg=BG)
-        self.geometry(_safe_geometry(self.settings.get("window")))
-        self.minsize(900, 660)
+        self.configure(bg=self.pal["bg"])
+        # 2.2.0 -- the drawn UI is laid out in design pixels: every number in
+        # it goes through ui_kit.px(), so the scale has to be known before the
+        # first widget exists.  The window is the design's 1000x640 at 100%,
+        # times the monitor's DPI.
+        uk.set_scale(self.winfo_fpixels("1i") / 96.0)
+        self.geometry(_safe_geometry(self.settings.get("window"),
+                                     "%dx%d" % (uk.px(1000), uk.px(640))))
 
         self.logq = queue.Queue()
         # Every line the pane is currently showing, as (text, tag).  Kept
@@ -421,9 +543,26 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------- menu
     def _build_menu(self):
-        bar = tk.Menu(self, tearoff=0)
+        """The menus behind the ≡ button, built as one popup.
 
-        m_file = tk.Menu(bar, tearoff=0)
+        The design has no menu strip -- a row of words under the title bar is
+        exactly what it does not have -- but every entry in these five menus
+        has to stay reachable, so they all hang off a single popup menu that
+        the ≡ glyph opens, painted in the palette like the rest of the window.
+        """
+        pal = self.pal
+
+        def newmenu(parent):
+            return tk.Menu(parent, tearoff=0, bg=pal["field"], fg=pal["fg"],
+                           activebackground=pal["sel"],
+                           activeforeground=pal["sel_fg"],
+                           selectcolor=pal["btn"], bd=0, relief="flat",
+                           activeborderwidth=0, font=(theme.UI, 10))
+
+        bar = newmenu(self)
+        self._menu_bar = bar
+
+        m_file = newmenu(bar)
         m_file.add_command(label=i18n.t("打开数据目录（设置与日志）",
                                         "Open data folder (settings and logs)"),
                            command=self.on_open_config_dir)
@@ -433,7 +572,7 @@ class App(tk.Tk):
         m_file.add_command(label=i18n.t("退出", "Exit"), command=self._on_close)
         bar.add_cascade(label=i18n.t("文件", "File"), menu=m_file)
 
-        m_tool = tk.Menu(bar, tearoff=0)
+        m_tool = newmenu(bar)
         m_tool.add_command(label=i18n.t("安装虚拟显示器驱动…",
                                         "Install virtual display driver..."),
                            command=self.on_install_driver)
@@ -487,7 +626,7 @@ class App(tk.Tk):
         # somewhere in the middle of the form: "tell me when it fails" and "do
         # not tell me every time it starts" have to be answerable separately,
         # and one switch per kind is the only way to say that.
-        m_notify = tk.Menu(bar, tearoff=0)
+        m_notify = newmenu(bar)
         self.notify_var = tk.BooleanVar(value=bool(self.settings.get("notify", True)))
         m_notify.add_checkbutton(
             label=i18n.t("使用 Windows 通知", "Use Windows notifications"),
@@ -510,18 +649,14 @@ class App(tk.Tk):
                              command=lambda: self.open_url("ms-settings:notifications"))
         bar.add_cascade(label=i18n.t("通知", "Notifications"), menu=m_notify)
 
-        # Between Tools and Help rather than before File: File stays first
-        # because that is where every Windows user looks for Exit, and the
-        # language picker is a preference like the ones behind Tools -- it does
-        # not belong in front of the things people open the menu bar for.
-        m_lang = tk.Menu(bar, tearoff=0)
+        m_lang = newmenu(bar)
         self.lang_var = tk.StringVar(value=self._lang_setting())
         for code, caption in i18n.choices():
             m_lang.add_radiobutton(label=caption, value=code, variable=self.lang_var,
                                    command=lambda c=code: self._switch_lang(c))
         bar.add_cascade(label=i18n.t("语言", "Language"), menu=m_lang)
 
-        m_help = tk.Menu(bar, tearoff=0)
+        m_help = newmenu(bar)
         m_help.add_command(label=i18n.t("使用说明", "Manual"), command=self.on_manual)
         # The anchors are headings inside manual.py, which ships two complete
         # manuals rather than one translated text -- so the anchor has to be the
@@ -565,8 +700,6 @@ class App(tk.Tk):
         m_help.add_command(label=i18n.t("关于 ", "About ") + APP_NAME, command=self.on_about)
         bar.add_cascade(label=i18n.t("帮助", "Help"), menu=m_help)
 
-        self.configure(menu=bar)
-
     # --------------------------------------------------------------- language
     def _lang_setting(self):
         """The stored language setting, normalised to one of auto/zh/en.
@@ -589,7 +722,14 @@ class App(tk.Tk):
         # i18n.t() while the widget is built, so the language has to be in place
         # first or the new window comes up half in each language.
         i18n.set_lang(code)
+        page = getattr(self, "_page", "picture")
         self._rebuild_window()
+        # The captions in the settings window are stale too, so it went with
+        # the rebuild; put it back up where it was instead of closing it.
+        try:
+            self._open_settings(page)
+        except Exception:
+            pass
 
     def _rebuild_window(self):
         """Throw the widget tree away and build it again, in the new language.
@@ -630,6 +770,7 @@ class App(tk.Tk):
             self._manual_txt = None
             self._donate_win = None
             self._donate_photos = []
+            self._settings_win = None
             for w in list(self.winfo_children()):
                 w.destroy()
             self._build_menu()
@@ -715,6 +856,7 @@ class App(tk.Tk):
             self.wait_var.set(_wait_caption(int(s.get("auto_stream_wait", 60) or 0)))
         if hasattr(self, "chk_var"):
             self.chk_var.set(bool(s.get("check_updates", True)))
+        s["theme"] = self.theme_mode
         if hasattr(self, "pre_upd_var"):
             self.pre_upd_var.set(bool(s.get("check_prerelease", False)))
         self.pos_x_var.set(str(s.get("pos_x", 0)))
@@ -722,6 +864,7 @@ class App(tk.Tk):
         self._res_changed()
         self._rc_changed()
         self._sync_pos()
+        self._sync_summary()
 
     def _form_values(self):
         """Snapshot the widgets into a settings dict.  Never raises."""
@@ -801,389 +944,905 @@ class App(tk.Tk):
 
     def _changed_any(self, *_):
         self._save_settings()
+        self._sync_summary()
 
     # ------------------------------------------------------------------ build
+    # ------------------------------------------------------------ the frame
+    def _drag_from(self, widget):
+        """Move the window by dragging this widget -- the drawn title bar."""
+        state = {}
+
+        def press(event):
+            state["dx"] = event.x_root - self.winfo_x()
+            state["dy"] = event.y_root - self.winfo_y()
+
+        def move(event):
+            if "dx" not in state or getattr(self, "_maxed", False):
+                return
+            self.geometry("+%d+%d" % (event.x_root - state["dx"],
+                                      event.y_root - state["dy"]))
+
+        widget.bind("<Button-1>", press, add="+")
+        widget.bind("<B1-Motion>", move, add="+")
+
+    def _install_resize(self):
+        """A resize grip in the corner: without a frame this is the only one."""
+        grip = tk.Frame(self, bg=self.pal["bg"], width=uk.px(16),
+                        height=uk.px(16), cursor="size_nw_se")
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        state = {}
+
+        def press(event):
+            state["w"] = self.winfo_width()
+            state["h"] = self.winfo_height()
+            state["x"] = event.x_root
+            state["y"] = event.y_root
+
+        def move(event):
+            if "w" not in state:
+                return
+            w = max(uk.px(880), state["w"] + event.x_root - state["x"])
+            h = max(uk.px(600), state["h"] + event.y_root - state["y"])
+            self.geometry("%dx%d" % (w, h))
+
+        grip.bind("<Button-1>", press)
+        grip.bind("<B1-Motion>", move)
+        grip.bind("<ButtonRelease-1>", lambda _e: state.clear())
+        self._grip = grip
+
+    def _minimize(self):
+        """The — button: whatever Windows does with a frameless window."""
+        try:
+            self.iconify()
+        except Exception:
+            pass
+
+    def _toggle_max(self):
+        """The ▢ button: fill the work area, or go back to where it was."""
+        try:
+            if getattr(self, "_maxed", False):
+                self._maxed = False
+                if getattr(self, "_restore_geo", ""):
+                    self.geometry(self._restore_geo)
+            else:
+                self._restore_geo = self.geometry()
+                x, y, w, h = _work_area()
+                self._maxed = True
+                self.geometry("%dx%d+%d+%d" % (w, h, x, y))
+        except Exception:
+            self._maxed = False
+        self._fix_corners()
+
+    def _on_win_configure(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if getattr(self, "_rgn_job", None):
+            try:
+                self.after_cancel(self._rgn_job)
+            except Exception:
+                pass
+        self._rgn_job = self.after(120, self._fix_corners)
+
+    def _fix_corners(self):
+        self._rgn_job = None
+        _round_win(self, maxed=getattr(self, "_maxed", False))
+
+    def _popup_menu(self):
+        """The ≡ button: the five menus, as one popup."""
+        bar = getattr(self, "_menu_bar", None)
+        btn = getattr(self, "_menu_btn", None)
+        if bar is None or btn is None:
+            return
+        try:
+            bar.tk_popup(btn.winfo_rootx(),
+                         btn.winfo_rooty() + btn.winfo_height() + uk.px(2))
+        finally:
+            try:
+                bar.grab_release()
+            except Exception:
+                pass
+
+    def on_toggle_log(self):
+        """展开 / 收起: hand the whole window to the log, or give it back."""
+        self._log_big = not getattr(self, "_log_big", False)
+        try:
+            if self._log_big:
+                self._top.pack_forget()
+            else:
+                self._top.pack(side="top", fill="x", before=self._logcard)
+        except Exception:
+            pass
+        try:
+            self._btn_expand.configure(
+                text=i18n.t("收起 ▴", "Collapse ▴") if self._log_big
+                else i18n.t("展开 ▾", "Expand ▾"))
+        except Exception:
+            pass
+
     def _build(self):
-        # The dropdown captions are language-dependent and are read from here
-        # down, so they are rebuilt before the first widget asks for one.
+        """Build (or rebuild) every widget in the main window.
+
+        The layout is the codex-style one: a drawn title bar, the connection
+        line, the two device rows, the four picture fields, the option row and
+        the action row, with a black log pane taking whatever height is left.
+        The groups are told apart by spacing alone -- no hairlines, which is
+        the one place this window deliberately differs from the drawing it was
+        built from.
+        """
         _refresh_captions()
-        # Same reason as the captions: app_title() reads the language as it is
-        # *now*, and _build() runs again on every language switch -- so this is
-        # what makes the title bar follow the switch.
         self.title("%s — %s   v%s" % (APP_NAME, app_title(), APP_VERSION))
+        pal = self.pal
+        self.configure(bg=pal["bg"])
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure(".", background=BG, foreground=FG, fieldbackground=PANEL,
-                        bordercolor="#2c313a", lightcolor=BG, darkcolor=BG)
-        style.configure("TFrame", background=BG)
-        style.configure("Panel.TFrame", background=PANEL)
-        style.configure("TLabel", background=BG, foreground=FG)
-        style.configure("Head.TLabel", font=("Segoe UI", 11, "bold"), foreground=ACCENT)
-        style.configure("Dim.TLabel", foreground="#9aa4b2")
-        style.configure("Mono.TLabel", font=("Consolas", 9), foreground="#9aa4b2")
-        style.configure("Big.TLabel", font=("Segoe UI", 13, "bold"))
-        style.configure("TButton", padding=(10, 5))
-        style.configure("TProgressbar", background=ACCENT, troughcolor=PANEL,
-                        bordercolor="#2c313a", lightcolor=ACCENT, darkcolor=ACCENT,
-                        thickness=14)
-        style.configure("Go.TButton", font=("Segoe UI", 10, "bold"))
-        style.configure("TCheckbutton", background=BG, foreground=FG)
-        style.configure("TLabelframe", background=BG, foreground=ACCENT)
-        style.configure("TLabelframe.Label", background=BG, foreground=ACCENT)
-        style.map("TButton", background=[("active", "#2a3038")])
-        # ttk's clam theme paints read-only comboboxes white, which swallows our
-        # light text (编码器/预设/采集 all looked like empty boxes).  Force the
-        # field and the drop-down list back onto the dark palette.
-        style.configure("TCombobox", fieldbackground=PANEL, background=PANEL,
-                        foreground=FG, arrowcolor=FG, bordercolor="#2c313a",
-                        selectbackground=PANEL, selectforeground=FG,
-                        lightcolor=PANEL, darkcolor=PANEL)
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", PANEL), ("disabled", "#171a1f")],
-                  foreground=[("readonly", FG), ("disabled", "#6b7280")],
-                  background=[("readonly", PANEL), ("active", "#2a3038")],
-                  selectbackground=[("readonly", PANEL)],
-                  selectforeground=[("readonly", FG)],
-                  arrowcolor=[("disabled", "#6b7280"), ("!disabled", FG)])
-        self.option_add("*TCombobox*Listbox.background", PANEL)
-        self.option_add("*TCombobox*Listbox.foreground", FG)
-        self.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
-        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        theme.apply_styles(style, pal)
+        theme.option_add(self, pal)
+        # 使用说明 / 关于 / 捐赠那几个窗口是普通 Toplevel，用的是模块级常量而
+        # 不是 ttk 样式，所以每次重建都把常量指到当前色板，否则一切到浅色它们
+        # 就还留在旧的深色里。
+        global BG, FG, ACCENT, PANEL
+        BG, FG = pal["bg"], pal["fg"]
+        ACCENT, PANEL = pal["green"], pal["field"]
 
-        outer = ttk.Frame(self, padding=12)
-        outer.pack(fill="both", expand=True)
-        outer.columnconfigure(0, weight=1)
-        outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(2, weight=1)
+        # This is an attribute, not a widget, but the settings window shows a
+        # button for it, and _build() is where it has always been read.
+        self.close_action = self._initial_close_action()
 
-        # -- left: device + driver -----------------------------------------
-        left = ttk.Labelframe(outer, text=i18n.t(" 设备与显示器 ", " Device and display "),
-                              padding=10)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 8))
-        left.columnconfigure(0, weight=1)
+        # -- the handful of type sizes the design asks for --------------------
+        fonts = {}
 
-        row = ttk.Frame(left)
-        row.grid(row=0, column=0, sticky="ew")
-        row.columnconfigure(0, weight=1)
-        ttk.Label(row, text=i18n.t("安卓设备:", "Android device:")).grid(
-            row=0, column=0, sticky="w")
-        # The refresh button gets its own cell, and the device name -- model,
-        # state and serial, which is long -- goes on the line below and wraps.
-        # Side by side on one line the two of them ran out of room and both of
-        # them were clipped ("刷", "24091RPADC  [device]  d1").
-        ttk.Button(row, text=i18n.t("刷新", "Refresh"), command=self.refresh_env,
-                   width=6).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        def fnt(size, weight="normal", mono=False):
+            key = (size, weight, mono)
+            got = fonts.get(key)
+            if got is None:
+                got = tkfont.Font(family=theme.MONO if mono else theme.UI,
+                                  size=-uk.px(size), weight=weight)
+                fonts[key] = got
+            return got
+
+        self._fnt = fnt
+        F17 = fnt(17, "bold")
+        F145 = fnt(14.5, "bold")
+        F14 = fnt(14, "bold")
+        F13 = fnt(13, "bold")
+        F125 = fnt(12.5)
+        F12 = fnt(12)
+        F115 = fnt(11.5)
+        F11 = fnt(11)
+        F105 = fnt(10.5)
+        MONO = fnt(11.5, mono=True)
+        LABW = uk.px(92)
+        GAP = uk.px(16)
+
+        def lab(master, text="", f=None, fg=None, back=None, **kw):
+            return tk.Label(master, text=text, font=f or F12,
+                            fg=fg or pal["dim"], bg=back or pal["bg"],
+                            bd=0, highlightthickness=0, **kw)
+
+        def row_with(master, caption, pady, pad_top=0, expand=False):
+            """One content row: a 92px caption pinned left, the values beside it."""
+            row = tk.Frame(master, bg=pal["bg"])
+            row.pack(side="top", fill="x", pady=pady)
+            value = tk.Frame(row, bg=pal["bg"])
+            if expand:
+                value.pack(side="left", fill="x", expand=True,
+                           padx=(LABW + GAP, 0))
+            else:
+                value.pack(side="left", anchor="n", padx=(LABW + GAP, 0))
+            lab(row, caption, F12, pal["dim"], anchor="nw").place(
+                x=0, y=uk.px(pad_top))
+            return row, value
+
+        # -- frame and title bar ---------------------------------------------
+        # The system title bar is gone (the drawing has its own) which also
+        # takes the window off the taskbar; _borderless() puts it back.
+        _borderless(self)
+        self.minsize(uk.px(880), uk.px(600))
+        # The corners are cut with a window region, so they have to be cut
+        # again every time the window changes size -- throttled, because a
+        # drag-resize fires Configure on every pixel.
+        self._rgn_job = None
+        self.bind("<Configure>", self._on_win_configure, add="+")
+
+        tb = tk.Frame(self, bg=pal["bg"], height=uk.px(44))
+        tb.pack(side="top", fill="x")
+        tb.pack_propagate(False)
+        self._drag_from(tb)
+
+        head = tk.Frame(tb, bg=pal["bg"])
+        head.pack(side="left")
+        self._drag_from(head)
+        name = lab(head, APP_NAME, F14, pal["fg"])
+        name.pack(side="left", padx=(uk.px(20), 0))
+        self._drag_from(name)
+        sub = lab(head, app_title(), F12, pal["faint"])
+        sub.pack(side="left", padx=(uk.px(8), 0))
+        self._drag_from(sub)
+        uk.Pill(head, pal, "v%s" % APP_VERSION, back=pal["bg"]).pack(
+            side="left", padx=(uk.px(8), 0))
+
+        right = tk.Frame(tb, bg=pal["bg"])
+        right.pack(side="right", padx=(0, uk.px(6)))
+
+        def win_btn(glyph, cmd, wide=36, size=10.5):
+            btn = uk.RoundButton(right, pal, glyph, command=cmd, height=28,
+                                 width=wide, kind="ghost", border=False,
+                                 font=fnt(size), fg=pal["dim"], back=pal["bg"])
+            btn.pack(side="right", padx=(uk.px(1), 0))
+            return btn
+
+        win_btn("✕", self._on_close)
+        win_btn("▢", self._toggle_max)
+        win_btn("—", self._minimize)
+        self._menu_btn = uk.RoundButton(
+            right, pal, "≡", command=self._popup_menu, height=28, width=28,
+            kind="ghost", border=False, font=fnt(14), fg=pal["dim"],
+            back=pal["bg"])
+        self._menu_btn.pack(side="right", padx=(0, uk.px(4)))
+        uk.RoundButton(right, pal, "⚙", command=self._open_settings, height=28,
+                       width=28, kind="ghost", border=False,
+                       font=fnt(12.5), fg=pal["dim"], back=pal["bg"]).pack(
+                           side="right", padx=(0, uk.px(2)))
+
+        # -- body ------------------------------------------------------------
+        # Two views share this body: the picture, and the settings.  Exactly
+        # one of them is packed at a time, so the settings never become a
+        # second window floating over the one the user is watching.
+        host = tk.Frame(self, bg=pal["bg"])
+        host.pack(side="top", fill="both", expand=True)
+        self._host = host
+        body = tk.Frame(host, bg=pal["bg"])
+        body.pack(side="top", fill="both", expand=True,
+                  padx=(uk.px(24), uk.px(24)), pady=(uk.px(4), uk.px(20)))
+        self._body = body
+        self.view_main = body
+
+        top = tk.Frame(body, bg=pal["bg"])
+        top.pack(side="top", fill="x")
+        self._top = top
+
+        # -- the connection line ---------------------------------------------
+        self.stat_var = tk.StringVar(value=i18n.t("就绪", "Ready"))
         self.dev_var = tk.StringVar(value=i18n.t("未检测", "Not detected"))
-        self.dev_lbl = ttk.Label(row, textvariable=self.dev_var, style="Dim.TLabel",
-                                 wraplength=360, justify="left")
-        self.dev_lbl.grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.note_var = tk.StringVar(value="")
 
+        bigrow = tk.Frame(top, bg=pal["bg"])
+        bigrow.pack(side="top", fill="x", pady=(uk.px(14), uk.px(16)))
+        # A drawn dot rather than a "●" glyph: it is the only coloured thing
+        # left in the window and it has to be able to turn amber and red.
+        self.dot_cv = tk.Canvas(bigrow, width=uk.px(8), height=uk.px(8),
+                                bg=pal["bg"], bd=0, highlightthickness=0,
+                                takefocus=0)
+        self.dot_cv.pack(side="left")
+        self._dot_id = self.dot_cv.create_oval(0, 0, uk.px(8), uk.px(8),
+                                               fill=pal["faint"], outline="")
+        self.dot_lbl = self.dot_cv
+        lab(bigrow, "", F17, pal["fg"], textvariable=self.stat_var).pack(
+            side="left", padx=(uk.px(9), 0))
+        lab(bigrow, "", F125, pal["faint"], textvariable=self.dev_var).pack(
+            side="left", padx=(uk.px(9), 0))
+        lab(bigrow, "", F12, pal["faint"], textvariable=self.note_var,
+            wraplength=uk.px(260), justify="left").pack(
+                side="left", padx=(uk.px(10), 0))
+
+        self._metric_labels = {}
+        met = tk.Frame(bigrow, bg=pal["bg"])
+        met.pack(side="right")
+        for key, cap, unit, hi in (
+                ("cap", i18n.t("采集", "Capture"), "fps", False),
+                ("send", i18n.t("发送", "Send"), "Mbps", False),
+                ("phone", i18n.t("手机", "Phone"), "fps", False),
+                ("lat", i18n.t("上屏", "Shown"), "ms", True)):
+            cell = tk.Frame(met, bg=pal["bg"])
+            cell.pack(side="left", padx=(uk.px(22), 0))
+            lab(cell, cap, F11, pal["faint"]).pack(side="left", anchor="s")
+            var = tk.StringVar(value="—")
+            lbl = lab(cell, "", F145, pal["green"] if hi else pal["fg"],
+                      textvariable=var, anchor="s")
+            lbl.pack(side="left", padx=(uk.px(4), 0), anchor="s")
+            lab(cell, unit, F105, pal["faint"]).pack(
+                side="left", padx=(uk.px(3), 0), anchor="s")
+            self._metric_labels[key] = (var, lbl)
+
+        # -- the two device rows ---------------------------------------------
         self.drv_var = tk.StringVar(value=i18n.t("检测中…", "Detecting..."))
-        ttk.Label(left, text=i18n.t("虚拟显示器:", "Virtual display:")).grid(
-            row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(left, textvariable=self.drv_var, style="Dim.TLabel", wraplength=420,
-                  justify="left").grid(row=2, column=0, sticky="w")
-
-        btns = ttk.Frame(left)
-        btns.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        # One button per row, both stretched to the panel width.  Side by side
-        # they came to more than the panel is wide on a narrow window, and ttk
-        # responds by clipping the text ("仅安装 AP", "安装 AP") rather than
-        # shrinking the button -- which reads as a broken interface.
-        btns.columnconfigure(0, weight=1)
-        self.btn_install = ttk.Button(btns, text=_install_driver_label(),
-                                      command=self.on_install_driver)
-        self.btn_install.grid(row=0, column=0, sticky="ew")
-        ttk.Button(btns, text=i18n.t("仅安装 APK 并启动", "Install APK only and start"),
-                   command=self.on_install_apk).grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-        self.mon_var = tk.StringVar(value="")
-        ttk.Label(left, textvariable=self.mon_var, style="Mono.TLabel", justify="left",
-                  wraplength=430).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        drv_row, drv_val = row_with(top, i18n.t("虚拟显示器", "Virtual display"),
+                                    (uk.px(14), uk.px(14)))
+        lab(drv_val, "", F125, pal["fg"], textvariable=self.drv_var,
+            wraplength=uk.px(620), justify="left").pack(side="left")
+        # The install button only appears when there is something to install:
+        # on a working setup this row is a line of text, exactly as drawn.
+        self.btn_install = uk.RoundButton(drv_row, pal, "", kind="soft",
+                                          command=self.on_install_driver,
+                                          height=28, font=F12, back=pal["bg"])
+        self._drv_action = "install"
 
         # Which graphics card is doing the capture.  On a laptop with two GPUs
-        # the answer decides whether a mode shows a picture at all, so it is
-        # shown here and written to the log rather than left to guesswork.
-        self.gpu_var = tk.StringVar(value=i18n.t("采集显卡: ——", "Capture GPU: -"))
-        ttk.Label(left, textvariable=self.gpu_var, style="Dim.TLabel", justify="left",
-                  wraplength=430).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        # the answer decides whether a mode shows a picture at all.
+        self.gpu_var = tk.StringVar(value=i18n.t("——", "-"))
+        _grow, gpu_val = row_with(top, i18n.t("采集显卡", "Capture GPU"),
+                                  (uk.px(14), uk.px(14)))
+        lab(gpu_val, "", F125, pal["fg"], textvariable=self.gpu_var,
+            wraplength=uk.px(760), justify="left").pack(side="left")
 
-        # -- right: quality --------------------------------------------------
-        right = ttk.Labelframe(outer, text=i18n.t(" 画质与帧率 ", " Quality and frame rate "),
-                               padding=10)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 8))
-        right.columnconfigure(1, weight=1)
-        right.columnconfigure(3, weight=1)
-
-        def lab(r, c, t):
-            ttk.Label(right, text=t).grid(row=r, column=c, sticky="w", pady=3, padx=(0, 4))
-
-        self.mode_var = tk.StringVar(value="extend")
-        lab(0, 0, i18n.t("模式", "Mode"))
-        mf = ttk.Frame(right)
-        mf.grid(row=0, column=1, columnspan=3, sticky="w")
-        # "拓展屏" is the extended desktop, not a mirror -- the English has to
-        # keep that distinction, so it never becomes "mirror".
-        for v, t in (("extend", i18n.t("拓展屏", "Extend")),
-                     ("mirror", i18n.t("镜像", "Mirror"))):
-            ttk.Radiobutton(mf, text=t, value=v, variable=self.mode_var,
-                            command=self._mode_changed).pack(side="left", padx=(0, 12))
-
+        # -- picture: four fields on one row ---------------------------------
+        _frow, fields = row_with(top, i18n.t("画面", "Picture"),
+                                 (uk.px(16), uk.px(6)), pad_top=6, expand=True)
         self.res_var = tk.StringVar(value="1920x1080")
-        lab(1, 0, i18n.t("分辨率", "Resolution"))
-        self.res_cb = ttk.Combobox(right, textvariable=self.res_var, width=14,
-                                   values=["%dx%d" % r for r in RESOLUTIONS]
-                                   + [_custom_label()])
-        self.res_cb.grid(row=1, column=1, sticky="w", pady=3)
-
-        lab(1, 2, i18n.t("刷新率", "Refresh rate"))
         self.hz_var = tk.StringVar(value="60")
-        self.hz_cb = ttk.Combobox(right, textvariable=self.hz_var, width=8, values=HZ_CHOICES)
-        self.hz_cb.grid(row=1, column=3, sticky="w", pady=3)
-        self.hz_cb.bind("<<ComboboxSelected>>", self._layout_changed)
-
         self.fps_var = tk.StringVar(value="60")
-        lab(2, 0, i18n.t("帧率 fps", "Frame rate fps"))
-        self.fps_cb = ttk.Combobox(right, textvariable=self.fps_var, width=14, values=FPS_CHOICES)
-        self.fps_cb.grid(row=2, column=1, sticky="w", pady=3)
-
-        # Widget defaults come from DEFAULTS so there is a single source of
-        # truth: _apply_form() pushes these back into cfg on every start.
-        self.br_var = tk.StringVar(value=str(DEFAULTS["bitrate_mbps"]))
-        lab(2, 2, i18n.t("码率上限 Mbps", "Bitrate ceiling Mbps"))
-        self.br_cb = ttk.Combobox(right, textvariable=self.br_var, width=8, values=BITRATE_CHOICES)
-        self.br_cb.grid(row=2, column=3, sticky="w", pady=3)
-
-        self.rc_var = tk.StringVar(value=self._rc_caption())
-        lab(3, 0, i18n.t("码率控制", "Rate control"))
-        self.rc_cb = ttk.Combobox(right, textvariable=self.rc_var, width=26, state="readonly",
-                                  values=[t for _, t in RATECONTROL])
-        self.rc_cb.grid(row=3, column=1, columnspan=1, sticky="w", pady=3)
-        self.rc_cb.bind("<<ComboboxSelected>>", self._rc_changed)
-
         self.q_var = tk.StringVar(value="20")
         self.q_hint_var = tk.StringVar(value="")
-        lab(3, 2, i18n.t("画质 Q", "Quality Q"))
-        self.q_cb = ttk.Combobox(right, textvariable=self.q_var, width=8, values=QUALITY_CHOICES)
-        self.q_cb.grid(row=3, column=3, sticky="w", pady=3)
-
-        self.custom_frame = ttk.Frame(right)
-        self.w_var = tk.StringVar(value="1920")
-        self.h_var = tk.StringVar(value="1080")
-        ttk.Label(self.custom_frame, text=i18n.t("宽", "W")).pack(side="left")
-        ttk.Entry(self.custom_frame, textvariable=self.w_var, width=6).pack(side="left", padx=3)
-        ttk.Label(self.custom_frame, text=i18n.t("高", "H")).pack(side="left")
-        ttk.Entry(self.custom_frame, textvariable=self.h_var, width=6).pack(side="left", padx=3)
-        # a typed-in size changes the screen just as much as the dropdown does
-        self.w_var.trace_add("write", self._layout_changed)
-        self.h_var.trace_add("write", self._layout_changed)
-        self.custom_frame.grid(row=4, column=1, columnspan=3, sticky="w", pady=3)
-        self.custom_frame.grid_remove()
-
-        # Row 4 is shared: either "follow the phone's own resolution" or the
-        # custom width/height entries, never both.  Following the phone is the
-        # default because it is the only way to fill the panel edge to edge.
-        self.match_var = tk.BooleanVar(value=bool(DEFAULTS.get("match_phone", True)))
-        self.match_chk = ttk.Checkbutton(
-            right, text=i18n.t("跟随手机分辨率（撑满整块屏，不留黑边）",
-                               "Match the phone's resolution (fills the panel, no bars)"),
-            variable=self.match_var, command=self._match_changed)
-        self.match_chk.grid(row=4, column=0, columnspan=4, sticky="w", pady=3)
+        selects = {}
+        for col, (cap, var, values, field_name) in enumerate((
+                (i18n.t("分辨率", "Resolution"), self.res_var,
+                 ["%dx%d" % r for r in RESOLUTIONS] + [_custom_label()], "res"),
+                (i18n.t("刷新率", "Refresh rate"), self.hz_var,
+                 list(HZ_CHOICES), "hz"),
+                (i18n.t("帧率", "Frame rate"), self.fps_var,
+                 list(FPS_CHOICES), "fps"),
+                (i18n.t("画质 Q", "Quality Q"), self.q_var,
+                 list(QUALITY_CHOICES), "q"))):
+            cell = tk.Frame(fields, bg=pal["bg"])
+            cell.pack(side="left", fill="x", expand=True,
+                      padx=(0, 0 if col == 3 else uk.px(10)))
+            lab(cell, cap, F115, pal["faint"]).pack(side="top", anchor="w",
+                                                    pady=(0, uk.px(6)))
+            sel = uk.RoundSelect(cell, pal, values, var, height=34, back=pal["bg"])
+            sel.pack(side="top", fill="x")
+            selects[field_name] = sel
+        self.res_cb = selects["res"]
+        self.hz_cb = selects["hz"]
+        self.fps_cb = selects["fps"]
+        self.q_cb = selects["q"]
         self.res_cb.bind("<<ComboboxSelected>>", self._res_changed)
+        self.hz_cb.bind("<<ComboboxSelected>>", self._layout_changed)
         self._load_resolutions()
 
-        self.enc_var = tk.StringVar(value="h264_nvenc")
-        lab(5, 0, i18n.t("编码器", "Encoder"))
-        self.enc_cb = ttk.Combobox(right, textvariable=self.enc_var, width=14, state="readonly")
-        self.enc_cb.grid(row=5, column=1, sticky="w", pady=3)
-        self.enc_cb.bind("<<ComboboxSelected>>", self._enc_changed)
+        # -- one option row --------------------------------------------------
+        orow = tk.Frame(top, bg=pal["bg"])
+        orow.pack(side="top", fill="x", pady=(uk.px(12), uk.px(12)))
+        self.mouse_var = tk.BooleanVar(value=False)
+        self.mouse_chk = uk.RoundCheck(
+            orow, pal, i18n.t("显示鼠标指针", "Draw the mouse pointer"),
+            variable=self.mouse_var, back=pal["bg"])
+        self.mouse_chk.pack(side="left")
+        more = lab(orow, i18n.t("更多设置 →", "More settings →"), F12,
+                   pal["dim"], cursor="hand2")
+        more.pack(side="right")
+        more.bind("<Button-1>", lambda _e: self._open_settings())
 
-        self.pre_var = tk.StringVar(value="p4")
-        lab(5, 2, i18n.t("预设", "Preset"))
-        self.pre_cb = ttk.Combobox(right, textvariable=self.pre_var, width=8)
-        self.pre_cb.grid(row=5, column=3, sticky="w", pady=3)
+        # -- the action row --------------------------------------------------
+        arow = tk.Frame(top, bg=pal["bg"])
+        arow.pack(side="top", fill="x", pady=(uk.px(2), uk.px(14)))
+        self.summary_var = tk.StringVar(value="")
+        lab(arow, "", F125, pal["fg"], textvariable=self.summary_var).pack(
+            side="left")
+        self.btn_stop = uk.RoundButton(arow, pal, i18n.t("停止", "Stop"),
+                                       kind="ghost", height=38, font=F125,
+                                       icon="■", command=self.on_stop,
+                                       back=pal["bg"])
+        self.btn_stop.pack(side="right")
+        self.btn_stop.set_enabled(False)
+        self.btn_start = uk.RoundButton(arow, pal, i18n.t("开始投屏", "Start"),
+                                        kind="primary", height=38, font=F13,
+                                        icon="▶", command=self.on_start,
+                                        back=pal["bg"])
+        self.btn_start.pack(side="right", padx=(0, uk.px(8)))
 
-        self.be_var = tk.StringVar(value="auto")
-        lab(6, 0, i18n.t("采集", "Capture"))
-        self.be_cb = ttk.Combobox(right, textvariable=self.be_var, width=14, state="readonly",
-                                  values=[t for _, t in BACKENDS])
-        self.be_cb.grid(row=6, column=1, sticky="w", pady=3)
+        # -- log -------------------------------------------------------------
+        logcard = uk.Card(body, pal, fill=pal["mono_bg"], border=True,
+                          radius=12, pad=(0, 0))
+        logcard.pack(side="top", fill="both", expand=True)
+        self._logcard = logcard
+        lbar = tk.Frame(logcard.inner, bg=pal["mono_bg"], height=uk.px(34))
+        lbar.pack(side="top", fill="x")
+        lbar.pack_propagate(False)
+        lab(lbar, i18n.t("日志", "Log"), F11, pal["mono_dim"],
+            back=pal["mono_bg"]).pack(side="left", padx=(uk.px(14), 0))
+        self.log_hint_var = tk.StringVar(value="")
+        lab(lbar, "", F115, pal["mono_dim"], back=pal["mono_bg"],
+            textvariable=self.log_hint_var).pack(side="left",
+                                                 padx=(uk.px(12), 0))
 
+        def log_link(caption, cmd):
+            widget = lab(lbar, caption, F115, pal["mono_dim"],
+                         back=pal["mono_bg"], cursor="hand2")
+            widget.pack(side="right", padx=(0, uk.px(14)))
+            widget.bind("<Button-1>", lambda _e: cmd())
+            widget.bind("<Enter>",
+                        lambda _e: widget.configure(fg=pal["mono_fg"]))
+            widget.bind("<Leave>",
+                        lambda _e: widget.configure(fg=pal["mono_dim"]))
+            return widget
+
+        # Packed right to left, so the drawing's order -- copy, save, clear,
+        # expand -- is the order they are read in.
+        self._btn_expand = log_link(i18n.t("展开 ▾", "Expand ▾"),
+                                    self.on_toggle_log)
+        log_link(i18n.t("清空", "Clear"), self.on_clear_log)
+        log_link(i18n.t("另存", "Save"), self.on_save_log)
+        log_link(i18n.t("复制", "Copy"), self.on_copy_log)
+
+        self.log_txt = tk.Text(logcard.inner, bg=pal["mono_bg"],
+                               fg=pal["mono_fg"],
+                               insertbackground=pal["mono_fg"],
+                               font=MONO, wrap="none", relief="flat", bd=0,
+                               highlightthickness=0, padx=uk.px(14),
+                               pady=uk.px(8), spacing1=0, spacing2=uk.px(6),
+                               insertwidth=0, selectbackground=pal["sel"],
+                               selectforeground=pal["sel_fg"])
+        self.log_txt.pack(side="top", fill="both", expand=True)
+        self.log_txt.configure(state="disabled")
+        self.log_txt.tag_configure("err", foreground=pal["red"])
+        self.log_txt.tag_configure("ok", foreground=pal["green"])
+        self.log_txt.tag_configure("hl", foreground=pal["yellow"])
+
+        # The settings window is built here, hidden, so that every widget name
+        # the rest of this file reaches for exists from the first moment -- the
+        # form helpers, refresh_env and _sync_match all poke at boxes that now
+        # live over there, and none of them should have to ask whether the
+        # window has been opened yet.
+        self._install_resize()
+        self._build_settings_view()
+        self._sync_summary()
+        self._arm_perf()
+
+    # -------------------------------------------------------------- settings
+    # The second window.  It is built together with the main one and kept
+    # withdrawn: everything the main window no longer shows has to exist as a
+    # widget name anyway (_apply_settings_to_form, _form_values and refresh_env
+    # all reach for these boxes), and building it once at start-up costs a few
+    # milliseconds and saves a pile of "has the window been opened yet" checks.
+    def _build_settings_view(self):
+        # 2.2.0 -- one window, not two.  The settings are a view of the same
+        # window, so the gear and the "more settings" link swap the body
+        # instead of opening a second frame that floats over the picture.
+        pal = self.pal
+        view = tk.Frame(self._host, bg=pal["bg"])
+        self.view_set = view
+
+        head = tk.Frame(view, bg=pal["bg"], height=uk.px(42))
+        head.pack(side="top", fill="x", padx=(uk.px(18), uk.px(18)))
+        head.pack_propagate(False)
+        uk.RoundButton(head, pal, "←", command=self._close_settings,
+                       height=28, width=28, kind="ghost", border=False,
+                       font=tkfont.Font(family=theme.UI, size=-uk.px(13)),
+                       fg=pal["dim"], back=pal["bg"]).pack(
+                           side="left", pady=(uk.px(7), 0))
+        tk.Label(head, text=i18n.t("设置", "Settings"), bg=pal["bg"],
+                 fg=pal["fg"], font=(theme.UI, -uk.px(14), "bold")).pack(
+                     side="left", padx=(uk.px(8), 0), pady=(uk.px(7), 0))
+        uk.RoundButton(head, pal, i18n.t("完成", "Done"), kind="primary",
+                       command=self._close_settings, height=28, pad_x=14,
+                       font=tkfont.Font(family=theme.UI, size=-uk.px(12)),
+                       back=pal["bg"]).pack(side="right", pady=(uk.px(7), 0))
+
+        body = tk.Frame(view, bg=pal["bg"])
+        body.pack(side="top", fill="both", expand=True,
+                  padx=(uk.px(24), uk.px(24)), pady=(uk.px(2), uk.px(18)))
+
+        nav = tk.Frame(body, bg=pal["bg"], width=uk.px(150))
+        nav.pack(side="left", fill="y", padx=(0, uk.px(10)))
+        nav.pack_propagate(False)
+
+        pages = (
+            ("picture", i18n.t("画面", "Picture")),
+            ("codec", i18n.t("编码与画质", "Encoding")),
+            ("device", i18n.t("设备", "Device")),
+            ("boot", i18n.t("启动与退出", "Start-up")),
+            ("look", i18n.t("外观", "Appearance")),
+            ("about", i18n.t("关于", "About")),
+        )
+        self._nav_btns = {}
+        self._nav_font = tkfont.Font(family=theme.UI, size=-uk.px(12.5))
+        self._nav_font_on = tkfont.Font(family=theme.UI, size=-uk.px(12.5),
+                                        weight="bold")
+        for i, (key, cap) in enumerate(pages):
+            b = uk.RoundButton(nav, pal, cap, kind="ghost", height=32,
+                               pad_x=12, border=False, radius=8,
+                               font=self._nav_font,
+                               command=lambda k=key: self._show_page(k))
+            b.pack(side="top", fill="x", pady=(0, uk.px(2)))
+            self._nav_btns[key] = b
+
+        content = ttk.Frame(body, padding=(uk.px(10), uk.px(4), 0, 0))
+        content.pack(side="left", fill="both", expand=True)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+        self._pages = {}
+        for key, _cap in pages:
+            f = ttk.Frame(content)
+            f.grid(row=0, column=0, sticky="nsew")
+            f.grid_remove()
+            self._pages[key] = f
+
+        def newpage(key, title):
+            page = self._pages[key]
+            column = ttk.Frame(page)
+            column.pack(fill="both", expand=True, anchor="w")
+            return column
+
+        def section(parent, title, gap=20):
+            # One titled group.  Groups are told apart by spacing, like the
+            # main window -- there is not a hairline anywhere.
+            wrap = ttk.Frame(parent)
+            wrap.pack(fill="x", anchor="w", pady=(0, uk.px(gap)))
+            tk.Label(wrap, text=title, bg=self.pal["bg"],
+                     fg=self.pal["dim"],
+                     font=(theme.UI, -uk.px(12.5), "bold")).pack(
+                anchor="w", pady=(0, uk.px(8)))
+            sec = ttk.Frame(wrap)
+            sec.pack(fill="x", anchor="w")
+            sec.columnconfigure(0, minsize=uk.px(88))
+            sec.columnconfigure(1, weight=1)
+            return sec
+
+        def caption(parent, r, text):
+            ttk.Label(parent, text=text, style="Key.TLabel").grid(
+                row=r, column=0, sticky="w", pady=(0, uk.px(9)),
+                padx=(0, uk.px(16)))
+
+        def note(parent, text):
+            ttk.Label(parent, text=text, style="Dim.TLabel",
+                      wraplength=uk.px(560), justify="left").pack(
+                          anchor="w", pady=(0, uk.px(14)))
+
+        # -- 画面 ------------------------------------------------------------
+        pict = newpage("picture", i18n.t("画面", "Picture"))
+        s = section(pict, i18n.t("显示模式", "Display mode"))
+        caption(s, 0, i18n.t("模式", "Mode"))
+        self.mode_var = tk.StringVar(value="extend")
+        mf = ttk.Frame(s)
+        mf.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        for v, t in (("extend", i18n.t("拓展屏", "Extend")),
+                     ("mirror", i18n.t("镜像", "Mirror"))):
+            uk.RoundRadio(mf, self.pal, text=t, value=v,
+                          variable=self.mode_var,
+                          command=self._mode_changed).pack(
+                              side="left", padx=(0, uk.px(16)))
+
+        self.match_var = tk.BooleanVar(value=bool(DEFAULTS.get("match_phone", True)))
+        self.match_chk = uk.RoundCheck(
+            s, self.pal, variable=self.match_var, command=self._match_changed,
+            text=i18n.t("跟随手机分辨率（撑满整块屏，不留黑边）",
+                        "Match the phone's resolution (fills the panel, no bars)"))
+        self.match_chk.grid(row=1, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(9)))
+
+        s = section(pict, i18n.t("自定义分辨率", "Custom resolution"))
+        self.custom_frame = ttk.Frame(s)
+        self.w_var = tk.StringVar(value="1920")
+        self.h_var = tk.StringVar(value="1080")
+        ttk.Label(self.custom_frame, text=i18n.t("宽", "W")).pack(
+            side="left", padx=(0, uk.px(7)))
+        uk.RoundEntry(self.custom_frame, self.pal, textvariable=self.w_var,
+                      chars=6, height=30).pack(
+                          side="left", padx=(0, uk.px(11)))
+        ttk.Label(self.custom_frame, text=i18n.t("高", "H")).pack(
+            side="left", padx=(0, uk.px(7)))
+        uk.RoundEntry(self.custom_frame, self.pal, textvariable=self.h_var,
+                      chars=6, height=30).pack(
+                          side="left", padx=(0, uk.px(11)))
+        ttk.Label(self.custom_frame,
+                  text=i18n.t("（在主窗口的「分辨率」里选「自定义」）",
+                              "(pick Custom in the Resolution field of the main window)"),
+                  style="Dim.TLabel").pack(side="left", padx=(uk.px(6), 0))
+        # A typed-in size changes the screen just as much as the dropdown does.
+        self.w_var.trace_add("write", self._layout_changed)
+        self.h_var.trace_add("write", self._layout_changed)
+        self.custom_frame.grid(row=0, column=0, columnspan=2, sticky="w",
+                               pady=(0, uk.px(9)))
+        self.custom_frame.grid_remove()
+
+        s = section(pict, i18n.t("屏幕位置", "Position"))
         self.pos_var = tk.StringVar(value="right")
-        lab(6, 2, i18n.t("屏幕位置", "Position"))
-        self.pos_cb = ttk.Combobox(right, textvariable=self.pos_var, width=8, state="readonly",
-                                   values=[t for _, t in POSITIONS])
-        self.pos_cb.grid(row=6, column=3, sticky="w", pady=3)
+        caption(s, 0, i18n.t("位置", "Position"))
+        self.pos_cb = uk.RoundSelect(s, self.pal,
+                                     [t for _, t in POSITIONS],
+                                     self.pos_var, width=12, auto_width=True,
+                                     min_width=210)
+        self.pos_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
         self.pos_cb.bind("<<ComboboxSelected>>", self._pos_changed)
 
-        # "自定义" gets its own X/Y row -- the same trick the custom resolution
-        # uses: hidden until the mode that needs it is actually picked.
-        self.pos_frame = ttk.Frame(right)
+        self.pos_frame = ttk.Frame(s)
         self.pos_x_var = tk.StringVar(value="0")
         self.pos_y_var = tk.StringVar(value="0")
-        ttk.Label(self.pos_frame, text="X").pack(side="left")
-        ttk.Entry(self.pos_frame, textvariable=self.pos_x_var, width=7).pack(side="left", padx=3)
-        ttk.Label(self.pos_frame, text="Y").pack(side="left")
-        ttk.Entry(self.pos_frame, textvariable=self.pos_y_var, width=7).pack(side="left", padx=3)
-        ttk.Label(self.pos_frame, text=i18n.t("虚拟屏左上角在主屏坐标系里的位置",
-                                              "Top-left corner of the virtual screen, in "
-                                              "main-screen coordinates"),
-                  style="Dim.TLabel").pack(side="left")
-        self.pos_frame.grid(row=8, column=1, columnspan=3, sticky="w", pady=3)
+        ttk.Label(self.pos_frame, text="X").pack(
+            side="left", padx=(0, uk.px(7)))
+        uk.RoundEntry(self.pos_frame, self.pal, textvariable=self.pos_x_var,
+                      chars=5, height=30).pack(
+                          side="left", padx=(0, uk.px(11)))
+        ttk.Label(self.pos_frame, text="Y").pack(
+            side="left", padx=(0, uk.px(7)))
+        uk.RoundEntry(self.pos_frame, self.pal, textvariable=self.pos_y_var,
+                      chars=5, height=30).pack(
+                          side="left", padx=(0, uk.px(11)))
+        ttk.Label(self.pos_frame,
+                  text=i18n.t("虚拟屏左上角在主屏坐标系里的位置",
+                              "top-left corner of the virtual screen, in "
+                              "main-screen coordinates"),
+                  style="Dim.TLabel").pack(side="left", padx=(uk.px(6), 0))
+        self.pos_frame.grid(row=1, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(9)))
         self.pos_frame.grid_remove()
         self.pos_x_var.trace_add("write", self._layout_changed)
         self.pos_y_var.trace_add("write", self._layout_changed)
 
-        self.mouse_var = tk.BooleanVar(value=False)
-        self.mouse_chk = ttk.Checkbutton(right, text=i18n.t("显示鼠标指针", "Draw the mouse pointer"),
-                                         variable=self.mouse_var)
-        self.mouse_chk.grid(row=7, column=1, sticky="w", pady=3)
-
-        # 1.9.0 -- the touch channel got a switch of its own.  Until this version
-        # it was a hidden cfg flag that was always on: the only way to stop the
-        # phone from driving the PC mouse was to press 停止, which also takes the
-        # virtual screen off the desktop.  The box takes effect immediately
-        # (_touch_choice -> Session.set_touch), no restart needed.
+        s = section(pict, i18n.t("触控", "Touch"))
         self.touch_var = tk.BooleanVar(value=bool(DEFAULTS.get("touch", True)))
-        self.touch_chk = ttk.Checkbutton(
-            right, text=i18n.t("手机触摸控制电脑", "Phone touch controls the PC"),
-            variable=self.touch_var, command=self._touch_choice)
-        self.touch_chk.grid(row=7, column=2, columnspan=2, sticky="w", pady=3)
+        self.touch_chk = uk.RoundCheck(
+            s, self.pal, variable=self.touch_var, command=self._touch_choice,
+            text=i18n.t("手机触摸控制电脑", "Phone touch controls the PC"))
+        self.touch_chk.grid(row=1, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(9)))
+
+        note(pict, i18n.t(
+            "分辨率、刷新率、帧率和画质 Q 在主窗口上，改完立刻生效。",
+            "Resolution, refresh rate, frame rate and quality Q stay on the main "
+            "window -- they are what people change while watching a picture."))
+
+        # -- 编码与画质 ------------------------------------------------------
+        enc = newpage("codec", i18n.t("编码与画质", "Encoding and quality"))
+        s = section(enc, i18n.t("编码器", "Encoder"))
+        self.enc_var = tk.StringVar(value="h264_nvenc")
+        self.enc_cb = uk.RoundSelect(s, self.pal, [], self.enc_var,
+                                     width=24, auto_width=True,
+                                     min_width=260)
+        self.enc_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.enc_cb.bind("<<ComboboxSelected>>", self._enc_changed)
+
+        self.pre_var = tk.StringVar(value="p4")
+        caption(s, 1, i18n.t("预设", "Preset"))
+        self.pre_cb = uk.RoundSelect(s, self.pal, [], self.pre_var,
+                                     width=14, auto_width=True,
+                                     min_width=210)
+        self.pre_cb.grid(row=1, column=1, sticky="w", pady=(0, uk.px(9)))
+
+        s = section(enc, i18n.t("码率", "Bitrate"))
+        self.rc_var = tk.StringVar(value=self._rc_caption())
+        caption(s, 0, i18n.t("码率控制", "Rate control"))
+        self.rc_cb = uk.RoundSelect(s, self.pal,
+                                    [t for _, t in RATECONTROL],
+                                    self.rc_var, width=30, auto_width=True,
+                                    min_width=260)
+        self.rc_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.rc_cb.bind("<<ComboboxSelected>>", self._rc_changed)
+
+        self.br_var = tk.StringVar(value=str(DEFAULTS["bitrate_mbps"]))
+        caption(s, 1, i18n.t("码率上限", "Bitrate ceiling"))
+        brf = ttk.Frame(s)
+        brf.grid(row=1, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.br_cb = uk.RoundSelect(brf, self.pal, list(BITRATE_CHOICES),
+                                    self.br_var, width=96, editable=True,
+                                    back=self.pal["bg"])
+        self.br_cb.pack(side="left")
+        ttk.Label(brf, text="Mbps", style="Dim.TLabel").pack(side="left",
+                                                            padx=(uk.px(6), 0))
+
+        self.q_hint_var = tk.StringVar(value="")
+        ttk.Label(enc, textvariable=self.q_hint_var, style="Dim.TLabel",
+                  wraplength=uk.px(560), justify="left").pack(
+                      anchor="w", pady=(0, uk.px(8)))
+        note(enc, i18n.t(
+            "显卡支持时优先用 HEVC：同样画质省一半带宽。libx264 只用 CPU，"
+            "发热大但兼容性最好。",
+            "Where the card allows it, HEVC gives the same picture at about half "
+            "the bandwidth. libx264 runs on the CPU: hotter, but it always works."))
+
+        # -- 设备 ------------------------------------------------------------
+        dev = newpage("device", i18n.t("设备", "Device"))
+        s = section(dev, i18n.t("采集", "Capture"))
+        self.be_var = tk.StringVar(value="auto")
+        caption(s, 0, i18n.t("采集方式", "Capture backend"))
+        self.be_cb = uk.RoundSelect(s, self.pal, [t for _, t in BACKENDS],
+                                    self.be_var, width=20, auto_width=True,
+                                    min_width=210)
+        self.be_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+
 
         self.inst_var = tk.BooleanVar(value=True)
-        self.inst_chk = ttk.Checkbutton(right, text=i18n.t("每次重新安装 APK",
-                                                           "Reinstall the APK every time"),
-                                        variable=self.inst_var)
-        self.inst_chk.grid(row=9, column=1, columnspan=3, sticky="w", pady=3)
+        self.inst_chk = uk.RoundCheck(
+            s, self.pal, variable=self.inst_var,
+            text=i18n.t("每次开始投屏都重新安装 APK", "Reinstall the APK every start"))
+        self.inst_chk.grid(row=1, column=0, columnspan=2, sticky="w",
+                           pady=(0, uk.px(9)))
 
-        # 1.6.8 -- the "shrink to tray" check box left the window: it is one
-        # preference and it was taking a permanent place in the main window.
-        # The × now asks the first time, and 工具 → 关闭窗口时的行为… changes the
-        # answer for good.
-        self.close_action = self._initial_close_action()
+        s = section(dev, i18n.t("数据线", "Cable"))
+        self.link_var = tk.StringVar(value="")
+        capf = ttk.Frame(s)
+        capf.grid(row=0, column=0, columnspan=2, sticky="ew")
+        uk.RoundButton(capf, self.pal,
+                       i18n.t("测一下数据线速度", "Measure cable speed"),
+                       command=self.on_linkspeed, kind="soft",
+                       height=32).pack(side="left")
+        ttk.Label(capf, textvariable=self.link_var, style="Dim.TLabel",
+                  wraplength=uk.px(330), justify="left").pack(side="left",
+                                                              padx=(uk.px(12), 0))
+
+        s = section(dev, i18n.t("桌面上的显示器", "Displays on the desktop"))
+        self.mon_var = tk.StringVar(value="")
+        ttk.Label(s, textvariable=self.mon_var, style="Mono.TLabel",
+                  justify="left", wraplength=uk.px(460)).grid(
+                      row=0, column=0, columnspan=2, sticky="w")
+
+        s = section(dev, i18n.t("虚拟显示器驱动", "Virtual display driver"), gap=0)
+        drvf = ttk.Frame(s)
+        drvf.grid(row=0, column=0, columnspan=2, sticky="ew")
+        uk.RoundButton(drvf, self.pal,
+                       i18n.t("安装 / 修复虚拟显示器驱动…",
+                              "Install / repair the virtual display driver..."),
+                       command=self.on_install_driver, kind="soft",
+                       height=32).pack(side="left")
+        uk.RoundButton(drvf, self.pal,
+                       i18n.t("卸载虚拟显示器驱动…",
+                              "Remove the virtual display driver..."),
+                       command=self.on_uninstall_driver, kind="soft",
+                       height=32).pack(side="left", padx=(uk.px(9), 0))
+
+        # -- 启动与退出 ------------------------------------------------------
+        boot = newpage("boot", i18n.t("启动与退出", "Start-up and closing"))
+        s = section(boot, i18n.t("开机", "At boot"))
         self.auto_var = tk.BooleanVar(value=bool(self.settings.get("autostart", False)))
-        self.auto_chk = ttk.Checkbutton(right, text=i18n.t("开机自动启动", "Start with Windows"),
-                                        variable=self.auto_var,
-                                        command=self._sync_autostart)
-        self.auto_chk.grid(row=10, column=0, columnspan=2, sticky="w", pady=3)
+        self.auto_chk = uk.RoundCheck(
+            s, self.pal, variable=self.auto_var, command=self._sync_autostart,
+            text=i18n.t("开机自动启动 DroidExtend", "Start DroidExtend with Windows"))
+        self.auto_chk.grid(row=0, column=0, columnspan=2, sticky="w",
+                           pady=(0, uk.px(9)))
 
-        # 1.9.0 -- "start with Windows" and "start streaming by itself" are two
-        # different promises, and the second one is only possible on top of the
-        # first, so ticking this ticks 开机自动启动 too and unticking that clears
-        # this one (see _sync_autostart).
         self.stream_auto_var = tk.BooleanVar(
             value=bool(self.settings.get("auto_stream", False)))
-        self.stream_auto_chk = ttk.Checkbutton(
-            right, text=i18n.t("开机后自动开始投屏", "Start streaming after boot"),
-            variable=self.stream_auto_var, command=self._auto_stream_choice)
-        self.stream_auto_chk.grid(row=10, column=2, columnspan=2, sticky="w", pady=3)
+        self.stream_auto_chk = uk.RoundCheck(
+            s, self.pal, variable=self.stream_auto_var,
+            command=self._auto_stream_choice,
+            text=i18n.t("开机后自动开始投屏", "Start streaming after boot"))
+        self.stream_auto_chk.grid(row=1, column=0, columnspan=2, sticky="w",
+                                  pady=(0, uk.px(9)))
 
-        # How long to keep waiting for the phone.  A desktop usually boots in
-        # well under a minute, but the phone may still be asleep or the cable
-        # plugged in later, so the default is a minute and it can be turned into
-        # "keep waiting" for an unattended machine.
+        caption(s, 2, i18n.t("开机后最多等手机", "Wait for the phone up to"))
         self.wait_var = tk.StringVar(value=_wait_caption(
             int(self.settings.get("auto_stream_wait", 60) or 0)))
-        ttk.Label(right, text=i18n.t("开机后最多等手机", "Wait for the phone up to"),
-                  style="Dim.TLabel").grid(row=11, column=0, sticky="w", pady=3)
-        self.wait_cb = ttk.Combobox(right, textvariable=self.wait_var, width=10,
-                                    state="readonly", values=[t for _, t in WAITS])
-        self.wait_cb.grid(row=11, column=1, sticky="w", pady=3)
+        wf = ttk.Frame(s)
+        wf.grid(row=2, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.wait_cb = uk.RoundSelect(wf, self.pal, [t for _, t in WAITS],
+                                      self.wait_var, width=12, auto_width=True,
+                                      min_width=110)
+        self.wait_cb.pack(side="left")
         self.wait_cb.bind("<<ComboboxSelected>>", self._wait_changed)
-        ttk.Label(right, text=i18n.t("等不到会弹一条系统通知",
-                                     "a system notification if it never shows up"),
-                  style="Dim.TLabel").grid(row=11, column=2, columnspan=2, sticky="w", pady=3)
+        ttk.Label(wf, text=i18n.t("等不到会弹一条系统通知",
+                                  "a notification if it never shows up"),
+                  style="Dim.TLabel").pack(side="left", padx=(uk.px(9), 0))
 
+        s = section(boot, i18n.t("关闭", "Closing"))
+        caption(s, 0, i18n.t("点关闭按钮时", "When the close button is pressed"))
+        cf = ttk.Frame(s)
+        cf.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.close_cap_var = tk.StringVar(value=self._close_action_caption())
+        ttk.Label(cf, textvariable=self.close_cap_var, style="Dim.TLabel").pack(
+            side="left")
+        ttk.Button(cf, text=i18n.t("更改…", "Change..."),
+                   style="Link.TButton",
+                   command=self.on_close_behavior).pack(side="left", padx=(uk.px(12), 0))
+
+        s = section(boot, i18n.t("退出时对虚拟屏", "The virtual screen on exit"), gap=0)
+        self.off_mode_var = tk.StringVar(
+            value=self.settings.get("vdd_off_mode", "deep"))
+        self.off_deep_btn = uk.RoundRadio(
+            s, self.pal, value="deep", variable=self.off_mode_var,
+            command=self._off_mode_choice,
+            text=i18n.t("彻底关闭（开机也不出现，远程软件看不到）",
+                        "Switch it off for real (absent at boot, invisible to "
+                        "remote software)"))
+        self.off_deep_btn.grid(row=0, column=0, columnspan=2, sticky="w",
+                               pady=(0, uk.px(4)))
+        self.off_desk_btn = uk.RoundRadio(
+            s, self.pal, value="desktop", variable=self.off_mode_var,
+            command=self._off_mode_choice,
+            text=i18n.t("只移出桌面（不弹授权，但屏还在系统里）",
+                        "Just take it off the desktop (no prompt, it still exists)"))
+        self.off_desk_btn.grid(row=1, column=0, columnspan=2, sticky="w",
+                               pady=(0, uk.px(9)))
+        note(boot, i18n.t(
+            "彻底关闭会在退出时禁用一次虚拟显示器设备节点，之后远程软件"
+            "（Parsec、GameViewer 之类）就看不到多出来的那块屏。",
+            "Switching it off for real disables the virtual display device node on "
+            "exit, so remote software (Parsec, GameViewer and the like) stops "
+            "seeing the extra screen."))
+
+        # -- 外观 ------------------------------------------------------------
+        look = newpage("look", i18n.t("外观", "Appearance"))
+        s = section(look, i18n.t("颜色", "Colour"))
+        caption(s, 0, i18n.t("深浅色", "Colour scheme"))
+        thf = ttk.Frame(s)
+        thf.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        for code, cap in (("auto", i18n.t("跟随 Windows", "Follow Windows")),
+                          ("light", i18n.t("浅色", "Light")),
+                          ("dark", i18n.t("深色", "Dark"))):
+            uk.RoundRadio(thf, self.pal, text=cap, value=code,
+                          variable=self.theme_var,
+                          command=lambda c=code: self._set_theme(c)).pack(
+                              side="left", padx=(0, uk.px(16)))
+
+        s = section(look, i18n.t("语言", "Language"))
+        lgf = ttk.Frame(s)
+        lgf.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        for code, cap in i18n.choices():
+            uk.RoundRadio(lgf, self.pal, text=cap, value=code,
+                          variable=self.lang_var,
+                          command=lambda c=code: self._switch_lang(c)).pack(
+                              side="left", padx=(0, uk.px(16)))
+
+        s = section(look, i18n.t("动画", "Animation"))
         self.anim_var = tk.BooleanVar(value=bool(self.settings.get(anim.KEY, True)))
-        self.anim_chk = ttk.Checkbutton(right, text=anim.label(), variable=self.anim_var,
-                                        command=self._anim_choice)
-        self.anim_chk.grid(row=12, column=1, sticky="w", pady=3)
+        self.anim_chk = uk.RoundCheck(s, self.pal, variable=self.anim_var,
+                                      command=self._anim_choice,
+                                      text=anim.label())
+        self.anim_chk.grid(row=0, column=0, columnspan=2, sticky="w")
 
-        # 1.6.4 -- how thoroughly to put the virtual screen away.  This used to
-        # run on every 停止 (Stop), which made stopping and starting again slow:
-        # the screen had to be taken off the desktop and, in "deep" mode, the
-        # driver device node had to be disabled and then enabled again.  It now
-        # runs once, when the program exits.  "deep" disables the driver device
-        # node, which is the only thing that actually makes the screen disappear
-        # (writing a count of 0 does not: the driver calls that invalid and keeps
-        # one monitor).  "desktop" only takes it off the desktop.
-        self.off_mode_var = tk.StringVar(value=self.settings.get("vdd_off_mode", "deep"))
-        ttk.Label(right, text=i18n.t("退出程序时：", "When the program exits:"),
-                  style="Dim.TLabel").grid(row=13, column=0, sticky="w", pady=(6, 3))
-        self.off_deep_btn = ttk.Radiobutton(
-            right, text=i18n.t("彻底关闭（开机也不出现，远程软件看不到）",
-                               "Switch it off for real (absent at boot, invisible to remote software)"),
-            value="deep", variable=self.off_mode_var, command=self._off_mode_choice)
-        self.off_deep_btn.grid(row=13, column=1, columnspan=3, sticky="w", pady=(6, 3))
-        self.off_desk_btn = ttk.Radiobutton(
-            right, text=i18n.t("只移出桌面（不弹授权，但屏还在系统里）",
-                               "Just take it off the desktop (no prompt, but it still exists)"),
-            value="desktop", variable=self.off_mode_var, command=self._off_mode_choice)
-        self.off_desk_btn.grid(row=14, column=1, columnspan=3, sticky="w", pady=3)
+        s = section(look, i18n.t("通知", "Notifications"), gap=0)
+        nf = ttk.Frame(s)
+        nf.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, uk.px(9)))
+        uk.RoundCheck(
+            nf, self.pal, variable=self.notify_var,
+            command=lambda: self._set_notify("notify", self.notify_var),
+            text=i18n.t("使用 Windows 通知", "Use Windows notifications")).pack(
+                anchor="w")
+        nf2 = ttk.Frame(s)
+        nf2.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, uk.px(9)))
+        uk.RoundButton(nf2, self.pal,
+                       i18n.t("发一条测试通知", "Send a test notification"),
+                       command=self.on_test_notify, kind="soft",
+                       height=32).pack(side="left")
+        ttk.Button(nf2, text=i18n.t("Windows 通知设置…",
+                                    "Windows notification settings..."),
+                   style="Link.TButton",
+                   command=lambda: self.open_url("ms-settings:notifications")
+                   ).pack(side="left", padx=(uk.px(12), 0))
+        note(look, i18n.t(
+            "每一类通知（连上手机、连不上、驱动异常…）在菜单「通知」里单独开关。",
+            "Each kind of notification has its own switch under the Notifications "
+            "menu."))
 
-        self.link_var = tk.StringVar(value="")
-        ttk.Label(right, textvariable=self.link_var, style="Dim.TLabel", wraplength=430,
-                  justify="left").grid(row=15, column=0, columnspan=4, sticky="w", pady=(6, 0))
-        ttk.Button(right, text=i18n.t("测一下数据线速度", "Measure cable speed"),
-                   command=self.on_linkspeed).grid(row=16, column=1, sticky="w", pady=(4, 0))
-        ttk.Label(right, textvariable=self.q_hint_var, style="Dim.TLabel", wraplength=430,
-                  justify="left").grid(row=17, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        # -- 关于 ------------------------------------------------------------
+        abt = newpage("about", i18n.t("关于", "About"))
+        s = section(abt, i18n.t("版本", "Version"))
+        ttk.Label(s, text="%s  v%s" % (APP_NAME, APP_VERSION),
+                  style="Big.TLabel").grid(row=0, column=0, columnspan=2,
+                                           sticky="w", pady=(0, uk.px(6)))
+        self.file_var = tk.StringVar(
+            value=i18n.t("数据目录: %s", "Data folder: %s") % paths.data_dir())
+        ttk.Label(s, textvariable=self.file_var, style="Dim.TLabel",
+                  wraplength=uk.px(480), justify="left").grid(
+                      row=1, column=0, columnspan=2, sticky="w")
 
-        # -- actions ---------------------------------------------------------
-        act = ttk.Frame(outer)
-        act.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        self.btn_start = ttk.Button(act, text=i18n.t("▶  开始投屏", "▶  Start"),
-                                    style="Go.TButton", command=self.on_start)
-        self.btn_start.pack(side="left")
-        self.btn_stop = ttk.Button(act, text=i18n.t("■  停止", "■  Stop"),
-                                   command=self.on_stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=8)
-        self.stat_var = tk.StringVar(value=i18n.t("就绪", "Ready"))
-        ttk.Label(act, textvariable=self.stat_var, style="Big.TLabel").pack(side="left", padx=16)
-        ttk.Button(act, text=i18n.t("使用说明", "Manual"), command=self.on_manual).pack(side="right")
-        ttk.Button(act, text=i18n.t("检查更新", "Check for updates"),
-                   command=lambda: self.on_check_updates(manual=True)).pack(side="right", padx=6)
-        self.perf_var = tk.StringVar(value="")
-        ttk.Label(act, textvariable=self.perf_var, style="Mono.TLabel").pack(side="right", padx=10)
+        s = section(abt, i18n.t("链接", "Links"), gap=0)
+        for i, (cap, cmd) in enumerate((
+                (i18n.t("项目主页（GitHub）", "Project home (GitHub)"),
+                 lambda: self.open_url(REPO_URL)),
+                (i18n.t("反馈问题 / 提建议", "Report a problem / suggest something"),
+                 lambda: self.open_url(ISSUES_URL)),
+                (i18n.t("最近几版改了什么", "What changed recently"),
+                 self.on_show_changelog),
+                (i18n.t("使用条款与隐私说明", "Terms and privacy"),
+                 self.on_show_privacy),
+                (i18n.t("第三方组件许可", "Third-party licences"), self.on_licenses),
+                (i18n.t("请作者喝杯奶茶…", "Buy the author a milk tea..."),
+                 self.on_donate))):
+            ttk.Button(s, text=cap, style="Link.TButton", command=cmd).grid(
+                row=i, column=0, columnspan=2, sticky="w", pady=uk.px(2))
 
-        # -- log -------------------------------------------------------------
-        logf = ttk.Labelframe(outer, text=i18n.t(" 日志 ", " Log "), padding=6)
-        logf.grid(row=2, column=0, columnspan=2, sticky="nsew")
-        logf.rowconfigure(1, weight=1)
-        logf.columnconfigure(0, weight=1)
-        lbar = ttk.Frame(logf)
-        lbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        ttk.Button(lbar, text=i18n.t("复制全部", "Copy all"), width=10,
-                   command=self.on_copy_log).pack(side="left")
-        ttk.Button(lbar, text=i18n.t("另存为…", "Save as..."), width=10,
-                   command=self.on_save_log).pack(side="left", padx=6)
-        ttk.Button(lbar, text=i18n.t("清空", "Clear"), width=8,
-                   command=self.on_clear_log).pack(side="left")
-        self.log_hint_var = tk.StringVar(value="")
-        ttk.Label(lbar, textvariable=self.log_hint_var, style="Dim.TLabel").pack(side="right")
-        self.log_txt = tk.Text(logf, bg="#0f1115", fg="#c8d0da", insertbackground=FG,
-                               font=("Consolas", 9), wrap="word", relief="flat", height=12)
-        self.log_txt.grid(row=1, column=0, sticky="nsew")
-        sb = ttk.Scrollbar(logf, command=self.log_txt.yview)
-        sb.grid(row=1, column=1, sticky="ns")
-        self.log_txt.configure(yscrollcommand=sb.set, state="disabled")
-        self.log_txt.tag_configure("err", foreground="#ff7b72")
-        self.log_txt.tag_configure("ok", foreground="#7ee787")
-        self.log_txt.tag_configure("hl", foreground=ACCENT)
+        rf = ttk.Frame(abt)
+        rf.pack(fill="x", anchor="w", pady=(uk.px(18), 0))
+        s = rf
+        uk.RoundButton(s, self.pal,
+                       i18n.t("把设置恢复成默认值…", "Reset the settings..."),
+                       command=self.on_reset_settings, kind="soft",
+                       height=32).grid(row=0, column=0, sticky="w")
 
-        # -- status bar ------------------------------------------------------
-        bar = ttk.Frame(outer)
-        bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        ttk.Label(bar, text="%s v%s" % (APP_NAME, APP_VERSION), style="Dim.TLabel").pack(side="left")
-        ttk.Label(bar, text=REPO_URL, style="Dim.TLabel").pack(side="left", padx=12)
-        self.file_var = tk.StringVar(value=i18n.t("数据目录: %s", "Data folder: %s")
-                                     % paths.data_dir())
-        ttk.Label(bar, textvariable=self.file_var, style="Dim.TLabel").pack(side="right")
-
-        # Any settings change is written straight out, so even a crash leaves
+        # Every setting change is written straight out, so even a crash leaves
         # the next start on the settings you picked.  add="+" keeps the existing
         # handlers (which fix up presets and the Q field) running first.
         for cb in (self.res_cb, self.hz_cb, self.fps_cb, self.br_cb, self.rc_cb,
@@ -1192,7 +1851,265 @@ class App(tk.Tk):
         for chk in (self.mouse_chk, self.inst_chk):
             chk.configure(command=self._changed_any)
 
-        self._arm_perf()
+    def _close_action_caption(self):
+        return {"ask": i18n.t("每次都问我", "Ask me every time"),
+                "tray": i18n.t("收进托盘", "Minimize to tray"),
+                "quit": i18n.t("直接退出", "Exit")}.get(
+                    self.close_action, str(self.close_action))
+
+    def _drag_window(self, win, widget):
+        # Move a frameless Toplevel by dragging the widget -- its title bar.
+        state = {}
+
+        def press(event):
+            state["dx"] = event.x_root - win.winfo_x()
+            state["dy"] = event.y_root - win.winfo_y()
+
+        def move(event):
+            if "dx" not in state:
+                return
+            win.geometry("+%d+%d" % (event.x_root - state["dx"],
+                                     event.y_root - state["dy"]))
+
+        widget.bind("<Button-1>", press, add="+")
+        widget.bind("<B1-Motion>", move, add="+")
+
+    def _open_settings(self, page=None):
+        if getattr(self, "view_set", None) is None:
+            return
+        try:
+            self.view_main.pack_forget()
+            self.view_set.pack(side="top", fill="both", expand=True)
+        except Exception:
+            return
+        self._show_page(page or getattr(self, "_page", "picture"))
+        self.after(30, self._fit_settings)
+        self.after(60, lambda: self.mon_var.set(self._monitor_text()))
+
+    def _fit_settings(self):
+        # Tall enough for the longest page, so paging does not make
+        # the window jump under the cursor.
+        try:
+            self.update_idletasks()
+        except Exception:
+            return
+        need = 0
+        for f in getattr(self, "_pages", {}).values():
+            try:
+                need = max(need, f.winfo_reqheight())
+            except Exception:
+                pass
+        h = max(uk.px(620), min(need + uk.px(120),
+                                self.winfo_screenheight() - uk.px(100)))
+        if getattr(self, "_maxed", False):
+            return
+        try:
+            self.geometry("%dx%d" % (self.winfo_width(), h))
+        except Exception:
+            pass
+
+    def _close_settings(self):
+        if getattr(self, "view_set", None) is None:
+            return
+        try:
+            self.view_set.pack_forget()
+        except Exception:
+            pass
+        self.view_main.pack(side="top", fill="both", expand=True,
+                            padx=(uk.px(24), uk.px(24)),
+                            pady=(uk.px(4), uk.px(20)))
+        if not getattr(self, "_maxed", False):
+            try:
+                self.geometry("%dx%d" % (self.winfo_width(), uk.px(640)))
+            except Exception:
+                pass
+
+    def _show_page(self, key):
+        if key not in getattr(self, "_pages", {}):
+            key = "picture"
+        self._page = key
+        for k, f in self._pages.items():
+            try:
+                f.grid() if k == key else f.grid_remove()
+            except Exception:
+                pass
+        for k, b in self._nav_btns.items():
+            try:
+                if hasattr(b, "set_selected"):
+                    b.set_selected(k == key)
+                    b.set_font(getattr(self, "_nav_font_on", None) if k == key
+                               else getattr(self, "_nav_font", None))
+                else:
+                    b.configure(style="NavOn.TButton" if k == key
+                                else "Nav.TButton")
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------ appearance
+    def _set_theme(self, mode):
+        mode = mode if mode in theme.MODES else "auto"
+        self.theme_mode = mode
+        try:
+            self.theme_var.set(mode)
+        except Exception:
+            pass
+        self.settings["theme"] = mode
+        try:
+            st.save(self.settings)
+        except Exception:
+            pass
+        kind = theme.resolve(mode)
+        if kind != self._theme_kind:
+            self._theme_kind = kind
+            self.pal = theme.PALETTES[kind]
+            self._apply_theme()
+
+    def _apply_titlebar(self, win=None):
+        """Give the window frame the same scheme as the page.
+
+        Windows paints a light title bar over a dark page (and the other way
+        round) unless the program asks for the immersive dark frame, and Tk
+        has no setting for it.  Without this the redesign reads as a dark
+        sheet inside a white picture frame.
+        """
+        if os.name != "nt":
+            return
+        if win is None:
+            # The main window draws its own title bar; there is no frame left
+            # to paint.
+            try:
+                if self.overrideredirect():
+                    return
+            except Exception:
+                pass
+        target = self if win is None else win
+        hwnd = 0
+        try:
+            # wm_frame() is the toplevel frame Tk actually draws: winfo_id()
+            # is the client child, and its parent is not always the frame.
+            hwnd = int(target.wm_frame(), 16)
+        except Exception:
+            hwnd = 0
+        if not hwnd:
+            try:
+                hwnd = ctypes.windll.user32.GetAncestor(target.winfo_id(), 2)
+            except Exception:
+                return
+        if not hwnd:
+            return
+        try:
+            dark = ctypes.c_int(1 if self._theme_kind == "dark" else 0)
+            for attr in (20, 19):
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(dark),
+                        ctypes.sizeof(dark)) == 0:
+                    break
+        except Exception:
+            pass
+        try:
+            rgb = self.pal["line"].lstrip("#")
+            col = ctypes.c_int(int(rgb[0:2], 16) | (int(rgb[2:4], 16) << 8)
+                               | (int(rgb[4:6], 16) << 16))
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 34, ctypes.byref(col), ctypes.sizeof(col))
+        except Exception:
+            pass
+
+    def _apply_theme(self):
+        """Rebuild the window in the new colours, then put Settings back up.
+
+        The same path as a language switch: Tk cannot recolour widgets in place,
+        and rebuilding means every colour -- including the ones in the manual and
+        about windows -- is produced from the current palette.
+        """
+        page = getattr(self, "_page", "picture")
+        try:
+            self._rebuild_window()
+        except Exception as e:
+            self.log("重建窗口失败: %s" % e, "err")
+            return
+        try:
+            self._open_settings(page)
+        except Exception:
+            pass
+
+    def _watch_theme(self):
+        """Windows switching between light and dark while we are running.
+
+        There is no event for this in Tk, so it costs a registry read every
+        2.5 seconds -- on a GUI that is already polling the session every 700ms
+        that is noise, and it means the window follows the system the way the
+        settings say it should.
+        """
+        try:
+            kind = theme.resolve(self.theme_mode)
+            if kind != self._theme_kind:
+                self._theme_kind = kind
+                self.pal = theme.PALETTES[kind]
+                self._apply_theme()
+        except Exception:
+            pass
+        try:
+            self._theme_job = self.after(2500, self._watch_theme)
+        except Exception:
+            pass
+
+    # ---------------------------------------------------------------- summary
+    def _sync_summary(self):
+        """The one-line description of what the next start will use."""
+        bits = []
+        try:
+            name = self._enc_name()
+            if name:
+                bits.append(name)
+        except Exception:
+            pass
+        try:
+            # The raw value, not the caption: the caption is a whole sentence
+            # ("VBR, quality first: quiet desktop, smaller stream") and it used
+            # to push the Start button off the right edge of the window.
+            bits.append(str(self._rc_value).upper())
+        except Exception:
+            pass
+        try:
+            res = (self.res_var.get() or "").strip()
+            if res == _custom_label():
+                w = (self.w_var.get() or "").strip()
+                h = (self.h_var.get() or "").strip()
+                res = ("%sx%s" % (w, h)) if (w and h) else ""
+            hz = (self.hz_var.get() or "").strip()
+            if res and hz:
+                bits.append("%s@%s" % (res, hz))
+            elif res:
+                bits.append(res)
+        except Exception:
+            pass
+        text = " · ".join([b for b in bits if b])
+        try:
+            self.summary_var.set(i18n.t("当前配置: ", "Current: ") + text)
+        except Exception:
+            pass
+
+    def _set_dot(self, kind):
+        col = {"green": self.pal["green"], "yellow": self.pal["yellow"],
+               "red": self.pal["red"]}.get(kind, self.pal["faint"])
+        try:
+            self.dot_cv.itemconfigure(self._dot_id, fill=col)
+        except Exception:
+            try:
+                self.dot_lbl.configure(fg=col, bg=self.pal["bg"])
+            except Exception:
+                pass
+
+    def _set_metric(self, key, text):
+        item = getattr(self, "_metric_labels", {}).get(key)
+        if not item:
+            return
+        var, _lbl = item
+        try:
+            var.set(text)
+        except Exception:
+            pass
 
     def _arm_perf(self):
         """Arm the 700ms performance tick, cancelling the previous one.
@@ -1265,9 +2182,7 @@ class App(tk.Tk):
     def _on_gpu(self, text):
         """Show which GPU the capture is using (called from a worker thread)."""
         if text is None:
-            text = i18n.t("采集显卡: ——", "Capture GPU: -")
-        else:
-            text = i18n.t("采集显卡: ", "Capture GPU: ") + text
+            text = i18n.t("——", "-")
         self._later(lambda: self.gpu_var.set(text))
 
     def log(self, msg, tag=None):
@@ -1937,16 +2852,21 @@ class App(tk.Tk):
         self._later(lambda: self.drv_var.set(vd.summary_line(st)))
         self._later(lambda: self._sync_driver_button(st))
 
-        mons = wd.live_monitors()
+        self._later(lambda: self.mon_var.set(self._monitor_text()))
+        if st["state"] != "ready":
+            self.log("虚拟显示器状态: " + vd.summary_line(st))
+
+    # Monitor list as text; safe to call from any thread.
+    def _monitor_text(self):
+        try:
+            mons = wd.live_monitors()
+        except Exception:
+            mons = []
         text = "\n".join("%-12s %-28s %dx%d@%d  @(%d,%d)%s" % (
             m["name"], (m["monitor"] or m["desc"])[:28], m["width"], m["height"],
             m["hz"], m["left"], m["top"],
             i18n.t("  [主]", "  [primary]") if m["primary"] else "") for m in mons)
-        self._later(lambda: self.mon_var.set(
-            i18n.t("当前桌面显示器:\n", "Current desktop monitors:\n")
-            + (text or i18n.t("（无）", "(none)"))))
-        if st["state"] != "ready":
-            self.log("虚拟显示器状态: " + vd.summary_line(st))
+        return text or i18n.t("（无）", "(none)")
 
     def _sync_driver_button(self, st):
         """Paint install / turn-on / installed on the left panel's button.
@@ -1959,8 +2879,13 @@ class App(tk.Tk):
         action, caption = _driver_button(st)
         self._drv_action = action
         try:
-            self.btn_install.configure(
-                text=caption, state="disabled" if action == "done" else "normal")
+            if action == "done":
+                # Nothing to do: this row is a line of text, exactly as drawn.
+                self.btn_install.pack_forget()
+            else:
+                self.btn_install.configure(text=caption, state="normal")
+                if not self.btn_install.winfo_ismapped():
+                    self.btn_install.pack(side="right", padx=(uk.px(12), 0))
         except Exception:
             pass
 
@@ -2297,7 +3222,7 @@ class App(tk.Tk):
 
     def _stopped(self):
         self.stat_var.set(i18n.t("已停止", "Stopped"))
-        self.perf_var.set("")
+        self.note_var.set("")
         self.btn_start.configure(state="normal")
 
     # ------------------------------------------- 开机后自动开始投屏（1.9.0）
@@ -2526,23 +3451,57 @@ class App(tk.Tk):
                      "「专注助手」挡住了，菜单里有「Windows 通知设置…」。", "err")
 
     def _poll_perf(self):
+        """The 700ms tick that keeps the four numbers on the status line.
+
+        Everything here is best-effort: a session that is shutting down can
+        take its stats dict with it, and a status line is never worth an
+        exception.
+        """
         s = self.session
-        if s is not None and getattr(s, "fatal", None):
-            # The capture watchdog gave up (the virtual display is gone).
-            self.perf_var.set(s.fatal)
-        elif s is not None and s.server and not s.running:
-            # ffmpeg died and is being restarted -- usually one or two seconds.
-            self.perf_var.set(i18n.t("采集中断，正在自动重连…",
-                                     "Capture interrupted, reconnecting..."))
-        elif s is not None and s.running and s.server:
-            st = s.stats
-            conn = (i18n.t("手机已连接", "phone connected") if s.server.connected
-                    else i18n.t("等待手机连接…", "waiting for the phone..."))
-            self.perf_var.set(i18n.t(
-                "%s   %.1f fps   编码 %.1f Mbps   送出 %d 帧   丢 %d",
-                "%s   %.1f fps   encoded %.1f Mbps   sent %d   dropped %d") % (
-                conn, st["fps"], st["mbps"], st["sent"], st["dropped"]))
-        self._perf_job = self.after(700, self._poll_perf)
+        try:
+            if s is not None and getattr(s, "fatal", None):
+                # The capture watchdog gave up (the virtual display is gone).
+                self.note_var.set(s.fatal)
+                self._set_dot("red")
+                self._clear_metrics()
+            elif s is not None and s.server and not s.running:
+                # ffmpeg died and is being restarted -- usually one or two seconds.
+                self.note_var.set(i18n.t("采集中断，正在自动重连…",
+                                         "Capture interrupted, reconnecting..."))
+                self._set_dot("yellow")
+                self._clear_metrics()
+            elif s is not None and s.running and s.server:
+                st = s.stats
+                linked = bool(s.server.connected)
+                self._set_dot("green" if linked else "idle")
+                self.note_var.set("" if linked else i18n.t(
+                    "等待手机连接…", "waiting for the phone..."))
+                self._set_metric("cap", "%.0f" % st["fps"])
+                self._set_metric("send", "%.1f" % st["mbps"])
+                # The phone's own numbers, but only while they are fresh: a
+                # phone that has just gone away would otherwise leave the last
+                # frame rate sitting there as if it were still true.
+                cs = getattr(s.server, "client_stats", None)
+                age = time.time() - (getattr(s.server, "client_stats_at", 0.0) or 0.0)
+                if cs and age < 6.0:
+                    self._set_metric("phone", "%d" % cs["shown_fps"])
+                    self._set_metric("lat", "%d" % cs["latency_ms"])
+                else:
+                    self._set_metric("phone", "—")
+                    self._set_metric("lat", "—")
+            else:
+                self._set_dot("idle")
+                self._clear_metrics()
+        except Exception:
+            pass
+        try:
+            self._perf_job = self.after(700, self._poll_perf)
+        except Exception:
+            pass
+
+    def _clear_metrics(self):
+        for key in ("cap", "send", "phone", "lat"):
+            self._set_metric(key, "—")
 
     def _on_close(self):
         """窗口上的 ×。
@@ -3374,6 +4333,7 @@ class App(tk.Tk):
         try:
             self.deiconify()
             self.state("normal")
+            _borderless(self)
             self.lift()
             self.focus_force()
         except Exception:

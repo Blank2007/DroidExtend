@@ -151,12 +151,23 @@ second screen.
 
 ## 2. The interface
 
-The menu bar is at the top (**File / Tools / Notifications / Language / Help**), and the status bar at the bottom shows the version number, the
-repository URL and where the settings file lives.
-The left half of the middle area shows device and display status; the right half is where you tune quality and
-frame rate.
-Besides the phone model, the left half has carried a `采集显卡` (capture GPU) line since 1.8.5: which adapter
-grabs the picture and which one encodes it.
+The title bar is drawn by the window itself: `DroidExtend`, `安卓拓展屏` and the version on the
+left; the **gear** (settings), **≡** (menu: File / Tools / Notifications / Language / Help), and
+minimise / maximise / close on the right.
+
+The main window is one page from top to bottom, with no dividers -- seven groups separated by whitespace:
+
+1. **Status line**: a green dot, `已连接`, the phone model / `USB 3.0` / link rate; and four live metrics on the right -- capture fps, send Mbps, phone fps, display ms (the last one in green).
+2. **Virtual display**: the path currently on the desktop, e.g. `\\.\DISPLAY24 · 2560 × 1600 @ 120 Hz · right`.
+3. **Capture GPU**: which adapter is grabbing the picture (ddagrab only saw one adapter on dual-GPU machines; since 1.8.5 every adapter's outputs are probed).
+4. **Picture**: resolution / refresh rate / frame rate / quality Q, four dropdowns, applied immediately.
+5. **Show mouse pointer** and **More settings →**.
+6. **Current configuration** (e.g. `HEVC · auto bitrate · low latency`) and **Start / Stop**.
+7. **Log card**: copy / save as / clear / expand.
+
+Clicking the gear does not open a second window -- it **swaps the content area in place**: six nav entries on the left (Picture / Codec & quality / Device / Startup & exit / Appearance / About), "←" top left and "Done" top right, with the window height following the amount of content on the current page.
+
+The settings on that page are grouped by:
 
 | Item | Description |
 | --- | --- |
@@ -174,7 +185,7 @@ grabs the picture and which one encodes it.
 | **Test the USB cable speed** | Measures how many Mbps this cable can actually do and clamps the bitrate cap to a safe value (stop the stream first for a more accurate reading) |
 | **Stop** | Stops the stream and **removes the virtual display from the system** (see below) |
 
-The bottom of the window shows live stats: `手机已连接  58.2 fps  编码 2.4 Mbps  送出 1203 帧  丢 0`
+The status line shows live stats: `采集 120 fps · 发送 15.3 Mbps · 手机 收 120 fps / 显示 120 fps · 15 ms`, and the log card records every start, connection, capture and statistics round
 (phone connected / encoded / frames sent / frames dropped).
 
 ### Touch control
@@ -299,7 +310,7 @@ By default that is **the program's own directory** — if you used the installer
 installation.
 The menu item `文件 → 更改数据目录…` (File → Change data directory…) moves it elsewhere (and takes both files along
 with it), and `文件 → 打开数据目录（设置与日志）` (File → Open data directory (settings and logs)) opens it directly
-in Explorer. The status bar at the bottom always shows which directory is in use.
+in Explorer. The About page in settings always shows which directory is in use.
 
 > If the program directory is not writable (for example if you installed into `Program Files`), it automatically
 > falls back to `%LOCALAPPDATA%\DroidExtend`, recording the choice in `data_dir.txt` inside that directory.

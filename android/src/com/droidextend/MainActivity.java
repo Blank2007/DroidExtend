@@ -376,10 +376,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         card.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(getResources().getColor(R.color.sheet_bg));
-        bg.setCornerRadius(dp(20));
-        bg.setStroke(Math.round(dp(1)), getResources().getColor(R.color.hud_stroke));
+        bg.setCornerRadius(dp(16));
+        bg.setStroke(Math.round(dp(1)), getResources().getColor(R.color.sheet_line));
         card.setBackground(bg);
-        int pad = Math.round(dp(20));
+        int pad = Math.round(dp(18));
         card.setPadding(pad, pad, pad, pad);
         card.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
@@ -547,7 +547,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         clear.setText(Lang.t("清空日志", "Clear log"));
         clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         clear.setTextColor(getResources().getColor(R.color.hud_text));
-        clear.setBackgroundTintList(ColorStateList.valueOf(0x33FFFFFF));
+        GradientDrawable clearBg = new GradientDrawable();
+        clearBg.setColor(0x1FFFFFFF);
+        clearBg.setCornerRadius(dp(8));
+        clearBg.setStroke(Math.round(dp(1)), 0x26FFFFFF);
+        clear.setBackground(clearBg);
+        clear.setAllCaps(false);
+        clear.setPadding(Math.round(dp(14)), Math.round(dp(6)),
+                Math.round(dp(14)), Math.round(dp(6)));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.topMargin = Math.round(dp(6));
@@ -599,7 +606,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final TextView kaState = new TextView(this);
         kaState.setText(KeepAlive.stateText(this));
         kaState.setTextColor(KeepAlive.batteryRestricted(this)
-                ? getResources().getColor(R.color.accent)
+                ? getResources().getColor(R.color.hud_warn)
                 : getResources().getColor(R.color.hud_dim));
         kaState.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         card.addView(kaState);
@@ -649,9 +656,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         Button close = new Button(this);
         close.setText(Lang.t("关闭", "Close"));
-        close.setTextColor(getResources().getColor(R.color.hud_text));
-        close.setBackgroundTintList(ColorStateList.valueOf(
-                getResources().getColor(R.color.accent)));
+        // The primary action of the sheet, so it is the filled one: light on
+        // dark, exactly like "Start" on the host window.
+        close.setTextColor(getResources().getColor(R.color.accent_ink));
+        GradientDrawable closeBg = new GradientDrawable();
+        closeBg.setColor(getResources().getColor(R.color.accent));
+        closeBg.setCornerRadius(dp(8));
+        close.setBackground(closeBg);
+        close.setAllCaps(false);
+        close.setPadding(Math.round(dp(14)), Math.round(dp(8)),
+                Math.round(dp(14)), Math.round(dp(8)));
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         blp.topMargin = Math.round(dp(12));
@@ -701,7 +715,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         TextView t = new TextView(this);
         t.setText(text);
         t.setTextColor(getResources().getColor(R.color.hud_dim));
-        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         t.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(6)));
         return t;
@@ -723,8 +737,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         row.setOrientation(LinearLayout.HORIZONTAL);
         GradientDrawable frame = new GradientDrawable();
         frame.setColor(getResources().getColor(R.color.sheet_row));
-        frame.setCornerRadius(dp(12));
-        frame.setStroke(Math.round(dp(1)), getResources().getColor(R.color.hud_stroke));
+        frame.setCornerRadius(dp(10));
+        frame.setStroke(Math.round(dp(1)), getResources().getColor(R.color.sheet_line));
         row.setBackground(frame);
         int pad = Math.round(dp(3));
         row.setPadding(pad, pad, pad, pad);
@@ -765,10 +779,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         for (int i = 0; i < cells.length; i++) {
             boolean on = i == checked;
             GradientDrawable g = new GradientDrawable();
-            g.setCornerRadius(dp(9));
+            g.setCornerRadius(dp(8));
             g.setColor(on ? getResources().getColor(R.color.accent) : 0x00000000);
             cells[i].setBackground(g);
-            cells[i].setTextColor(on ? 0xFF0A1020
+            cells[i].setTextColor(on ? getResources().getColor(R.color.accent_ink)
                     : getResources().getColor(R.color.hud_dim));
             cells[i].setTypeface(Typeface.create(
                     on ? "sans-serif-medium" : "sans-serif", Typeface.NORMAL));
@@ -782,7 +796,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         cb.setTextColor(getResources().getColor(R.color.hud_text));
         cb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         cb.setChecked(on);
-        cb.setButtonTintList(ColorStateList.valueOf(getResources().getColor(R.color.accent)));
+        cb.setButtonTintList(ColorStateList.valueOf(getResources().getColor(R.color.check_tint)));
         cb.setOnCheckedChangeListener(l);
         cb.setPadding(0, Math.round(dp(10)), 0, Math.round(dp(10)));
         feel(cb);
@@ -797,7 +811,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         b.setText(text);
         b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         b.setTextColor(getResources().getColor(R.color.hud_text));
-        b.setBackgroundTintList(ColorStateList.valueOf(0x33FFFFFF));
+        // A rounded pill with a hairline edge rather than Android's default
+        // grey slab: the same shape as every control on the host window.
+        GradientDrawable pill = new GradientDrawable();
+        pill.setColor(0x1FFFFFFF);
+        pill.setCornerRadius(dp(8));
+        pill.setStroke(Math.round(dp(1)), 0x26FFFFFF);
+        b.setBackground(pill);
+        b.setAllCaps(false);
+        b.setPadding(Math.round(dp(14)), Math.round(dp(6)),
+                Math.round(dp(14)), Math.round(dp(6)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.topMargin = Math.round(dp(6));

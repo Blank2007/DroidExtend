@@ -4,22 +4,34 @@
     <color name="ic_launcher_background">#1B4AD8</color>
 
     <!-- HUD palette.  Kept here so the drawn overlay and the settings sheet
-         cannot drift apart. -->
-    <color name="hud_panel">#CC0A1020</color>
-    <color name="hud_stroke">#44FFFFFF</color>
-    <color name="hud_text">#FFFFFFFF</color>
-    <color name="hud_dim">#99FFFFFF</color>
-    <color name="hud_good">#FF5BE39A</color>
-    <color name="hud_warn">#FFFFC45B</color>
-    <color name="hud_bad">#FFFF7B72</color>
+         cannot drift apart.
+
+         The values are the host window's dark palette (host/theme.py): #0E0F12
+         window, #17181B card, #ECECEC text, #9EA1AA secondary, #26282C rule,
+         #10A37F status, #3FD1A5 success.  The phone is a display for that
+         window, so it speaks the same greys: one saturated colour, the status
+         dot, and nothing else. -->
+    <color name="hud_panel">#F50E0F12</color>
+    <color name="hud_stroke">#3DFFFFFF</color>
+    <color name="hud_text">#FFECECEC</color>
+    <color name="hud_dim">#FF9EA1AA</color>
+    <color name="hud_faint">#FF6E7178</color>
+    <color name="hud_good">#FF3FD1A5</color>
+    <color name="hud_warn">#FFE0A93B</color>
+    <color name="hud_bad">#FFE06C65</color>
+    <color name="hud_green">#FF10A37F</color>
 
     <!-- Read-out over live video: light text, hard shadow, no panel. -->
-    <color name="hud_light">#F2FFFFFF</color>
-    <color name="hud_light_dim">#B8FFFFFF</color>
+    <color name="hud_light">#FFECECEC</color>
+    <color name="hud_light_dim">#FF9EA1AA</color>
     <color name="hud_shadow">#A6000000</color>
 
-    <!-- Settings sheet. -->
-    <color name="sheet_bg">#F2101728</color>
-    <color name="sheet_row">#14FFFFFF</color>
-    <color name="accent">#FF4C86FF</color>
+    <!-- Settings sheet: an opaque card, so it uses the host's card/field/rule
+         values rather than translating them onto a translucent sheet. -->
+    <color name="sheet_bg">#F50E0F12</color>
+    <color name="sheet_row">#FF141519</color>
+    <color name="sheet_line">#FF2A2C31</color>
+    <color name="accent">#FFECECEC</color>
+    <color name="accent_ink">#FF0E0F12</color>
+    <color name="check_tint">#FFB9BCC2</color>
 </resources>

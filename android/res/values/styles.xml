@@ -7,5 +7,18 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowContentOverlay">@null</item>
+        <!-- Every dialog left in the app is a system AlertDialog: the language
+             picker, the terms, the "install the APK" prompt.  Without this they
+             drop a light Material sheet onto a window that is otherwise
+             charcoal. -->
+        <item name="android:alertDialogTheme">@style/Theme.DroidExtend.Dialog</item>
+    </style>
+
+    <style name="Theme.DroidExtend.Dialog" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorBackground">#17181B</item>
+        <item name="android:windowBackground">#17181B</item>
+        <item name="android:colorAccent">#ECECEC</item>
+        <item name="android:textColorPrimary">#ECECEC</item>
+        <item name="android:textColorSecondary">#9EA1AA</item>
     </style>
 </resources>
