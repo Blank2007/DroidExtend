@@ -1048,6 +1048,8 @@ class App(tk.Tk):
                 widget.bind("<Button-1>", _down)
                 widget.bind("<B1-Motion>", _move)
             win.bind("<Escape>", lambda _e: win.destroy())
+            win.lift()
+            win.after(60, win.lift)
             win.after(120, lambda: _round_win(win))
             return win, body
 
@@ -4276,13 +4278,74 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------ 托盘 (#3)
     def _center_over(self, win):
-        """把一个小对话框摆在本窗口中间。"""
+        """把一个小对话框摆在本窗口中间，而且一定落在看得见的桌面上。"""
         try:
             self.update_idletasks()
             win.update_idletasks()
             x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
             y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 2
-            win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+            # 2.3.1 -- 窗口位置是上次记住的，而那块屏可能是已经收起的虚拟显示器。
+            # 摆在那里的弹窗谁也看不见，却仍然攥着 grab，于是整个程序像死了一样。
+            ax, ay, aw, ah = _work_area()
+            w = win.winfo_width() or uk.px(480)
+            h = win.winfo_height() or uk.px(270)
+            x = max(ax + 8, min(x, ax + aw - w - 8))
+            y = max(ay + 8, min(y, ay + ah - h - 8))
+            win.geometry("+%d+%d" % (x, y))
+        except Exception:
+            pass
+
+    def _modal(self, win):
+        """让弹窗真的出现，然后把输入交给它。
+
+        2.3.1 -- 以前是先 grab_set() 再等窗口自己画出来。只要窗口被主窗口盖住
+        或者落在屏幕外，grab 照样吃掉所有按键和点击：程序看起来死掉，窗口连拖
+        都拖不动，也没有按钮可点（用户 12:27 报的就是这个）。现在先 deiconify +
+        lift + topmost，确认真的 viewable 才 grab；另加看门狗，万一 grab 落在看
+        不见的窗口上就自己松开，绝不让程序变成聋子。
+        """
+        def step(tries=0):
+            try:
+                if not win.winfo_exists():
+                    return
+                viewable = bool(win.winfo_viewable())
+            except Exception:
+                return
+            if not viewable:
+                try:
+                    win.deiconify()
+                    win.lift()
+                except Exception:
+                    pass
+                if tries < 40:
+                    win.after(200, lambda: step(tries + 1))
+                return
+            try:
+                win.grab_set()
+            except Exception:
+                pass
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+
+        def watchdog():
+            try:
+                cur = self.grab_current()
+                if cur is not None and not cur.winfo_viewable():
+                    cur.grab_release()
+            except Exception:
+                pass
+
+        try:
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            win.after(30, lambda: step())
+            win.after(2500, watchdog)
         except Exception:
             pass
 
@@ -4325,10 +4388,7 @@ class App(tk.Tk):
                                   "Do not ask again (remember this choice)")
                       ).pack(anchor="w", pady=(uk.px(16), 0))
         self._center_over(top)
-        try:
-            top.grab_set()
-        except Exception:
-            pass
+        self._modal(top)
         top.wait_window()
         return result["v"]
 
@@ -4369,10 +4429,7 @@ class App(tk.Tk):
                        height=34, command=top.destroy).pack(
                            side="right", padx=(0, uk.px(8)))
         self._center_over(top)
-        try:
-            top.grab_set()
-        except Exception:
-            pass
+        self._modal(top)
         top.wait_window()
 
     def _close_action_label(self, value):

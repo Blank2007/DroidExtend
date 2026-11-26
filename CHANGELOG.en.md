@@ -5384,6 +5384,62 @@ Measured on the tablet (24091RPADC, 3200x2136): the host reported `采集 120 fp
 - When a layout does not fit, measure `winfo_reqheight()` before touching it. Every "that should be enough" guess in this round was wrong; the two-column layouts and spacing changes were all driven by measurements.
 - Take a screenshot of the running app. Everything that "looked fine" here — the gear above the scrim, the hierarchy of white headings — was only visible after the screenshot.
 
+## 51. 2.3.1: the dialog after ✕ went missing, and the app looked dead
+
+Less than an hour after 2.3.0 went out, the message was:
+
+> I clicked X, where did the dialog go, then the app froze completely, and the window cannot be moved. What are you doing
+
+The short version: no infinite loop, no thread deadlock. The modal came before "visible".
+
+### 51.1 The path behind "what should closing do?"
+
+The ✕ in the title bar calls `_on_close` (app.py:3585). With the close behaviour set to "ask every time" it calls `_ask_close_action` (app.py:4289), which builds a borderless Toplevel with `_sheet` (drawn ✕, draggable), and then:
+
+```
+self._center_over(top)
+try:
+    top.grab_set()
+    top.focus_force()
+except Exception:
+    pass
+top.wait_window()
+```
+
+`grab_set()` is Tk's modal grab: from that moment every key and click goes to that one window, and clicking the main window does nothing at all. The old code never checked that the window had actually become visible, and three ordinary situations leave the grab held while the window is not on screen:
+
+1. the dialog sits behind the main window (topmost or repaint ordering);
+2. the dialog's coordinates land off-screen, or on a display that **has just been removed** — while streaming the main window often sits on the virtual display, and stopping the stream takes that display away;
+3. a Toplevel needs a frame or two between map and actually being visible, and the grab is already armed.
+
+The result is exactly what he described: dialog invisible, window cannot be dragged, nothing responds. It is not frozen; every event is going into a window nobody can see.
+
+On this machine case 2 is easy to hit: ten foreign virtual displays and one VDD display are usually present, so a window coordinate left on an invisible display is much more likely than on a normal desktop.
+
+### 51.2 Three layers
+
+1. **Visible first, grab second.** New `App._modal(win)` (right after `_center_over`): `deiconify()` / `lift()` / `attributes("-topmost", True)`, then poll `winfo_viewable()` up to 40 times at 200 ms, and only then `grab_set()` + `focus_force()`. A 2.5 s watchdog releases the grab if `grab_current()` is held by an invisible window — losing modality is always better than locking the app.
+2. **Clamp the position.** `_center_over()` uses `_work_area()` (app.py:312) to keep the dialog inside the work area with an 8 px margin.
+3. **Do not lose to a repaint.** `_sheet()` lifts twice (once more after 60 ms), and the privacy dialog (`host/privacy.py`) now shares the same `_modal()` instead of calling `grab_set(); focus_set()` itself.
+
+Both `grab_set() + wait_window()` pairs (`_ask_close_action` and `on_close_behavior`) are now `self._center_over(top)` → `self._modal(top)` → `top.wait_window()`, and `_modal` releases the grab in a `finally` so a `wait_window()` that returns for any reason cannot leave the program deaf.
+
+### 51.3 Measurements
+
+The bug never reproduced here (120 clicks, the dialog was on top every time), so the test was "click with a real mouse and ask the Windows API where the dialog actually is":
+
+- `D:/probe_test/exp_close.py` prints every 500 ms the Toplevel rect, `IsWindowVisible`, `topmost`, `winfo_viewable()`, `grab_current()`, uses `WindowFromPoint` + `GetAncestor(GA_ROOT)` to see which window is really on top, and counts event-loop ticks to prove the app is alive.
+- A real mouse click on ✕ (screen (1220,27)): the dialog appears, `rect=(325,231,925,568) topmost=1 viewable=1 grab=.!toplevel grabview=1`, and the screenshot shows it clearly above the main window.
+- Clicking "Cancel" in the dialog gives `tops=0 grab=None` and the app keeps logging. Escape behaves the same.
+- The "what should closing do" dialog (`on_close_behavior`) passes too: grab on a visible window, Escape closes it, ticks 28 → 34 keep growing.
+
+### 51.4 Lessons
+
+- `grab_set()` means "hand the whole program to one window", so it belongs after "this window is really visible", never before. Reversed, the worst case is what the user called a freeze.
+- For a program that lives with multiple displays — especially virtual ones — a modal window landing off-screen is normal, not exotic. Always clamp.
+- When a user says "frozen", check grabs, modal loops, `wait_window()` and a stalled `mainloop` first; do not reach for thread deadlocks. Not one line of threading code was touched here.
+- A bug you cannot reproduce can still be reported honestly: this fix removes the ordering that makes it possible, it is not a reproduced crime scene, and it ships with a watchdog so the worst case is recoverable.
+
 ---
 
 

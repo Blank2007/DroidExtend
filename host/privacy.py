@@ -24,6 +24,27 @@ VERSION = "1"
 BG = "#14161a"
 
 
+def _modal(parent, win):
+    """把输入交给 win，但要等它真的出现在屏幕上（2.3.1）。
+
+    grab_set() 落在一个从没显示出来的窗口上，会吃掉所有按键和点击：程序看
+    起来卡死，窗口连拖都拖不动。主窗口知道该怎么做，这里优先交给它。
+    """
+    hook = getattr(parent, "_modal", None)
+    if hook is not None:
+        try:
+            hook(win)
+            return
+        except Exception:
+            pass
+    try:
+        win.lift()
+        win.grab_set()
+        win.focus_set()
+    except Exception:
+        pass
+
+
 def needs_accept(settings):
     """True when the terms have not been accepted at the current version."""
     return str(settings.get("privacy_accepted", "") or "") != VERSION
@@ -162,8 +183,7 @@ def _ask_sheet(parent, answer):
 
     win.protocol("WM_DELETE_WINDOW", no)
     parent._center_over(win)
-    win.grab_set()
-    win.focus_set()
+    _modal(parent, win)
     parent.wait_window(win)
     return answer["ok"]
 
@@ -251,7 +271,6 @@ def ask(parent):
     fit()
 
     win.protocol("WM_DELETE_WINDOW", no)
-    win.grab_set()
-    win.focus_set()
+    _modal(parent, win)
     parent.wait_window(win)
     return answer["ok"]
