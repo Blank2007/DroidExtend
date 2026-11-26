@@ -69,7 +69,10 @@ EXTRA = (
     "autostart",         # start with Windows
     "update_dir",        # where to keep the downloaded installer ("" = %TEMP%)
     "delete_installer",  # remove the installer once it has been applied
-    "animations",        # fade windows and flicker controls; see anim.py
+    "animations",        # window fades; no longer a checkbox (2.4.1) -- the
+                         # only motion left is the fade in/out, and setting
+                         # this to false in the file still turns it off; see
+                         # anim.py
     # 1.6.4 -- what "off" means for the virtual display, see vdd.set_count /
     # app._apply_vdd_off.  "deep" = no monitor at boot at all (needs UAC);
     # "desktop" = the monitor exists but never sits on the desktop (no UAC).

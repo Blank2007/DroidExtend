@@ -447,32 +447,44 @@ class Frame(object):
         lp = int(lparam) & 0xFFFFFFFF
         px = ctypes.c_short(lp & 0xFFFF).value
         py = ctypes.c_short((lp >> 16) & 0xFFFF).value
+        # Every rectangle below belongs to the top level window, never to the
+        # window that happened to be asked.  Tk gives each widget its own HWND,
+        # so measuring from a child's rect turns the edge of a label sitting
+        # deep inside the window into a resize border, and its top row into a
+        # drag handle -- which is exactly what "the resize zones are in the
+        # wrong place" looked like from the outside.
+        host = self.top_hwnd or hwnd
         rect = wintypes.RECT()
-        _user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect))
+        _user32.GetWindowRect(wintypes.HWND(host), ctypes.byref(rect))
         if not (rect.left <= px < rect.right and rect.top <= py < rect.bottom):
             return base
-        zoomed = bool(_user32.IsZoomed(wintypes.HWND(hwnd)))
+        zoomed = bool(_user32.IsZoomed(wintypes.HWND(host)))
         if not zoomed:
             e = self.edge
+            # The corners get a wider band than the edges: a click has to land
+            # inside the rounded region before Windows sees it at all, and the
+            # region's radius eats most of the little square at the tip.
+            c = e * 1.7
             left = px - rect.left < e
             right = rect.right - px <= e
             top = py - rect.top < e
             bottom = rect.bottom - py <= e
-            if left or right or top or bottom:
-                if top and left:
-                    return HTTOPLEFT
-                if top and right:
-                    return HTTOPRIGHT
-                if bottom and left:
-                    return HTBOTTOMLEFT
-                if bottom and right:
-                    return HTBOTTOMRIGHT
-                if left:
-                    return HTLEFT
-                if right:
-                    return HTRIGHT
-                if top:
-                    return HTTOP
+            near_left = px - rect.left < c
+            near_right = rect.right - px <= c
+            near_top = py - rect.top < c
+            near_bottom = rect.bottom - py <= c
+            if (near_top and near_left) or (near_top and near_right) \
+                    or (near_bottom and near_left) or (near_bottom and near_right):
+                if near_top:
+                    return HTTOPLEFT if near_left else HTTOPRIGHT
+                return HTBOTTOMLEFT if near_left else HTBOTTOMRIGHT
+            if left:
+                return HTLEFT
+            if right:
+                return HTRIGHT
+            if top:
+                return HTTOP
+            if bottom:
                 return HTBOTTOM
         # The drawn title bar drags the window with Windows' own move: that is
         # what brings Aero Snap, snap layouts and drag-off-to-restore along.

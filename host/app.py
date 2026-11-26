@@ -804,8 +804,6 @@ class App(tk.Tk):
             s["auto_stream"] = bool(self.stream_auto_var.get() and self.auto_var.get())
         if hasattr(self, "wait_var"):
             s["auto_stream_wait"] = self._wait_value()
-        if hasattr(self, "anim_var"):
-            s[anim.KEY] = bool(self.anim_var.get())
         if hasattr(self, "off_mode_var"):
             s["vdd_off_mode"] = self.off_mode_var.get()
         if hasattr(self, "chk_var"):
@@ -1801,13 +1799,6 @@ class App(tk.Tk):
                           variable=self.lang_var,
                           command=lambda c=code: self._switch_lang(c)).pack(
                               side="left", padx=(0, uk.px(16)))
-
-        s = section(look, i18n.t("动画", "Animation"))
-        self.anim_var = tk.BooleanVar(value=bool(self.settings.get(anim.KEY, True)))
-        self.anim_chk = uk.RoundCheck(s, self.pal, variable=self.anim_var,
-                                      command=self._anim_choice,
-                                      text=anim.label())
-        self.anim_chk.grid(row=0, column=0, columnspan=2, sticky="w")
 
         # -- 通知 ------------------------------------------------------------
         # 2.2.1 -- a page of its own.  Ten switches folded into a grey group
@@ -3347,7 +3338,6 @@ class App(tk.Tk):
         cfg["tray_on_close"] = bool(self.close_action != "quit")
         cfg["autostart"] = bool(self.auto_var.get())
         cfg["vdd_off_mode"] = self.off_mode_var.get()
-        self.settings[anim.KEY] = bool(self.anim_var.get())
         if cfg["mode"] == "extend":
             cfg["bitrate_mbps"] = max(cfg["bitrate_mbps"], 4)
         self._sync_autostart()
@@ -4665,15 +4655,6 @@ class App(tk.Tk):
             self.session.set_touch(on)
         except Exception as e:
             self.log("切换触摸控制失败：%s" % e, "err")
-
-    def _anim_choice(self):
-        """用户动了「界面动画」这个勾。立刻生效，不用重启。"""
-        self.settings[anim.KEY] = bool(self.anim_var.get())
-        self._save_settings()
-        if self.anim_var.get():
-            self.log("界面动画已打开。")
-        else:
-            self.log("界面动画已关闭。")
 
     def _quit_now(self):
         """彻底退出：窗口、托盘、采集、虚拟屏、adb 转发，一个都不留。

@@ -5539,6 +5539,57 @@ The lesson from the first row: **do not limit in-flight pictures by waiting.** T
 - Validate the measuring instrument first. A stale exe, a newly added `--mbps` flag, an unchanged `MAX_QUEUE` -- each one can invert the conclusion of an entire round of experiments.
 - A trade-off offered to users has to be a measured trade-off. Two "drop frames first" modes were built here and both trade 2-4 ms for visible stutter, so neither became a switch: better to spread the numbers out and say "this is the floor" than to ship a button that stutters when pressed.
 
+## 53. 2.4.1: the resize border grew in the wrong place
+
+2.4.0 gave the main window a frame it draws itself: maximise, drag, eight-way resize, double-click to restore. The feedback the same day was "the eight resize zones are in the wrong place", plus "there is no interface animation at all, why is there a checkbox for it". The first is a bug; the second is a promise that outlived its content.
+
+### 53.1 Every Tk widget is a real window
+
+A frameless window has to answer "which part of me is the mouse over" by itself. `host/frameless.py` hooks `WM_NCHITTEST` on the top level window and derives nine zones from the window rectangle. That sounds obviously right, and in 2.4.0 every zone hugged a border that was not there: the pointer turned into a horizontal resize arrow 30 pixels inside the left edge.
+
+The reason is Tk's window hierarchy. `winfo_id()` does not hand back the top level window, it hands back a TkChild; the top level wrapper (TkTopLevel) and **every widget underneath it** get their own HWND -- 195 of them in the 2.4.0 build. Windows asks **the window under the pointer** whether a message belongs to it, and that build measured from whichever window was asked. So the status row, the log card and the dropdowns all turned into borders: the outer 9 pixels of a widget answered with a resize code, and its first row answered `HTCAPTION`.
+
+The diagnostic was blunt: find the deepest window under a point exactly the way Windows does (`WindowFromPoint`), send it `WM_NCHITTEST`, and print every answer that was not `HTCLIENT`. One pass found 104 misfires.
+
+> MISFIRE Frame 1190x71 left (32,182) -> 10 (HTLEFT)
+> MISFIRE Frame 1190x71 top (625,149) -> 12 (HTTOP)
+> MISFIRE Frame 447x27 bottom (996,103) -> 17 (HTBOTTOMRIGHT)
+
+The fix is one line: every geometric test reads the **top level** rectangle, and a child window only forwards the message. The same diagnostic afterwards reports zero.
+
+### 53.2 The rounded corners eat the corner grips
+
+The corners cannot use the same width as the edges. `SetWindowRgn` cuts the four corners into 12 logical-pixel arcs, and Windows only asks about a point after it lands inside the window -- five pixels from a corner tip is already the desktop. 2.4.0 used a 9-pixel square, which barely overlaps the arc, so "drag the corner" only worked in a much smaller area than it looked. 2.4.1 widens the corner band to 1.7 times (15 pixels) and keeps the edges at 9.
+
+### 53.3 One checkbox promised too much
+
+"Appearance -> Interface animation" existed for a dozen versions, and all it controlled was a 170 ms fade when the window appears and a 130 ms fade when it hides. The window appearing is itself instantaneous, so those 170 ms never read on screen -- which, from the outside, means the checkbox controlled nothing.
+
+2.4.1 removes the checkbox; the appearance page now holds colour and language only. The fades stay, and they follow the Windows "show animations" setting (the `animations` key still works in the settings file). Making interface animation that people can see starts with deciding what should move: Tk gives you offset and window alpha, not an easing curve.
+
+### 53.4 Measurements
+
+Real mouse events (`SetCursorPos` + `mouse_event`, reading `GetWindowRect` after each step), eight directions plus the inside:
+
+    left        OK   (200,200,1250,800) -> (128,200,1322,800)
+    right       OK                       -> (200,200,1322,800)
+    top         OK                       -> (200,128,1250,872)
+    bottom      OK                       -> (200,200,1250,872)
+    topleft     OK                       -> (133,133,1317,867)
+    topright    OK                       -> (200,133,1317,867)
+    bottomleft  OK                       -> (133,200,1317,867)
+    bottomright OK                       -> (200,200,1317,867)
+    inside log  OK   window did not move
+    inside row  OK   window did not move
+    dbl max     (0,0,2560,1540) maxed=True
+    dbl back    (200,200,1250,800) maxed=False
+
+### 53.5 Lessons
+
+- Hit testing on a frameless window has to measure the window's geometry, never the geometry of whichever window happened to be asked. As soon as the toolkit gives every widget a real window, those two are different things.
+- The clickable area at a corner is always smaller than at an edge, because the rounded corner clips it first. Widen the corners separately; do not expect one width to serve both.
+- Every switch in the interface needs an effect the user can see. An invisible effect behind a switch is an explanation of something the user will never get.
+
 ---
 
 
