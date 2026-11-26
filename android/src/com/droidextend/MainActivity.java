@@ -239,6 +239,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     c.note(msg);
                 }
             }
+
+            @Override public void onNeedKeyframe() {
+                StreamClient c = client;
+                if (c != null) {
+                    c.requestKeyframe();
+                }
+            }
         });
         input = new InputClient("127.0.0.1", InputClient.PORT);
         registerScreenReceiver();

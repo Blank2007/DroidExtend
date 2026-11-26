@@ -5440,6 +5440,105 @@ The bug never reproduced here (120 clicks, the dialog was on top every time), so
 - When a user says "frozen", check grabs, modal loops, `wait_window()` and a stalled `mainloop` first; do not reach for thread deadlocks. Not one line of threading code was touched here.
 - A bug you cannot reproduce can still be reported honestly: this fix removes the ordering that makes it possible, it is not a reproduced crime scene, and it ships with a watchdog so the worst case is recoverable.
 
+## 52. 2.4.0: the frame comes back, and the delay is dug all the way down
+
+Two things in this version: giving the borderless window back the three things the system used to do for it (maximize, resize from an edge, double-click the title bar), and then digging the latency all the way down to see whether anything is left.
+
+The second part, up front: **there is nothing left.** Idle desktop 15 ms, high-motion content 20-22 ms, and every idea that can be measured was measured on the real tablet -- all of them worse than what ships. The numbers and the reasons stay here so the next round does not start from zero.
+
+### 52.1 A borderless window: the system stopped doing anything, so everything has to be done here
+
+The main window has been `overrideredirect(True)` since 2.2.0 -- no system title bar, no system frame, the title bar and the rounded corners are drawn by hand. The price is that Windows then does nothing for that window at all: no maximize, no resize from an edge, no response to a double-click on the title bar. Dragging still worked only because the title bar has a `<Button-1>` binding and `_drag_from`, pure Tk events.
+
+`host/frameless.py` puts the three back: it subclasses the top-level window procedure so `WM_NCHITTEST` answers `HTCAPTION` on the title bar and `HTLEFT`..`HTBOTTOMRIGHT` on the eight edges, and the system does the rest; `WM_NCCALCSIZE` clamps the client rectangle to the work area when maximized, so the window fills the screen without covering the taskbar. Measured: maximized `GetWindowRect=(0,0,2560,1540)` and the client area is also `(0,0,2560,1540)` (the taskbar takes 60 px), restore goes back to `(120,80,1250,800)`.
+
+### 52.2 A Tk window is not one window, and a hook on the wrong one does nothing
+
+This is what cost two rounds. `win.winfo_id()` is not the top-level window but a `TkChild` (style `0x56000000`); its parent, and `GetAncestor(GA_ROOT)`, is `TkTopLevel` (style `0x160F0008`, with `WS_THICKFRAME` and `WS_MAXIMIZEBOX`). And **the window the mouse actually lands in is a deeper TkChild**: `WindowFromPoint` returns a window whose class is TkChild and whose parent is also TkChild -- Tk creates a window per widget.
+
+So:
+
+- The window procedure has to hang on `TkTopLevel`, because that is the only layer Windows consults for non-client geometry and for frame hit-testing. Hung on `winfo_id()` (TkChild), `WM_NCCALCSIZE` could rewrite `rgrc[0]` and read it back correctly, yet `GetClientRect` kept returning the monitor size -- that is what fooled the first round.
+- But NCHITTEST can only be answered if the child that gets clicked is hooked too, so `EnumChildWindows` walks **every descendant** of the wrapper, and all of them are hooked: 195 handles measured (1 TkTopLevel + 162 TkChild + 32 Static).
+- `EnumChildWindows` with a zero parent walks **every window on the desktop** -- one run hooked more than 130 system windows, so a zero top must `return []` and let the next tick retry.
+- Tk rebuilds child windows when some properties change, and a hook then sits silently on a dead handle, so `app.py` calls `fr.rehook()` once every 1.2 s.
+
+### 52.3 Three things you only learn by getting them wrong
+
+1. **`WM_SYSCOMMAND` must not be forwarded to Tk's window procedure.** Delegating to the original proc (`CallWindowProc`) lets Tk swallow `SC_MOVE`, the modal move loop never starts, and the symptom is a title bar you can press but not drag. Our own proc has to answer `SC_MOVE` / `SC_SIZE` with `DefWindowProcW` directly.
+2. **`SC_MOVE` / `SC_SIZE` must be sent to the top-level window.** Sent to the child that was clicked, nothing happens at all -- and that was the actual reason the first attempt failed.
+3. **Hit codes to direction codes is a lookup table, not arithmetic.** `HTLEFT=10 .. HTBOTTOMRIGHT=17` and `WMSZ_LEFT=1 .. WMSZ_BOTTOMRIGHT=8` are not in the same order: `hit - 10 + 1` turns top-left into top and bottom-right into bottom. The real table is `{HTLEFT:1, HTRIGHT:2, HTTOP:3, HTTOPLEFT:4, HTTOPRIGHT:5, HTBOTTOM:6, HTBOTTOMLEFT:7, HTBOTTOMRIGHT:8}`.
+
+Two smaller traps: `SetWindowLongPtrW` on `GWL_STYLE` does nothing, because Tk puts `WS_POPUP` back when it maps the window; and the rounded corners cannot come from DWM (`DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE)` has no effect on an `overrideredirect` window -- the corners stay square), so they are cut with `CreateRoundRectRgn` + `SetWindowRgn` and re-cut after every resize.
+
+Verified with a real mouse (a background thread doing `SetCursorPos` + `mouse_event`, with `GetWindowRect` read back after every step): start `(200,200,1250,800)` -> drag the title bar `(500,400)` -> drag the left edge `(428,400,1322,800)` -> drag the right edge `(428,400,1384,800)` -> drag the bottom-right corner `(428,400,1463,869)` -> double-click the title bar `(0,0,2560,1540)` with `IsZoomed=1` -> double-click again restores `(428,400,1463,869)`. All pass.
+
+**Not done**: Aero Snap. Dragging to the top of the screen and letting go only puts the window at `y=0` instead of maximizing it. Implementing that means guessing whether the user intended to snap, and guessing wrong (a window maximizing when it was only being moved) is worse than not having it.
+
+### 52.4 Latency: copy Sunshine / Moonlight / scrcpy first
+
+What those three open-source implementations gave us:
+
+- **Infinite GOP with on-demand IDR** (Sunshine). One I frame per second means a bandwidth spike once per second -- an I frame is several times the size of a P frame -- and the socket queues for a moment, which shows up as a periodic latency bump. Now `gopLength = NVENC_INFINITE_GOPLENGTH`, and when an IDR is wanted one is forced with `NV_ENC_PIC_FLAG_FORCEIDR`.
+- **Single-frame VBV** (the Codec SDK's Low Latency Settings): `vbvBufferSize = bitrate / frame rate`, set to a four-frame budget here (`DX_VBV_FRAMES` can be 1..120), plus `zeroReorderDelay=1`, `enableLookahead=0`, `lowDelayKeyFrameScale=3` and tuning `NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY` (`DX_TUNE` switches it for A/B runs).
+- **Client keeps only the newest picture** (Moonlight, and scrcpy's `--video-buffer 0`) -- this already existed since 1.9.3 (`VideoDecoder.drainLoop` renders only the last of several results when a dequeue returns more than one).
+
+The phone side:
+
+- **Ask for a keyframe instead of waiting for one.** When the decoder falls behind, or the first access unit has no SPS/PPS, it sends `DXK1` on the uplink; `StreamServer` records the request and `Capture.request_idr()` writes `i` into the native encoder's stdin, and the next frame carries `NV_ENC_PIC_FLAG_FORCEIDR`. The phone throttles this to one request per 250 ms; the host logs at most one line per 2 s.
+- **Hardware decoder first.** `MediaCodec.createDecoderByType()` lets the system pick, which can in principle land on a software decoder (`c2.android.*`). It now walks `MediaCodecList(REGULAR_CODECS)`, skips anything named `c2.android.` / `omx.google.` and takes the first hardware implementation, logging the candidate list. On this Xiaomi tablet AVC has three candidates (`c2.qti.avc.decoder`, `OMX.qcom.video.decoder.avc`, `c2.qti.avc.decoder.low_latency`) and HEVC four, and the default was already the hardware one -- **zero gain here**, but other devices cannot end up in software any more. Picking the `.low_latency` variant explicitly was tried (p50 15/30/16, more jitter) and reverted.
+- The reader thread and the drain thread are raised to `THREAD_PRIORITY_URGENT_DISPLAY` (inside the noise, harmless, kept); `MediaFormat` also carries `latency=1`.
+- **Instrumentation**: the `perf` line gained `iq_ms` (waiting for an input buffer) and `codec_ms` (inside the codec), splitting "arrived on the phone -> on the glass" into four parts: transport `net`, input wait `iq`, codec `codec`, presentation. Without this split the previous dozen experiments would not have known where to look.
+
+### 52.5 Idle 15 ms, motion 20-22 ms: the bill
+
+Idle desktop (2560x1600@120, H.264, USB): `perf fps=120 mbps=22 latency_p50_ms=15 latency_p90_ms=21 net_ms=1 dec_ms=13 iq_ms=1 codec_ms=10` -- transport 1, input 1, codec 10, the rest 3.
+
+High-motion content (a page drawing 700 moving circles per frame, full screen on the virtual display, Edge app mode): `p50 20-22 / p90 25-27`. The extra 6 ms splits into `net 0->12` (the host's socket queues, and it scales with the bit rate) and `dec 13->19` (complex frames take longer to decode, and the codec holds one more layer).
+
+`codec_ms` is the key figure: it is almost exactly **one frame interval**. 10-12 ms at 120 fps, 7-9 ms at 1080p, 17-18 ms at 90 fps -- pixel count only accounts for 2-3 ms of it, the rest is the fixed depth of the hardware decode pipeline. **That is the floor and the application cannot reach it.**
+
+Six configurations were measured on the same tablet, same link, same content, one variable at a time:
+
+| Configuration | Actual bit rate | p50 | p90 |
+| --- | --- | --- | --- |
+| Default VBR, CQ20, cap 40 | 40 Mbps | **20-22 ms** | 25-27 |
+| CBR 20 | 19 Mbps | **29-34 ms** | 40 |
+| CBR 60 | 60 Mbps | 22-24 ms | 26-28 |
+| 1920x1080 @120 | 39 Mbps | 22-25 ms | 27-28 |
+| 2560x1600 @90 | 40 Mbps | **27-28 ms** | 31-33 |
+| Idle desktop (reference) | 0.3 Mbps | 15 ms | 18 |
+
+Two counter-intuitive results worth remembering: **a lower bit rate makes the delay worse** (the encoder has to queue work to stay inside the VBV budget, so the delay is added on the encoding side), and **a lower frame rate makes it worse too** (`codec_ms` grows with the frame interval). "Drop a gear when the picture moves" does not work.
+
+### 52.6 Two ways "drop frames first" dies
+
+The only theoretical lever left is on the phone's output side: show only the newest decoded picture. That logic is in fact always on (`drainLoop` renders only the last result when one dequeue returns several), but it only fires when several pictures are ready at once. Being more aggressive means limiting how many pictures may sit inside the codec. Two limits were measured:
+
+| Approach | p50 | Cost |
+| --- | --- | --- |
+| Host buffer 6 frames -> 3 | 23-24 ms (worse) | back-pressure arrives earlier, `skipped` starts growing |
+| Phone: at most 2 in flight, drop the rest and ask for an IDR | 18 ms | 1200 units thrown away per 2 s, waiting for IDRs constantly |
+| Phone: at most 3 in flight, drop the rest and ask for an IDR | 5 ms reported (false) | 1400 units per 2 s, `dec` reports 364 ms, the measurement itself breaks |
+
+The lesson from the first row: **do not limit in-flight pictures by waiting.** The earlier version did `wait(2)` for a slot, which stopped the reader, piled up the socket and produced p50 63 ms. "Do not wait, drop this picture and ask for an IDR" does not pile up, but it trades 2-4 ms for constant skipped frames. Two to four milliseconds is not worth visible stutter during motion, so all three were reverted and none of them ships.
+
+### 52.7 Three traps
+
+1. **NVENC headers 13.1, driver 13.0.** With the new parameters in place, the native encoder died immediately with `nvEncOpenEncodeSessionEx -> INVALID_VERSION (15)` and the backend fell back to ffmpeg. `NvEncodeAPIGetMaxSupportedVersion()` returns `0xD0`, i.e. the driver only speaks 13.0, while the header was 13.1. The nasty part is that `NvEncodeAPICreateInstance()` returns SUCCESS for any struct version -- the mismatch only appears on the first real call. In the version word the major is in the low 8 bits and the minor in bits 24-27 (sharing the top byte with the `0x7` magic), and it must match what the DLL was built with. The fix redefines `NVENCAPI_MINOR_VERSION` to 0 right after `#include "nvEncodeAPI.h"`, so every use site expands to 13.0.
+2. **`p.stderr.read(4096)` returns only when the buffer is full.** `_drain_err` in `host/capture.py` used it for the encoder's own log, which stayed **completely empty** the whole session -- the real bit rate and encode time the encoder reports were never read, which is part of why one experiment's conclusion was wrong. It is `read1(4096)` now.
+3. **"The bit rate will not come down" was not a code problem.** One run asked for 20 Mbps and measured 41. The whole configuration path was checked (`session.py:1107` -> the `capture.py` command line -> native argv) and was correct; the cause was a **stale DroidCapture.exe**. Rebuilt, the same arguments measure CBR 20 = 19.95 Mbps and CBR 60 = 59.9 Mbps, exactly as asked. Lesson: after touching native code, prove the exe was actually replaced -- `632 KB -> 264 KB` is more convincing than any hash.
+
+### 52.8 Lessons
+
+> Once a window is borderless the system stops doing anything for it, and every Windows message about a frame is answered only by the top-level layer.
+
+- When a system API "seems to have no effect", first find out which window the hook is really on, then doubt the arguments. The `WM_NCCALCSIZE` code was correct from the first attempt; it simply never ran.
+- Codes that look like they should be consecutive (hit codes, direction codes) get a lookup table, never arithmetic.
+- The floor for latency is "hardware decode pipeline depth plus one vsync"; software can only remove queuing. Beating the pipeline takes different hardware or a different frame rate -- and a lower frame rate is worse.
+- Validate the measuring instrument first. A stale exe, a newly added `--mbps` flag, an unchanged `MAX_QUEUE` -- each one can invert the conclusion of an entire round of experiments.
+- A trade-off offered to users has to be a measured trade-off. Two "drop frames first" modes were built here and both trade 2-4 ms for visible stutter, so neither became a switch: better to spread the numbers out and say "this is the floor" than to ship a button that stutters when pressed.
+
 ---
 
 

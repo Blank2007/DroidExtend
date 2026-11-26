@@ -928,7 +928,11 @@ class Capture(object):
         """
         try:
             while True:
-                chunk = p.stderr.read(4096)
+                # read1, not read: BufferedReader.read(n) keeps issuing raw
+                # reads until it has all n bytes, so the tail of a tool that
+                # prints a line a second stayed invisible for minutes -- the
+                # same trap _reader documents for stdout.
+                chunk = p.stderr.read1(4096)
                 if not chunk:
                     break
                 self.err_tail = (self.err_tail +
@@ -1004,16 +1008,20 @@ class Capture(object):
         h = int(self.rect["height"])
         fps = int(c.get("fps", 60))
         bitrate = "%dM" % int(c.get("bitrate_mbps", 20))
-        # 2.0.0: one second, not two.  The GOP only costs anything when the
-        # stream has to resynchronise -- and when it does, the phone freezes
-        # until the next IDR.  Halving the GOP halves that freeze; the bitrate
-        # cost of an extra keyframe per second is a couple of percent at the
-        # same -cq, so the picture itself is untouched.
-        gop = int(c.get("gop") or max(1, fps))
+        # 2.1.2: the native backend runs an infinite GOP.  A keyframe costs
+        # several frames' worth of bits and, with a one-second GOP, that spike
+        # came round twelve times in a ten-second clip -- which is exactly the
+        # burst the socket then had to swallow.  The keyframes it still sends
+        # are the first picture and whatever the phone asks for over the uplink
+        # (Capture.request_idr).  An explicit "gop" in the config still wins,
+        # and the ffmpeg fallback keeps its one-second GOP: ffmpeg cannot be
+        # asked for an IDR after the fact.
+        gop_cfg = c.get("gop")
+        gop = int(gop_cfg) if gop_cfg else max(1, fps)
         mouse = "1" if c.get("draw_mouse") else "0"
 
         if backend == "native":
-            return self._native_command(w, h, fps, gop)
+            return self._native_command(w, h, fps, gop if gop_cfg else 0)
 
         cmd = [ff, "-hide_banner", "-loglevel", "error", "-nostats"]
 
@@ -1242,7 +1250,10 @@ class Capture(object):
                 last = str(e)
                 continue
             self.log("启动采集: " + backend + " / " + enc)
-            p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # The native helper takes keyframe requests on stdin (one byte);
+            # ffmpeg keeps DEVNULL, it has no use for a control channel.
+            extra = {"stdin": subprocess.PIPE} if backend == "native" else {}
+            p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **extra)
             time.sleep(1.2)
             if p.poll() is not None:
                 err = (p.stderr.read() or b"").decode("utf-8", "replace")
@@ -1262,6 +1273,27 @@ class Capture(object):
         raise RuntimeError(i18n.t("采集启动失败: %s",
                                   "Capture failed to start: %s")
                            % (last or i18n.t("没有可用后端", "no usable backend")))
+
+    def request_idr(self):
+        """Ask the native encoder for a keyframe on the next picture.
+
+        With an infinite GOP nothing asks for one on its own, so a phone whose
+        decoder lost sync (skipped a frame, missed the first SPS/PPS) would wait
+        for ever.  The phone says so on the uplink; server.py turns that into
+        this call and DroidCapture turns it into NV_ENC_PIC_FLAG_FORCEIDR.
+        Returns True when the request really went down the pipe.
+        """
+        p = getattr(self, "proc", None)
+        if p is None or getattr(self, "backend_used", None) != "native":
+            return False
+        if p.poll() is not None:
+            return False
+        try:
+            p.stdin.write(b"i")
+            p.stdin.flush()
+            return True
+        except Exception:
+            return False
 
     def _reader(self):
         p = self.proc

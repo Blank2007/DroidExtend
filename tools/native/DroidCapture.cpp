@@ -34,9 +34,22 @@
 #include <timeapi.h>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <io.h>
 #include <fcntl.h>
 #include "nvEncodeAPI.h"
+
+// Every structure in the NVENC API is stamped with the SDK's API version, and
+// the installed DLL only accepts the exact major.minor it was built for: 13.0
+// ships with current drivers, the 13.1 headers stamp minor 1, and the mismatch
+// shows up as INVALID_VERSION on the first real call (CreateInstance still
+// succeeds, so this is easy to miss).  Redefining the version macros right after
+// the header makes every use site below -- NV_ENC_CONFIG_VER, NV_ENC_PIC_PARAMS_VER
+// and all the rest -- stamp 13.0 instead.
+#undef NVENCAPI_MINOR_VERSION
+#define NVENCAPI_MINOR_VERSION 0
+#undef NVENCAPI_VERSION
+#define NVENCAPI_VERSION (NVENCAPI_MAJOR_VERSION | (NVENCAPI_MINOR_VERSION << 24))
 
 // ---------------------------------------------------------------------------
 // logging: stderr only.  stdout carries the bitstream and nothing else.
@@ -48,6 +61,38 @@ static void say(const char* fmt, ...) {
     va_end(ap);
     std::fputc('\n', stderr);
     std::fflush(stderr);
+}
+
+// ---------------------------------------------------------------------------
+// control channel: stdin.  With an infinite GOP nothing ever asks the encoder
+// for a keyframe on its own, so the phone needs a way to ask -- it does, over
+// the uplink, and the host turns that into one byte here.  A thread parked on
+// PeekNamedPipe costs nothing when the host has nothing to say (and no time at
+// all when stdin is not a pipe, i.e. when this is run by hand).
+// ---------------------------------------------------------------------------
+static std::atomic<int> g_want_idr(0);
+
+static void control_thread() {
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if (h == INVALID_HANDLE_VALUE || h == nullptr) return;
+    char buf[64];
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+            Sleep(250);                  // stdin is a console: no control channel
+            continue;
+        }
+        if (avail == 0) { Sleep(5); continue; }
+        DWORD got = 0;
+        if (!ReadFile(h, buf, sizeof(buf), &got, nullptr) || got == 0) {
+            Sleep(50);
+            continue;
+        }
+        for (DWORD i = 0; i < got; i++) {
+            if (buf[i] == 'i' || buf[i] == 'I' || buf[i] == 'k' || buf[i] == 'K')
+                g_want_idr.store(1);
+        }
+    }
 }
 
 static const char* nv_str(NVENCSTATUS s) {
@@ -176,7 +221,7 @@ struct Args {
     int width = 0, height = 0;      // 0 = the output's native size
     int cq = 20;
     int mbps = 20;
-    int gop = 0;                    // 0 = one second
+    int gop = -1;                   // -1 = one second, 0 = infinite
     int preset = 1;                 // 1..7, P1 is the fastest
     bool cbr = false;
     bool loop_forever = true;
@@ -222,7 +267,7 @@ static bool parse(int argc, char** argv, Args& a) {
     if (a.width < 0 || a.width > 7680) { say("bad --width"); return false; }
     if (a.height < 0 || a.height > 4320) { say("bad --height"); return false; }
     if (a.codec != "h264" && a.codec != "hevc") { say("bad --codec (h264|hevc)"); return false; }
-    if (a.gop <= 0) a.gop = a.fps;
+    if (a.gop < 0) a.gop = a.fps;
     return true;
 }
 
@@ -396,7 +441,7 @@ int main(int argc, char** argv) {
     SetProcessDPIAware();
     if (!parse(argc, argv, a)) {
         say("DroidCapture --adapter N --output M --fps F [--width W --height H] "
-            "[--cq Q] [--mbps M] [--gop G] [--preset 1-7] [--rc vbr|cbr]"
+            "[--cq Q] [--mbps M] [--gop G(0=infinite)] [--preset 1-7] [--rc vbr|cbr]"
             " [--pointer 0|1] [--codec h264|hevc]");
         return 2;
     }
@@ -523,6 +568,16 @@ int main(int argc, char** argv) {
     typedef NVENCSTATUS (NVENCAPI *PFN_CREATE)(NV_ENCODE_API_FUNCTION_LIST*);
     PFN_CREATE create = (PFN_CREATE)GetProcAddress(nvlib, "NvEncodeAPICreateInstance");
     if (!create) { say("FATAL nvEncodeAPI dll has no NvEncodeAPICreateInstance"); return 2; }
+    // Say which API the DLL speaks: if a future driver raises the minor version
+    // the structures below will stop matching and this line is the giveaway.
+    {
+        typedef NVENCSTATUS(NVENCAPI * PFN_GETVER)(uint32_t*);
+        PFN_GETVER getver =
+            (PFN_GETVER)GetProcAddress(nvlib, "NvEncodeAPIGetMaxSupportedVersion");
+        uint32_t raw = 0;
+        if (getver && getver(&raw) == NV_ENC_SUCCESS)
+            say("nvEncodeAPI.dll supports API %u.%u", (raw >> 4) & 0xFFu, raw & 0xFu);
+    }
     NV_ENCODE_API_FUNCTION_LIST nv{ NV_ENCODE_API_FUNCTION_LIST_VER };
     NV_OK(create(&nv));
 
@@ -537,16 +592,28 @@ int main(int argc, char** argv) {
     // the one quality lever the native path was missing; the host passes
     // --codec hevc when the user picked a hevc_* encoder.
     const GUID codecGuid = (a.codec == "hevc") ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+    // Ultra low latency is the default because it is the fastest thing the
+    // driver offers, but it is *not* free: measured here CBR 20 Mbps spent 38
+    // Mbps on a busy screen under ULTRA_LOW_LATENCY while the low latency tune
+    // held the cap.  DX_TUNE picks the tuning info for measurements
+    // (1 = high quality, 2 = low latency, 3 = ultra low latency).
+    NV_ENC_TUNING_INFO tune = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
+    {
+        const char* e = std::getenv("DX_TUNE");
+        if (e && *e) {
+            int v = std::atoi(e);
+            if (v >= 1 && v <= 4) tune = (NV_ENC_TUNING_INFO)v;
+        }
+    }
     GUID presetGuid = preset_guid(a.preset);
     NV_ENC_PRESET_CONFIG pc{ NV_ENC_PRESET_CONFIG_VER };
     pc.presetCfg = { NV_ENC_CONFIG_VER };
-    NV_OK(nv.nvEncGetEncodePresetConfigEx(sess, codecGuid, presetGuid,
-                                          NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &pc));
+    NV_OK(nv.nvEncGetEncodePresetConfigEx(sess, codecGuid, presetGuid, tune, &pc));
     NV_ENC_CONFIG cfg = pc.presetCfg;
     NV_ENC_INITIALIZE_PARAMS ip{ NV_ENC_INITIALIZE_PARAMS_VER };
     ip.encodeGUID = codecGuid;
     ip.presetGUID = presetGuid;
-    ip.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
+    ip.tuningInfo = tune;
     ip.encodeWidth = (uint32_t)W;
     ip.encodeHeight = (uint32_t)H;
     ip.maxEncodeWidth = (uint32_t)W;
@@ -558,7 +625,13 @@ int main(int argc, char** argv) {
 
     cfg.profileGUID = (codecGuid == NV_ENC_CODEC_HEVC_GUID) ? NV_ENC_HEVC_PROFILE_MAIN_GUID
                                                           : NV_ENC_H264_PROFILE_HIGH_GUID;
-    cfg.gopLength = (uint32_t)a.gop;
+    // An infinite GOP is the biggest encoder-side latency lever there is: a
+    // keyframe costs several frames' worth of bits, and on a one-second GOP
+    // that spike came round 120 times a minute.  The price is that a decoder
+    // which loses sync would wait for ever, so the phone can ask for an IDR on
+    // the stdin control channel (see control_thread).
+    const bool inf_gop = (a.gop == 0);
+    cfg.gopLength = inf_gop ? NVENC_INFINITE_GOPLENGTH : (uint32_t)a.gop;
     cfg.frameIntervalP = 1;                       // no B frames: nothing to reorder
     NV_ENC_RC_PARAMS& rc = cfg.rcParams;
     // Desktop content is mostly still, so a quality target with a rate ceiling
@@ -568,8 +641,37 @@ int main(int argc, char** argv) {
     rc.rateControlMode = a.cbr ? NV_ENC_PARAMS_RC_CBR : NV_ENC_PARAMS_RC_VBR;
     rc.averageBitRate = br;
     rc.maxBitRate = br;
-    rc.vbvBufferSize = br / 4;
-    rc.vbvInitialDelay = rc.vbvBufferSize;
+    // One frame of VBV, not a quarter second of it.  The buffer is the only
+    // place the encoder is allowed to store future bits; at a quarter second it
+    // could sit on three or four frames' worth, which is exactly the burstiness
+    // the socket then has to swallow.  Sunshine ships the same choice
+    // (vbvBufferSize = bitrate * 1000 / fps) for CBR, but measured on this link
+    // a single frame of buffer is the wrong choice for VBR + quality target: the
+    // encoder chases the ceiling frame by frame, the bit rate jumps from
+    // 22 to 30 Mbps and the phone's decoder spends 7 ms more per frame (28 ms
+    // end to end instead of 16).  Four frames keeps both the bit rate and the
+    // decode time down.  DX_VBV_FRAMES overrides the depth for measurements.
+    const uint32_t fps_u = (uint32_t)(a.fps > 0 ? a.fps : 60);
+    uint32_t vbv_frames = 4;
+    {
+        const char* e = std::getenv("DX_VBV_FRAMES");
+        if (e && *e) {
+            int v = std::atoi(e);
+            if (v >= 1 && v <= 120) vbv_frames = (uint32_t)v;
+        }
+    }
+    uint32_t frame_bits = (uint32_t)((uint64_t)br * vbv_frames / fps_u);
+    if (frame_bits < 8000u) frame_bits = 8000u;
+    rc.vbvBufferSize = frame_bits;
+    rc.vbvInitialDelay = frame_bits;
+    // No reordering delay at all: with frameIntervalP = 1 there is nothing to
+    // reorder, but the HEVC SPS still advertises a reorder window unless this
+    // is set, and a decoder is entitled to hold pictures back to match it.
+    rc.zeroReorderDelay = 1;
+    rc.enableLookahead = 0;
+    // single-frame VBV would otherwise squeeze the one IDR we do send down to
+    // the size of a P frame; give it three and no more.
+    rc.lowDelayKeyFrameScale = 3;
     if (!a.cbr) {
         // API 12.0 has no enableTargetQuality/targetQualityLSB (13.x added
         // them); targetQuality alone is what nvenc used for -cq at this level.
@@ -577,17 +679,25 @@ int main(int argc, char** argv) {
     }
     rc.lookaheadDepth = 0;
     rc.multiPass = NV_ENC_MULTI_PASS_DISABLED;
+    // Belt and braces: this line says what the encoder was actually handed, so
+    // "the bit rate ignores --mbps" can be told apart from "we never set it".
+    say("rc cfg: mode=%u avg=%u max=%u vbv=%u initDelay=%u tq=%u la=%u reorder=%u lazy=%u pass=%u fr=%u/%u",
+        (unsigned)rc.rateControlMode, rc.averageBitRate, rc.maxBitRate,
+        rc.vbvBufferSize, rc.vbvInitialDelay, (unsigned)rc.targetQuality,
+        rc.lookaheadDepth ? 1u : 0u, (unsigned)rc.zeroReorderDelay,
+        (unsigned)rc.enableLookahead, (unsigned)rc.multiPass,
+        ip.frameRateNum, ip.frameRateDen);
     if (codecGuid == NV_ENC_CODEC_HEVC_GUID) {
         NV_ENC_CONFIG_HEVC& hc = cfg.encodeCodecConfig.hevcConfig;
         hc.outputAUD = 0;
         hc.repeatSPSPPS = 1;                              // VPS/SPS/PPS before every IDR
-        hc.idrPeriod = (uint32_t)a.gop;
+        hc.idrPeriod = inf_gop ? NVENC_INFINITE_GOPLENGTH : (uint32_t)a.gop;
         hc.chromaFormatIDC = 1;
     } else {
         NV_ENC_CONFIG_H264& hc = cfg.encodeCodecConfig.h264Config;
         hc.outputAUD = 0;
         hc.repeatSPSPPS = 1;                              // every IDR is a resync point
-        hc.idrPeriod = (uint32_t)a.gop;
+        hc.idrPeriod = inf_gop ? NVENC_INFINITE_GOPLENGTH : (uint32_t)a.gop;
         hc.chromaFormatIDC = 1;
     }
 
@@ -596,8 +706,11 @@ int main(int argc, char** argv) {
         say("FATAL nvEncInitializeEncoder -> %s (%d)", nv_str(ist), (int)ist);
         return 2;
     }
-    say("nvenc %s %dx%d @%d fps p%d %s cq=%d cap=%d Mbps gop=%d",
-        a.codec.c_str(), W, H, a.fps, a.preset, a.cbr ? "cbr" : "vbr", a.cq, a.mbps, a.gop);
+    std::thread(control_thread).detach();
+    say("nvenc %s %dx%d @%d fps p%d %s cq=%d cap=%d Mbps gop=%s vbv=%u bits "
+        "zeroReorder=1 lowDelay",
+        a.codec.c_str(), W, H, a.fps, a.preset, a.cbr ? "cbr" : "vbr", a.cq, a.mbps,
+        inf_gop ? "infinite" : std::to_string(a.gop).c_str(), frame_bits);
 
     NV_ENC_REGISTERED_PTR reg[NSURF] = {};
     for (int i = 0; i < NSURF; i++) {
@@ -1016,6 +1129,10 @@ int main(int argc, char** argv) {
         pp.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         pp.inputTimeStamp = fresh ? t_acq : now_us();
         pp.frameIdx = (uint32_t)encoded;
+        if (g_want_idr.exchange(0)) {
+            pp.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR;
+            say("idr on request (frame %d)", encoded);
+        }
         uint64_t t_enc0 = now_us();
         s = nv.nvEncEncodePicture(sess, &pp);
         if (s != NV_ENC_SUCCESS) {

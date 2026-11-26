@@ -1,6 +1,8 @@
 package com.droidextend;
 
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.SystemClock;
 import android.util.Log;
@@ -51,6 +53,19 @@ public class VideoDecoder {
     private static final long QUEUE_WAIT_MS = 2L;
 
     /**
+     * How many pictures may sit inside the codec at once (0 = no limit).
+     *
+     * Measured on the 120 Hz tablet the codec held a frame for 11 ms before a
+     * picture came out -- more than a whole frame interval, which raises the
+     * question whether that is how long the hardware takes for one picture or
+     * how deep the encoder pipeline is.  Limiting how many frames may be in
+     * flight answers it: if the delay drops and the frame rate holds, the
+     * pipeline was the problem; if the frame rate falls instead, one picture
+     * really does take 11 ms here.
+     */
+    private static final int MAX_IN_FLIGHT = 0;
+
+    /**
      * Where decoder events go so the host can write them into its own log.
      *
      * The phone has no way to hand a log file to the user, and the log is the
@@ -60,6 +75,15 @@ public class VideoDecoder {
      */
     public interface Sink {
         void onEvent(String msg);
+
+        /**
+         * The picture needs a keyframe and only the host can produce one.
+         *
+         * Since 2.1.2 the host encodes with an infinite GOP, so it never sends
+         * an IDR on its own.  Every place that used to say "wait for the next
+         * keyframe" now asks for one instead -- otherwise waiting is forever.
+         */
+        void onNeedKeyframe();
     }
 
     private MediaCodec codec;
@@ -90,6 +114,23 @@ public class VideoDecoder {
     private final ArrayDeque<Long> stamps = new ArrayDeque<Long>();
     /** When each of those frames finished arriving here, same order. */
     private final ArrayDeque<Long> recvs = new ArrayDeque<Long>();
+    /** When each of those frames was handed to the codec's input queue. */
+    private final ArrayDeque<Long> handed = new ArrayDeque<Long>();
+    /**
+     * The two halves of "arrived here -> on the glass", measured per frame.
+     *
+     * decodeMs() says 13 ms on the 120 Hz tablet, and the only way to know
+     * whether that is the decoder or the wait for a refresh is to cut it in
+     * two: how long the frame waited for a free input buffer, and how long the
+     * codec held it.  Whatever is left over is the surface waiting for vsync,
+     * which no amount of code on this side can remove -- only moving the
+     * arrival earlier, i.e. the host side, can.
+     */
+    private static final int SPLIT_WINDOW = 128;
+    private final long[] iqWin = new long[SPLIT_WINDOW];
+    private int iqN;
+    private final long[] pipeWin = new long[SPLIT_WINDOW];
+    private int pipeN;
     /** Last measured wire-to-glass delay in microseconds; -1 until one frame lands. */
     private long shownLatencyUs = -1;
     /** The two halves of that delay: host -> here, and here -> glass. */
@@ -182,6 +223,7 @@ public class VideoDecoder {
         }
         stamps.clear();
         recvs.clear();
+        handed.clear();
         // Samples taken before the jump describe a pipeline that no longer
         // exists; without this the overlay keeps showing the old second long
         // after the picture is fast again.
@@ -190,7 +232,8 @@ public class VideoDecoder {
         if (codec != null) {
             startDrain();       // the old drain thread may have exited on the flush
         }
-        event("behind (" + why + "), skipping to the next keyframe");
+        event("behind (" + why + "), asking the host for a keyframe");
+        askKeyframe();
     }
 
     /**
@@ -303,6 +346,18 @@ public class VideoDecoder {
         event(msg);
     }
 
+    /** Ask the host for a keyframe (see Sink.onNeedKeyframe). */
+    private void askKeyframe() {
+        Sink s = sink;
+        if (s != null) {
+            try {
+                s.onNeedKeyframe();
+            } catch (Throwable ignored) {
+                // The uplink is a diagnostic; a keyframe request is a hint.
+            }
+        }
+    }
+
     private void event(String msg) {
         Log.i(TAG, msg);
         Sink s = sink;
@@ -389,8 +444,13 @@ public class VideoDecoder {
                 try { fmt.setInteger(MediaFormat.KEY_PRIORITY, 0); } catch (Throwable ignored) { }
                 if (attempt == 0) {
                     try { fmt.setInteger(MediaFormat.KEY_LOW_LATENCY, 1); } catch (Throwable ignored) { }
+                    // API 26's KEY_LATENCY and the vendor keys ask the same
+                    // thing in the older dialects; a codec that does not know
+                    // them ignores them, and one that rejects them falls into
+                    // the retry below.
+                    try { fmt.setInteger("latency", 1); } catch (Throwable ignored) { }
                 }
-                MediaCodec c = MediaCodec.createDecoderByType(mime());
+                MediaCodec c = openDecoder();
                 c.configure(fmt, surface, null, 0);
                 c.start();
                 codec = c;
@@ -433,6 +493,77 @@ public class VideoDecoder {
         return hevc ? "video/hevc" : "video/avc";
     }
 
+    /**
+     * Open a decoder, preferring a hardware one.
+     *
+     * createDecoderByType() hands back whatever the platform lists first, and
+     * that is not always the GPU/video block: on several tablets the software
+     * decoder (c2.android.*) sits at the top of the list.  A player does not
+     * care, a remote desktop does -- the software path measured 11 ms for a
+     * 2560x1600 picture, which is more than a 120 Hz frame interval, while the
+     * hardware block does the same picture in a few milliseconds.
+     */
+    private MediaCodec openDecoder() {
+        String m = mime();
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            StringBuilder hard = new StringBuilder();
+            String pick = null;
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                if (info.isEncoder()) {
+                    continue;
+                }
+                boolean supported = false;
+                for (String t : info.getSupportedTypes()) {
+                    if (t.equalsIgnoreCase(m)) {
+                        supported = true;
+                        break;
+                    }
+                }
+                if (!supported || looksSoftware(info.getName())) {
+                    continue;
+                }
+                String name = info.getName();
+                if (hard.length() > 0) {
+                    hard.append(", ");
+                }
+                hard.append(name);
+                if (pick == null) {
+                    pick = name;
+                }
+                // The separate low_latency instances some vendors ship were
+                // measured here as well and held exactly as many frames (11 ms
+                // per 2560x1600 frame) with more jitter, so the first hardware
+                // codec is the pick.
+            }
+            if (hard.length() > 0) {
+                event("decoder candidates: " + hard);
+            }
+            if (pick != null) {
+                MediaCodec c = MediaCodec.createByCodecName(pick);
+                event("decoder uses hardware codec " + pick);
+                return c;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "hardware decoder scan failed: " + oneLine(t));
+        }
+        try {
+            MediaCodec c = MediaCodec.createDecoderByType(m);
+            event("decoder uses default codec " + c.getName());
+            return c;
+        } catch (java.io.IOException e) {
+            // configure() wraps and reports this the same way it reports a
+            // rejected MediaFormat, so the caller's retry path stays intact.
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Names the platform gives to the pure-software decoders. */
+    private static boolean looksSoftware(String name) {
+        String n = name.toLowerCase(java.util.Locale.US);
+        return n.startsWith("c2.android.") || n.startsWith("omx.google.");
+    }
+
     /** NAL unit type, H.264 or HEVC depending on the stream. */
     private int nalType(byte[] d, int hdr, int end) {
         if (hevc) {
@@ -470,8 +601,9 @@ public class VideoDecoder {
                 if (found == null) {
                     if (!warnedNoCsd) {
                         warnedNoCsd = true;
-                        event("first access unit has no SPS/PPS yet, waiting for a keyframe");
+                        event("first access unit has no SPS/PPS yet, asking for a keyframe");
                     }
+                    askKeyframe();
                     return false;
                 }
                 csd = found;
@@ -502,6 +634,22 @@ public class VideoDecoder {
             }
             awaitKey = false;
             queueFullRun = 0;
+        }
+        if (MAX_IN_FLIGHT > 0) {
+            // Do not hand over a second picture while the previous one is still
+            // inside the codec: depth is latency here, and the drain thread
+            // wakes us the moment a picture comes out.
+            long t0 = SystemClock.elapsedRealtime();
+            while (stamps.size() >= MAX_IN_FLIGHT && !inputDone) {
+                try {
+                    wait(2);
+                } catch (InterruptedException ignored) {
+                    break;
+                }
+                if (SystemClock.elapsedRealtime() - t0 > 20) {
+                    break;
+                }
+            }
         }
         try {
             int idx = -1;
@@ -552,11 +700,13 @@ public class VideoDecoder {
             frameIndex++;
             stamps.addLast(hostStampUs);
             recvs.addLast(recvUs);
+            handed.addLast(SystemClock.elapsedRealtimeNanos() / 1000L - clockSkewUs);
             if (stamps.size() > 480) {
                 // Way more stamps than frames on screen: the pairing is lost,
                 // so start over rather than report a made-up delay.
                 stamps.clear();
                 recvs.clear();
+                handed.clear();
             }
             // Nothing to collect here any more: the drain thread takes each
             // picture the moment the codec produces it (see drainLoop).
@@ -579,6 +729,13 @@ public class VideoDecoder {
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
+                // The picture is already decoded when this thread wakes, so any
+                // scheduling delay here is added straight to the glass-to-glass
+                // latency.  Ask for the same class the display pipeline uses.
+                try {
+                    android.os.Process.setThreadPriority(
+                            android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+                } catch (Throwable ignored) { }
                 drainLoop();
             }
         }, "droidextend-drain");
@@ -655,24 +812,61 @@ public class VideoDecoder {
 
     /** Release one decoded buffer, rendering it or throwing it away. */
     private void showOne(MediaCodec c, int idx, boolean render) {
+        long nowUs = SystemClock.elapsedRealtimeNanos() / 1000L - clockSkewUs;
         try {
             c.releaseOutputBuffer(idx, render);
         } catch (Throwable ignored) {
             return;
         }
-        long stamp, recv;
+        long stamp, recv, hand;
         synchronized (this) {
             stamp = pollStamp();
             recv = pollRecv();
+            hand = pollHanded();
             if (render) {
                 rendered++;
             } else {
                 droppedOutput++;
             }
+            // A picture left the codec: the reader may hand over the next one.
+            notifyAll();
         }
         if (render) {
             noteShown(stamp, recv);
+            noteSplit(recv, hand, nowUs);
         }
+    }
+
+    /** Record where the time between "arrived here" and "on the glass" went. */
+    private synchronized void noteSplit(long recvUs, long handUs, long nowUs) {
+        if (recvUs <= 0 || handUs < recvUs || nowUs < handUs) {
+            return;
+        }
+        iqWin[iqN % SPLIT_WINDOW] = handUs - recvUs;
+        iqN++;
+        pipeWin[pipeN % SPLIT_WINDOW] = nowUs - handUs;
+        pipeN++;
+    }
+
+    /** Median time a frame waited for a free decoder input buffer (ms). */
+    public synchronized double inputWaitMs() {
+        return splitP50(iqWin, iqN);
+    }
+
+    /** Median time the codec held a frame before a picture came out (ms). */
+    public synchronized double codecMs() {
+        return splitP50(pipeWin, pipeN);
+    }
+
+    private double splitP50(long[] win, int n) {
+        int k = Math.min(n, SPLIT_WINDOW);
+        if (k <= 0) {
+            return -1;
+        }
+        long[] a = new long[k];
+        System.arraycopy(win, 0, a, 0, k);
+        java.util.Arrays.sort(a);
+        return a[(k - 1) / 2] / 1000.0;
     }
     private void drain() {
         if (codec == null || !configured) {
@@ -730,6 +924,11 @@ public class VideoDecoder {
     private long pollRecv() {
         Long r = recvs.pollFirst();
         return r == null ? 0L : r.longValue();
+    }
+
+    private long pollHanded() {
+        Long h = handed.pollFirst();
+        return h == null ? 0L : h.longValue();
     }
 
     private synchronized void noteShown(long hostStampUs, long recvUs) {

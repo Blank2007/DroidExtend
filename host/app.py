@@ -61,6 +61,8 @@ import manual as mn                                                             
 import paths                                                                      # noqa: E402
 import privacy as priv                                                            # noqa: E402
 import settings as st                                                             # noqa: E402
+import frameless as fr                                                           # noqa: E402
+import frameless as fr                                                           # noqa: E402
 import ui_kit as uk                                                               # noqa: E402
 import theme                                                                      # noqa: E402
 import touch as tu                                                                # noqa: E402
@@ -812,7 +814,16 @@ class App(tk.Tk):
             s["check_prerelease"] = bool(self.pre_upd_var.get())
         try:
             if self.state() == "normal":
-                s["window"] = self.geometry()
+                g = self.geometry()
+                # A maximized window reports the maximized size here, which
+                # would make the next start open full screen -- keep the
+                # restore rectangle instead.
+                if getattr(self, "_fx", None) is not None:
+                    if fr.is_maximized(self):
+                        nr = fr.normal_rect(self)
+                        if nr:
+                            g = "%dx%d+%d+%d" % nr
+                s["window"] = g
         except Exception:
             pass
         return s
@@ -830,6 +841,41 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ build
     # ------------------------------------------------------------ the frame
+    def _install_frameless(self):
+        """        Give the drawn window what it lost with the frame.
+
+        Without this the title bar cannot drag the window and the edges
+        cannot size it: an overrideredirect window has no caption and no
+        frame for Windows to grab.  The subclass hands both back at the
+        Win32 level, which is also what makes snap layouts, Win+arrow and a
+        real maximize work."""
+        self._fx = None
+        try:
+            self._fx = fr.install(self, min_size=(880, 600),
+                                  caption_height=44, caption_skip=214)
+        except Exception:
+            self._fx = None
+        if self._fx is not None:
+            self._fx_job = self.after(1200, self._fx_tick)
+
+    def _fx_tick(self):
+        """Keep the subclass on the live window.
+
+        Tk replaces its child window when attributes change, and the subclass
+        would otherwise stay behind on the dead handle -- which is exactly what
+        makes the edges stop resizing after a while.  Re-hooking is a few
+        hundred microseconds and does nothing when the handles are unchanged."""
+        self._fx_job = None
+        try:
+            fr.rehook(self)
+        except Exception:
+            pass
+        if getattr(self, "_fx", None) is not None:
+            try:
+                self._fx_job = self.after(1200, self._fx_tick)
+            except Exception:
+                self._fx_job = None
+
     def _drag_from(self, widget):
         """Move the window by dragging this widget -- the drawn title bar."""
         state = {}
@@ -880,7 +926,18 @@ class App(tk.Tk):
             pass
 
     def _toggle_max(self):
-        """The ▢ button: fill the work area, or go back to where it was."""
+        """The ▢ button: let Windows maximize it, or put it back."""
+        if getattr(self, "_fx", None) is not None:
+            try:
+                if fr.is_maximized(self):
+                    fr.restore(self)
+                else:
+                    fr.maximize(self)
+                self._maxed = fr.is_maximized(self)
+            except Exception:
+                self._maxed = False
+            self.after(80, self._fix_corners)
+            return
         try:
             if getattr(self, "_maxed", False):
                 self._maxed = False
@@ -898,6 +955,13 @@ class App(tk.Tk):
     def _on_win_configure(self, event=None):
         if event is not None and event.widget is not self:
             return
+        # Double-click on the title bar and Win+Up go straight to Windows, so
+        # the drawn state has to follow whatever Windows decided.
+        if getattr(self, "_fx", None) is not None:
+            try:
+                self._maxed = fr.is_maximized(self)
+            except Exception:
+                pass
         if getattr(self, "_rgn_job", None):
             try:
                 self.after_cancel(self._rgn_job)
@@ -1065,6 +1129,7 @@ class App(tk.Tk):
         # The system title bar is gone (the drawing has its own) which also
         # takes the window off the taskbar; _borderless() puts it back.
         _borderless(self)
+        self._install_frameless()
         self.minsize(uk.px(880), uk.px(600))
         # The corners are cut with a window region, so they have to be cut
         # again every time the window changes size -- throttled, because a
@@ -4501,6 +4566,8 @@ class App(tk.Tk):
             self.deiconify()
             self.state("normal")
             _borderless(self)
+            if getattr(self, "_fx", None) is not None:
+                fr.refresh(self)
             self.lift()
             self.focus_force()
         except Exception:

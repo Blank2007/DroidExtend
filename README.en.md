@@ -156,6 +156,11 @@ left; the **≡** button (opens settings), and minimise / maximise / close on th
 menu entirely: ≡ opens the settings page itself, and everything the menu used to hold lives in the
 navigation column on its left.
 
+The window has no system frame (the title bar and the rounded corners are drawn by hand), but
+maximising, dragging the title bar, resizing from any of the eight edges and double-clicking the
+title bar to restore all behave like a system window. The one thing missing is Aero Snap -- dragging
+to the top of the screen does not maximise it.
+
 The main window is one page from top to bottom, with no dividers -- seven groups separated by whitespace:
 
 1. **Status line**: a green dot, `已连接`, the phone model / `USB 3.0` / link rate; and four live metrics on the right -- capture fps, send Mbps, phone fps, display ms (the last one in green).

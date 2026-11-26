@@ -113,6 +113,12 @@ public class StreamClient extends Thread {
 
     @Override
     public void run() {
+        // Reading the socket is on the critical path: a late wake-up here is a
+        // late frame on the tablet.
+        try {
+            android.os.Process.setThreadPriority(
+                    android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY);
+        } catch (Throwable ignored) { }
         byte[] unit = new byte[512 * 1024];
         while (running) {
             try {
@@ -152,6 +158,32 @@ public class StreamClient extends Thread {
      */
     public void note(String text) {
         up("DXL1 " + text);
+    }
+
+    /** Last time a keyframe was asked for, to keep the uplink quiet. */
+    private long lastKeyAskMs;
+
+    /**
+     * Ask the host to encode the next picture as an IDR.
+     *
+     * The host runs an infinite GOP since 2.1.2: keyframes cost several frames'
+     * worth of bits and were the only thing making the wire burst, so it no
+     * longer sends one every second.  The price is that a decoder which arrived
+     * late, lost its SPS/PPS, or had to skip a backlog would wait for ever, so
+     * it asks here and the host forces an IDR on the next picture.
+     *
+     * Rate-limited to four a second: a starving decoder calls this on every
+     * frame it cannot use.
+     */
+    public void requestKeyframe() {
+        long now = SystemClock.elapsedRealtime();
+        synchronized (upLock) {
+            if (now - lastKeyAskMs < 250) {
+                return;
+            }
+            lastKeyAskMs = now;
+        }
+        up("DXK1");
     }
 
     private void up(String line) {
@@ -489,6 +521,8 @@ public class StreamClient extends Thread {
                             + " skipped=" + decoder.skipped()
                             + " net_ms=" + Math.round(decoder.transferMs())
                             + " dec_ms=" + Math.round(decoder.decodeMs())
+                            + " iq_ms=" + Math.round(decoder.inputWaitMs())
+                            + " codec_ms=" + Math.round(decoder.codecMs())
                             + " samples=" + latCount
                             + (dropping ? " (dropped decoded frames)" : ""));
                 }

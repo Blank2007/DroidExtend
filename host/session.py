@@ -919,7 +919,8 @@ class Session(object):
 
     # -------------------------------------------------------------- 3. stream
     def start_stream(self, port=HOST_PORT):
-        self.server = StreamServer(port=port, log=self.log, on_client=self._on_client)
+        self.server = StreamServer(port=port, log=self.log, on_client=self._on_client,
+                                   on_keyframe_request=self._request_keyframe)
         self.server.start()
         # The encoder is *not* started here.  Its frame rate has to match what
         # the phone can really show, and only the phone knows that: it sends its
@@ -945,6 +946,26 @@ class Session(object):
         self._pump.start()
         self._last = time.time()
         return "waiting for the phone"
+
+    def _request_keyframe(self):
+        """The phone lost sync and asked for a keyframe (see server.DXK1).
+
+        With an infinite GOP this is the only way back to a picture, and it is
+        normal for it to happen right after a reconnect or a resolution change,
+        so it is logged quietly and at most once every couple of seconds.
+        """
+        cap = getattr(self, "capture", None)
+        if cap is None:
+            return
+        try:
+            if not cap.request_idr():
+                return
+        except Exception:
+            return
+        now = time.time()
+        if now - getattr(self, "_idr_log_at", 0.0) > 2.0:
+            self._idr_log_at = now
+            self.log("手机请求关键帧，已让编码器补一帧")
 
     def _phone_notice(self, code, msg):
         """The phone reported something about itself (screen off/on, app gone).

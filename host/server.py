@@ -60,6 +60,12 @@ EVENT_MAGIC = b"DXL1"
 # word on the hello because a 1.8.5 host reads the hello with a single float()
 # and would drop the entire line -- refresh rate included -- the moment another
 # number appeared after the rate.
+# A fourth: "DXK1\n", the phone has lost sync and needs a keyframe now.  With
+# an infinite GOP the host never sends one on its own, so this is the only way
+# a decoder that arrived late, skipped a frame or lost its SPS/PPS gets back to
+# a picture.  One short line, rate-limited on the phone side.
+KEYFRAME_MAGIC = b"DXK1"
+
 PORTRAIT_MAGIC = b"DXP1"
 UPLINK_LINE_MAX = 400    # a line longer than this is garbage; drop the buffer
 UPLINK_POLL = 0.5        # how often the reader wakes up to notice a stop
@@ -103,10 +109,13 @@ class StreamServer(object):
     resynchronise.
     """
 
-    def __init__(self, port=HOST_PORT, log=None, on_client=None):
+    def __init__(self, port=HOST_PORT, log=None, on_client=None,
+                 on_keyframe_request=None):
         self.port = port
         self.log = log or (lambda m: None)
         self.on_client = on_client or (lambda s: None)
+        self.on_keyframe_request = on_keyframe_request or (lambda: None)
+        self.keyframe_requests = 0
         self.sock = None
         self.conn = None
         self.addr = None
@@ -288,6 +297,13 @@ class StreamServer(object):
             if self.client_portrait != upright:
                 self.client_portrait = upright
                 self.log("手机方向: %s" % ("竖屏" if upright else "横屏"))
+            return
+        if line.startswith(KEYFRAME_MAGIC):
+            self.keyframe_requests += 1
+            try:
+                self.on_keyframe_request()
+            except Exception:
+                pass
             return
         if line.startswith(HELLO_MAGIC):
             if self.client_hz > 0:
