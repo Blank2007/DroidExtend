@@ -69,6 +69,18 @@ TOKEN_PATHS = [
 ]
 
 
+# 2.3.1: a release commit subject may contain characters outside the console
+# codepage (the "✕" in 2.3.1's own subject killed the run right after the
+# commit, because print() raised UnicodeEncodeError on the GBK stdout of a
+# plain cmd.exe).  Reconfigure stdout once, up front, and printing can never be
+# the thing that breaks a release.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
 def say(msg):
     print(msg, flush=True)
 
