@@ -36,6 +36,7 @@ WM_SYSCOMMAND = 0x0112
 WM_NCLBUTTONDBLCLK = 0x00A3
 WM_NCHITTEST = 0x0084
 WM_GETMINMAXINFO = 0x0024
+WM_SETCURSOR = 0x0020
 
 HTCLIENT = 1
 HTCAPTION = 2
@@ -52,6 +53,24 @@ HTBOTTOMRIGHT = 17
 HT_SIZING = {
     HTLEFT: 1, HTRIGHT: 2, HTTOP: 3, HTTOPLEFT: 4,
     HTTOPRIGHT: 5, HTBOTTOM: 6, HTBOTTOMLEFT: 7, HTBOTTOMRIGHT: 8,
+}
+
+# Standard cursors by the numbers in windows.h.  The window resizes without
+# these -- the hit test already works -- but the pointer stays an arrow, because
+# the call that would have chosen the resize shape belongs to the frame Windows
+# no longer believes this window has.
+IDC_ARROW = 32512
+IDC_SIZEWE = 32644
+IDC_SIZENS = 32645
+IDC_SIZENWSE = 32642
+IDC_SIZENESW = 32643
+
+# WM_NCHITTEST code -> IDC_* cursor for that direction.
+CURSOR_FOR_HIT = {
+    HTLEFT: IDC_SIZEWE, HTRIGHT: IDC_SIZEWE,
+    HTTOP: IDC_SIZENS, HTBOTTOM: IDC_SIZENS,
+    HTTOPLEFT: IDC_SIZENWSE, HTBOTTOMRIGHT: IDC_SIZENWSE,
+    HTTOPRIGHT: IDC_SIZENESW, HTBOTTOMLEFT: IDC_SIZENESW,
 }
 
 GWL_WNDPROC = -4
@@ -131,6 +150,42 @@ if _user32:
         return 0
 
     _syscmd = _syscmd_impl
+
+
+_cursor_handles = {}
+
+
+def resize_cursor(hit):
+    """Show the resize cursor for a hit code; True when one was shown.
+
+    Called from WM_SETCURSOR, whose low word is the hit code the system got
+    from this same window procedure a moment earlier.  Returning 1 stops the
+    message there: Tk's widget procedures would otherwise set their own cursor
+    (an arrow, or a text caret over an Entry) on top of it.
+    """
+    if not _user32:
+        return False
+    name = CURSOR_FOR_HIT.get(hit)
+    if name is None:
+        return False
+    handle = _cursor_handles.get(name)
+    if handle is None:
+        try:
+            _user32.LoadCursorW.restype = ctypes.c_void_p
+            _user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, ctypes.c_void_p]
+            handle = _user32.LoadCursorW(None, ctypes.c_void_p(name))
+            _user32.SetCursor.argtypes = [ctypes.c_void_p]
+            _user32.SetCursor.restype = ctypes.c_void_p
+        except Exception:
+            handle = 0
+        _cursor_handles[name] = handle
+    if not handle:
+        return False
+    try:
+        _user32.SetCursor(ctypes.c_void_p(handle))
+        return True
+    except Exception:
+        return False
 
 
 def _get_style(hwnd):
@@ -353,6 +408,12 @@ class Frame(object):
                     # Tk's wrapper procedure swallows SC_MOVE, so the move loop
                     # would never start if this were forwarded to it.
                     return _defproc(h, msg, wparam, lparam)
+                if msg == WM_SETCURSOR:
+                    # The hit code the system is about to ask about arrives in
+                    # the low word; when it names a resize direction, put the
+                    # matching shape on the pointer ourselves.
+                    if resize_cursor(int(lparam) & 0xFFFF):
+                        return 1
                 if msg == WM_NCHITTEST:
                     res = self._nchittest(h, orig, wparam, lparam)
                     try:

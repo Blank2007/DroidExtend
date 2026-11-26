@@ -5590,6 +5590,59 @@ Real mouse events (`SetCursorPos` + `mouse_event`, reading `GetWindowRect` after
 - The clickable area at a corner is always smaller than at an edge, because the rounded corner clips it first. Widen the corners separately; do not expect one width to serve both.
 - Every switch in the interface needs an effect the user can see. An invisible effect behind a switch is an explanation of something the user will never get.
 
+## 54. 2.4.2: it resizes now, but the pointer does not know
+
+2.4.1 fixed where the resize grips are: all eight edges and corners drag, and controls inside the window are no longer mistaken for the frame. The feedback arrived immediately -- "the window really does resize freely, but the pointer never changes into the resize shape".
+
+### 54.1 The cursor shape is not part of the hit test
+
+`WM_NCHITTEST` only answers "which part of my window is the pointer over"; it does not choose a cursor shape. On a system window those are two messages: the hit test returns `HTLEFT`, the system then sends `WM_SETCURSOR`, and `DefWindowProc` sets the cursor from the hit code -- only then does the pointer become a horizontal double arrow.
+
+A frameless window takes over the window procedure, so `DefWindowProc` never gets to handle that message. Meanwhile Tk installs a window procedure for every widget, and each one sets its own cursor by widget type: a text caret over the log card, arrows over buttons and combo boxes. The hit test can answer perfectly and the pointer still stays an arrow.
+
+### 54.2 Three approaches, one of which works
+
+- Call `SetCursor` from inside `WM_NCHITTEST`: no. That message only arrives on mouse movement and on request, and Tk's widget procedure sets the cursor again right after.
+- Let the message fall through and trust `DefWindowProc`: no. It sees a client-area hit code (we set the frame thickness to zero), so it never changes the shape.
+- Handle `WM_SETCURSOR` ourselves and `return 1` afterwards: yes.
+
+The low word of `WM_SETCURSOR`'s `lparam` is exactly the hit code from a moment earlier, so the geometry does not need recomputing -- the system already brought the answer, look the cursor up in a table. `return 1` means "handled", and it has to be a true value, otherwise the message continues into Tk and Tk's widget procedure puts its own arrow back.
+
+### 54.3 The fix
+
+Three pieces in `host/frameless.py`:
+
+1. One table: `HTLEFT`/`HTRIGHT` -> `IDC_SIZEWE`, `HTTOP`/`HTBOTTOM` -> `IDC_SIZENS`, `HTTOPLEFT`/`HTBOTTOMRIGHT` -> `IDC_SIZENWSE`, `HTTOPRIGHT`/`HTBOTTOMLEFT` -> `IDC_SIZENESW`.
+2. One function, `resize_cursor(hit)`: get the handle with `LoadCursorW` (cached at module level, loaded once) and call `SetCursor`.
+3. In the window procedure, intercept `WM_SETCURSOR`: look the low word up, set the cursor and `return 1` on a hit, pass the message on otherwise.
+
+The code applies to every hooked window (Tk gives every widget a real HWND), so the log card, entries and combo boxes keep their own cursors -- only the 9-pixel frame (15 pixels at the corners) changes shape.
+
+### 54.4 Measurements
+
+`SetCursorPos` moves the real pointer, `GetCursorInfo` reads back the current handle, compared against the handle `LoadCursorW` returns:
+
+    left         cursor=0x10011 want=0x10011 OK
+    right        cursor=0x10011 want=0x10011 OK
+    top          cursor=0x10013 want=0x10013 OK
+    bottom       cursor=0x10013 want=0x10013 OK
+    topleft      cursor=0x1000d want=0x1000d OK
+    topright     cursor=0x1000f want=0x1000f OK
+    bottomleft   cursor=0x1000f want=0x1000f OK
+    bottomright  cursor=0x1000d want=0x1000d OK
+    inside-log   cursor=0x10005 not a resize cursor
+    inside-row   cursor=0x10003 not a resize cursor
+    outside      cursor=0x1001f not a resize cursor
+    maximized-edge cursor=0x10003 arrow (the edge must not resize when maximized)
+
+PASS 12 / 12. The resize behaviour regression passed 10 / 10 as well (eight directions drag, dragging the inside does not move the window, double-click maximizes and restores).
+
+### 54.5 Lessons
+
+- "It works" and "it looks like it works" are two separate things, and the second one is owned by a separate message. Every system message a frameless window takes over raises the question of who used to handle it.
+- Messages that come from the system usually carry their own answer (`WM_SETCURSOR`'s `lparam` is the hit code); do not recompute it.
+- Return a true value once a message is handled, otherwise the layer below overwrites the result. In a window procedure there is almost no exception to this.
+
 ---
 
 
