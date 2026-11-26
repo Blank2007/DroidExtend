@@ -105,6 +105,10 @@ EXTRA = (
     # turns it on once and sets this flag; after that the check box is the
     # user's business again.
     "pointer_default",
+    # 2.2.1 -- the version the startup update check has already offered, so the
+    # same release window does not open at every launch.  Cleared implicitly by
+    # a newer version: the value compared is the tag, not a boolean.
+    "update_offered",
 )
 
 _EXTRA_DEFAULTS = {
@@ -134,6 +138,7 @@ _EXTRA_DEFAULTS = {
     "notify_apk": True,
     "notify_misc": True,
     "pointer_default": False,
+    "update_offered": "",
 }
 
 _TYPES = {k: type(DEFAULTS[k]) for k in KEYS if k in DEFAULTS}

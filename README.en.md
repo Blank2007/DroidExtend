@@ -152,8 +152,9 @@ second screen.
 ## 2. The interface
 
 The title bar is drawn by the window itself: `DroidExtend`, `安卓拓展屏` and the version on the
-left; the **gear** (settings), **≡** (menu: File / Tools / Notifications / Language / Help), and
-minimise / maximise / close on the right.
+left; the **≡** button (opens settings), and minimise / maximise / close on the right. 2.3.0 removed the
+menu entirely: ≡ opens the settings page itself, and everything the menu used to hold lives in the
+navigation column on its left.
 
 The main window is one page from top to bottom, with no dividers -- seven groups separated by whitespace:
 
@@ -165,7 +166,7 @@ The main window is one page from top to bottom, with no dividers -- seven groups
 6. **Current configuration** (e.g. `HEVC · auto bitrate · low latency`) and **Start / Stop**.
 7. **Log card**: copy / save as / clear / expand.
 
-Clicking the gear does not open a second window -- it **swaps the content area in place**: six nav entries on the left (Picture / Codec & quality / Device / Startup & exit / Appearance / About), "←" top left and "Done" top right, with the window height following the amount of content on the current page.
+Clicking ≡ neither drops a menu nor opens a second window -- it **swaps the content area in place**: eight nav entries on the left (Picture / Encoding / Device / Start-up / Notifications / Appearance / Manual / About), "←" top left and "Done" top right. The window height is fixed at 640 (800 pixels at 125% scaling) and a page with more content scrolls on its own, so pages never change the size of the window.
 
 The settings on that page are grouped by:
 
@@ -250,7 +251,7 @@ nothing (say 60 seconds) can always be followed by starting by hand as usual.
 
 ### Notifications (Windows notification centre, since 1.9.1)
 
-The **Notifications** menu at the top holds one master switch and one box per kind of news:
+The **Notifications** page in settings holds one master switch and one box per kind of news:
 
 * the stream has started (the automatic start after boot)
 * also notify when I press Start myself (**off by default** -- a balloon about the button you just
@@ -263,9 +264,9 @@ The **Notifications** menu at the top holds one master switch and one box per ki
 
 Everything is on by default except the manual-start one. Notifications still arrive with the window
 in the tray, which is the point: with the stream starting by itself at boot, nobody is watching the
-window. **Send a test notification** in the same menu tells you at once whether it works; when it
+window. **Send a test notification** on the same page tells you at once whether it works; when it
 does not, the usual cause is Windows itself -- notifications for this app switched off, or Focus
-Assist on. The menu links straight to **Windows notification settings...**.
+Assist on. The same page links straight to **Windows notification settings...**.
 
 ### Screen direction and the settings button (phone side)
 
@@ -308,9 +309,9 @@ The two files always sit in **the same directory**:
 
 By default that is **the program's own directory** — if you used the installer, it's the directory you chose during
 installation.
-The menu item `文件 → 更改数据目录…` (File → Change data directory…) moves it elsewhere (and takes both files along
-with it), and `文件 → 打开数据目录（设置与日志）` (File → Open data directory (settings and logs)) opens it directly
-in Explorer. The About page in settings always shows which directory is in use.
+`≡ → Settings → About → 打开数据目录（设置与日志）` (Open the data folder) opens it directly in Explorer, next
+to "Copy all logs to the clipboard" and "Save the log as...". The About page in settings always shows
+which directory is in use.
 
 > If the program directory is not writable (for example if you installed into `Program Files`), it automatically
 > falls back to `%LOCALAPPDATA%\DroidExtend`, recording the choice in `data_dir.txt` inside that directory.
@@ -455,8 +456,8 @@ ToDesk or Sunlogin cannot enumerate it either; the program already runs as admin
 for nothing extra. **Just take it off the desktop** leaves the driver alone and asks for nothing — the
 screen still exists, it is simply not on the desktop. Both modes only affect **quitting**: an ordinary
 `停止` (Stop) just takes the screen off the desktop without touching the driver, which is why starting
-again takes about three seconds. There is also a menu item, "Shut the virtual
-display down for real", if you want it gone right now. Note that writing `<count>` 0 into the driver
+again takes about three seconds. Under `≡ → Settings → Device → Diagnosis and tools` there is also
+"Shut the virtual screen down for real", if you want it gone right now. Note that writing `<count>` 0 into the driver
 settings does **not** achieve this: MttVDD treats 0 as invalid (`Monitor Count is not valid`) and
 creates one monitor anyway.
 
@@ -645,14 +646,14 @@ this problem.
 
 
 **Q: How do I upgrade to a new version?**
-A: `工具 → 检查更新` (Tools → Check for updates). The program reads the latest version number from GitHub, lists the
+A: Under `≡ → Settings → About` press "Check now" (with "Check for updates on start" ticked the program also checks by itself). The program reads the latest version number from GitHub, lists the
 release notes when there's something newer, and "Download and install" **downloads, verifies, installs and restarts
 all inside the app** — you never have to go hunting for the installer in a browser.
 Before downloading it checks, in order: the URL must be an official GitHub domain (https), the official source must
 publish a SHA256, the byte count must match the official one, the SHA256 must match, and the file must start with
 `MZ` — **if any check fails it does not install**, and it tells you right there which one failed.
 
-To see pre-releases, tick "Include beta releases" in the same Tools menu — from then on the check
+To see pre-releases, tick "Include beta releases" on the same page — from then on the check
 looks at betas too.  A beta exists to try new things out and can be rough; leave it unticked if you
 do not want that.
 

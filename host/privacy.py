@@ -14,6 +14,8 @@ from tkinter import ttk
 
 from i18n import t
 import paths
+import theme as th
+import ui_kit as uk
 
 # Bump this whenever the terms change in a way people should see again.  What
 # gets stored in settings.json is this string, so a bump re-asks everyone.
@@ -109,6 +111,63 @@ def _height(win):
     return want
 
 
+def _ask_sheet(parent, answer):
+    """The terms in the program's own window style: no title bar, rounded."""
+    pal = parent.pal
+    win, body = parent._sheet(
+        t("使用条款与隐私说明", "Terms of use and privacy"), 780, 660)
+    win.minsize(uk.px(560), uk.px(420))
+    body.rowconfigure(1, weight=1)
+    body.columnconfigure(0, weight=1)
+
+    tk.Label(body, text=t("第一次使用前请读一遍。同意后不会再问。",
+                          "Please read this once. You will not be asked again."),
+             bg=pal["bg"], fg=pal["faint"], anchor="w",
+             font=(th.UI, -uk.px(11.5))).grid(
+                 row=0, column=0, sticky="ew", pady=(0, uk.px(10)))
+
+    txt = tk.Text(body, bg=pal["mono_bg"], fg=pal["mono_fg"],
+                  insertbackground=pal["mono_fg"],
+                  font=(th.UI, -uk.px(11.5)), wrap="word",
+                  relief="flat", bd=0, highlightthickness=0,
+                  padx=uk.px(14), pady=uk.px(12),
+                  spacing1=uk.px(2), spacing3=uk.px(3),
+                  selectbackground=pal["sel"],
+                  selectforeground=pal["sel_fg"])
+    txt.grid(row=1, column=0, sticky="nsew")
+    txt.tag_configure("h", foreground=pal["fg"],
+                      font=(th.UI, -uk.px(12.5), "bold"),
+                      spacing1=uk.px(10), spacing3=uk.px(4))
+    txt.tag_configure("p", foreground=pal["mono_fg"], spacing3=uk.px(6))
+    txt.tag_configure("w", foreground=pal["warn"] if "warn" in pal else pal["fg"],
+                      spacing1=uk.px(10))
+    for tag, line in _lines():
+        txt.insert("end", line + "\n", tag)
+    txt.configure(state="disabled")
+
+    def yes():
+        answer["ok"] = True
+        win.destroy()
+
+    def no():
+        answer["ok"] = False
+        win.destroy()
+
+    foot = tk.Frame(body, bg=pal["bg"])
+    foot.grid(row=2, column=0, sticky="ew", pady=(uk.px(12), 0))
+    uk.RoundButton(foot, pal, t("不同意，退出", "Decline and quit"),
+                   kind="ghost", height=34, command=no).pack(side="left")
+    uk.RoundButton(foot, pal, t("同意并继续", "Agree and continue"),
+                   kind="primary", height=34, command=yes).pack(side="right")
+
+    win.protocol("WM_DELETE_WINDOW", no)
+    parent._center_over(win)
+    win.grab_set()
+    win.focus_set()
+    parent.wait_window(win)
+    return answer["ok"]
+
+
 def ask(parent):
     """Show the terms modally.  True only when the user accepts.
 
@@ -116,6 +175,12 @@ def ask(parent):
     later would mean the program runs without them.
     """
     answer = {"ok": False}
+
+    # 2.2.0: when the caller is the main window it can hand over its palette and
+    # its borderless "sheet" wrapper, and the terms get the same look as every
+    # other dialog.  Anything else (tests, a bare Tk root) falls back below.
+    if getattr(parent, "_sheet", None) is not None and getattr(parent, "pal", None):
+        return _ask_sheet(parent, answer)
 
     win = tk.Toplevel(parent)
     win.title(t("使用条款与隐私说明", "Terms of use and privacy"))

@@ -5308,6 +5308,84 @@ Two traps worth keeping:
 - Screenshots are the easiest place to lie to yourself. No topmost, or `PrintWindow` on a window with transparency, both produce a plausible picture that is completely wrong. I mis-called "the corners are gone" that way, and made the user ask about it.
 - Do not round-trip large files through the `read` tool: it truncates each line at 2000 characters, and one read-write pass over an HTML mockup cost me half a page.
 - `RoundSelect`'s `width` is pixels, not characters. `width=10` produced a 12px-wide empty strip, and it took half an hour to notice that the parameter means something different from ttk's `Combobox`.
+## 50. 2.3.0: the menu moves into the settings page, one window does everything
+
+2.2.0 moved settings into the main window, but the ≡ button still popped a native menu — a white-edged card on a dark interface. This version deletes the menu: ≡ opens the settings page itself, and everything the menu used to hold becomes a navigation item on the left.
+
+### 50.1 Built twice, rejected twice
+
+The first attempt was a self-drawn menu card, `MenuCard`: a 290x812 rounded card, grey group headings, second level expanding on the right, hand-drawn check and radio marks, hover highlight, all colours from the same `pal` as the main window. The reply was:
+
+> 我的意思是把菜单里面的全弄成二级界面窗口 而不是这样的菜单
+
+So it became an in-window menu view: navigation column on the left, menu rows on the right, a sub-level pushing a new page, "← back" in the top-left corner. Row height went from 36 to 35, spacing down to 6+2, and the 21 rows of the first level fit exactly one screen without scrolling.
+
+The reply was:
+
+> 你不能做成全像设置页那样子吗 还有 为什么还会有一个独立的三级页面
+
+Both replies point at the same thing: **a menu is not a second kind of interface**. A floating card is not, and neither is a list view — as long as there is a path of "menu → submenu → yet another page", the third level is still there. In the end the whole menu view was deleted (`_build_menu_view`, `_open_menu`, `_menu_push`, `_menu_back`, `_menu_render`, `_menu_action`, `_menu_spec` are gone; `MenuCard` stays in `ui_kit.py` with zero references), and ≡ now calls `self._open_settings` directly.
+
+### 50.2 Today: one navigation, eight pages
+
+The navigation grew from six pages to eight, and what moved in came from the old menu:
+
+1. **Notifications** (new page): master switch, send one test notification, Windows notification settings, plus the seven per-type switches.
+2. **Instructions** (new page): open the manual, FAQ, problems that appeared after 1.8.4, how to choose settings — four buttons that jump to the matching section of `manual`.
+3. **Devices** gains "Diagnostics and tools": diagnose the connection, install the USB driver, install only the APK and launch it, clean up leftover virtual screens, fully close the virtual screen.
+4. **About** gains "Updates" (check at startup, also check betas, check once now) and "Logs and folders" (copy log, save as, data folder, program folder), with "restore defaults" and "exit DroidExtend" at the bottom.
+
+`_build_menu()` still exists, shrunk to "create the Tk variables only" — `lang_var`, `notify_var`, the per-type `_nvar_<kind>`, `chk_var`, `pre_upd_var`. It has to run before `_build()` (both app.py:492 and app.py:937 do that), because the notification and language controls in the settings view read those variables.
+
+### 50.3 The window may only have one height
+
+The first version let the window follow the current page: `_fit_settings()` took the largest `winfo_reqheight()` of all pages plus some slack. In a screenshot the 800-high window became 924, with a large empty area below the "Picture" page and scrolling needed on the "About" page — a window that changes height between pages reads as a window that was replaced.
+
+The fix: **the window height is fixed at 640 logical** (800 physical at 125% scaling) and the right-hand content column lives in a Canvas with wheel scrolling. `_page_wheel()` is bound to every child of every page (recursively, via `_bind_page_wheel`), because MouseWheel does not bubble from children to a Canvas.
+
+Measured content heights of the eight pages (physical pixels): picture 403, encoder 472, devices 600, startup 446, notifications 391, appearance 272, instructions 303, about 589. The viewport is about 669, so **all eight pages fit without scrolling** — but the scrolling stays, so adding content later cannot break the window.
+
+### 50.4 When the About page does not fit, use two columns
+
+About was 745 physical pixels, 76 over. "Links" has six entries and "Logs and folders" four, each in one column, so:
+
+- Both became two columns (`row=_i // 2, column=_i % 2`, 18 px column gap), 745 → 589.
+- The five buttons of "Diagnostics and tools" on the devices page became two columns too, with 6 px of breathing room under the install / repair row, 688 → 600.
+
+Measure first, then change. It is cheaper than guessing "that should fit".
+
+### 50.5 The tablet gets the same greys, with two mismatches left
+
+The tablet side (`HudView` and the display-settings panel in `MainActivity`) moved to the host palette back in 2.2.0: `#0E0F12` panels, `#ECECEC` primary text, `#9EA1AA` secondary, `#2A2C31` strokes, white-on-black segmented selection. Testing this version left two mismatches:
+
+1. **The gear floated above the scrim.** Opening the settings panel lays down a 60% black scrim, and the gear was drawn on top of it at full brightness — it looked clickable while it was not. Added `HudView.setGearShown(boolean)`, kept in sync on open and close, and the touch test is disabled with it.
+2. **Three white bold headings stole the eye.** The panel title went from 18sp white to 15sp (the size of the host window title); "Touch controls" and "Keep alive in background" went from 14sp white to `hud_dim` 12.5sp, the same spec as the section headings in the host settings page. White is reserved for values you can actually touch.
+
+Measured on the tablet (24091RPADC, 3200x2136): the host reported `采集 120 fps · 发送 41.7 Mbps · 手机 收 120 fps / 显示 120 fps · 22 ms`, and the overlay showed
+
+```
+● 2560 × 1600 · 显示 120 fps（屏 120 Hz）
+  40.16 Mbps · 24 ms
+  NVENC VBR Q20 · 40Mbps
+```
+
+### 50.6 Pitfalls
+
+- **A failed assertion means nothing was written, and that is by design.** Every patch script replaces text in memory, asserts everything, and only then writes once. So an `AssertionError` guarantees the file was not left half-changed. The converse also holds: a failed assertion does not mean "the previous patch did not apply" — read the actual text first.
+- **Patching by line number always drifts.** `patch_ui_abt.py` failed once with `('log grid', 0)` not because the text was wrong but because an earlier patch had already removed the `pady=uk.px(2)` in that same block. Locate patches by a unique fragment of content, never by line number.
+- **The `read` tool truncates every line to 2000 characters**, so reading a large file back and writing it out destroys it. Edit large files with pwsh `[IO.File]::ReadAllText` + `String.Replace`, or inside a patch script.
+- **Tablet screenshots lie in preview.** `screencap` produces 3200x2136, but the chat preview downsizes it to 2506 wide and converts it to webp; the semi-transparent gear looked like a white blob at that size and only turned out to be a dark grey square with a white slider when zoomed to pixel level.
+- **`tk.Menu` is always a white bar on a dark theme** (the 2.2.0 conclusion). This version removed it completely, so any future "menu" in the main window can only be a navigation item.
+
+### 50.7 Lessons
+
+- "This is a second kind of interface" is a design judgement, not an implementation detail. A self-drawn card and an in-window list are both buildable, but the moment either adds a level, the question becomes "why is there a third-level page".
+- A fixed window height with scrollable content is far steadier than "the window adapts to its content". The cost of adapting is re-deciding, on every page change, whether this counts as a different window.
+- When a layout does not fit, measure `winfo_reqheight()` before touching it. Every "that should be enough" guess in this round was wrong; the two-column layouts and spacing changes were all driven by measurements.
+- Take a screenshot of the running app. Everything that "looked fine" here — the gear above the scrim, the hierarchy of white headings — was only visible after the screenshot.
+
+---
+
 
 ---
 

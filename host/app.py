@@ -543,162 +543,44 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------- menu
     def _build_menu(self):
-        """The menus behind the ≡ button, built as one popup.
+        """The window's shared switches, built before anything reads them.
 
-        The design has no menu strip -- a row of words under the title bar is
-        exactly what it does not have -- but every entry in these five menus
-        has to stay reachable, so they all hang off a single popup menu that
-        the ≡ glyph opens, painted in the palette like the rest of the window.
+        Everything on the ≡ side of the window -- the notification kinds, the
+        update switches, the language radios -- reads these, and all three are
+        built once here so a rebuild (a language change tears the window down
+        and puts it back) keeps the values.
         """
-        pal = self.pal
-
-        def newmenu(parent):
-            return tk.Menu(parent, tearoff=0, bg=pal["field"], fg=pal["fg"],
-                           activebackground=pal["sel"],
-                           activeforeground=pal["sel_fg"],
-                           selectcolor=pal["btn"], bd=0, relief="flat",
-                           activeborderwidth=0, font=(theme.UI, 10))
-
-        bar = newmenu(self)
-        self._menu_bar = bar
-
-        m_file = newmenu(bar)
-        m_file.add_command(label=i18n.t("打开数据目录（设置与日志）",
-                                        "Open data folder (settings and logs)"),
-                           command=self.on_open_config_dir)
-        m_file.add_command(label=i18n.t("打开程序目录", "Open program folder"),
-                           command=self.on_open_root_dir)
-        m_file.add_separator()
-        m_file.add_command(label=i18n.t("退出", "Exit"), command=self._on_close)
-        bar.add_cascade(label=i18n.t("文件", "File"), menu=m_file)
-
-        m_tool = newmenu(bar)
-        m_tool.add_command(label=i18n.t("安装虚拟显示器驱动…",
-                                        "Install virtual display driver..."),
-                           command=self.on_install_driver)
-        # 1.9.1 -- the other half of that line: taking the driver out again.
-        # Deliberately a menu item and not a button on the left panel: pressing
-        # it by accident would cost a reinstall, and nothing about the button
-        # layout should invite that.
-        m_tool.add_command(label=i18n.t("卸载虚拟显示器驱动…",
-                                        "Remove the virtual display driver..."),
-                           command=self.on_uninstall_driver)
-        m_tool.add_command(label=i18n.t("仅安装 APK 并启动", "Install APK only and start"),
-                           command=self.on_install_apk)
-        m_tool.add_separator()
-        m_tool.add_command(label=i18n.t("清理残留的虚拟屏", "Clean up a leftover virtual screen"),
-                           command=self.on_cleanup_orphans)
-        m_tool.add_command(label=i18n.t("彻底关闭虚拟屏", "Shut the virtual display down for real"),
-                           command=self.on_vdd_off)
-        m_tool.add_command(label=i18n.t("关闭窗口时的行为…", "What closing the window does..."),
-                           command=self.on_close_behavior)
-        m_tool.add_command(label=i18n.t("诊断连接问题…", "Diagnose connection problems..."),
-                           command=self.on_diagnose)
-        m_tool.add_command(label=i18n.t("安装 USB 驱动…", "Install USB driver..."),
-                           command=self.on_install_usb_driver)
-        m_tool.add_separator()
-        m_tool.add_command(label=i18n.t("测一下数据线速度", "Measure cable speed"),
-                           command=self.on_linkspeed)
-        m_tool.add_separator()
-        self.chk_var = tk.BooleanVar(value=bool(self.settings.get("check_updates", True)))
-        m_tool.add_checkbutton(label=i18n.t("启动时自动检查更新", "Check for updates on start"),
-                               variable=self.chk_var, command=self._save_settings)
-        m_tool.add_command(label=i18n.t("检查更新…", "Check for updates..."),
-                           command=lambda: self.on_check_updates(manual=True))
-        # 1.9.4 -- GitHub's /releases/latest never returns a pre-release, so
-        # looking at betas is a separate, opt-in switch.
-        self.pre_upd_var = tk.BooleanVar(value=bool(self.settings.get("check_prerelease", False)))
-        m_tool.add_checkbutton(label=i18n.t("也检查测试版（beta）", "Include beta releases"),
-                               variable=self.pre_upd_var, command=self._save_settings)
-        m_tool.add_command(label=i18n.t("更新日志", "Release notes"),
-                           command=self.on_show_changelog)
-        m_tool.add_separator()
-        m_tool.add_command(label=i18n.t("重置为默认设置", "Reset to defaults"),
-                           command=self.on_reset_settings)
-        m_tool.add_separator()
-        m_tool.add_command(label=i18n.t("复制全部日志到剪贴板", "Copy all logs to clipboard"),
-                           command=self.on_copy_log)
-        m_tool.add_command(label=i18n.t("日志另存为…", "Save logs as..."),
-                           command=self.on_save_log)
-        bar.add_cascade(label=i18n.t("工具", "Tools"), menu=m_tool)
-
-        # 1.9.1 -- notifications get their own menu instead of a check box
-        # somewhere in the middle of the form: "tell me when it fails" and "do
-        # not tell me every time it starts" have to be answerable separately,
-        # and one switch per kind is the only way to say that.
-        m_notify = newmenu(bar)
-        self.notify_var = tk.BooleanVar(value=bool(self.settings.get("notify", True)))
-        m_notify.add_checkbutton(
-            label=i18n.t("使用 Windows 通知", "Use Windows notifications"),
-            variable=self.notify_var,
-            command=lambda: self._set_notify("notify", self.notify_var))
-        m_notify.add_separator()
-        for _kind, _zh, _en in NOTIFY_KINDS:
-            var = tk.BooleanVar(value=bool(self.settings.get("notify_" + _kind, True)))
-            # Kept on self: a Tk variable nothing references can be collected,
-            # and the check box would then quietly lose its value.
-            setattr(self, "_nvar_" + _kind, var)
-            m_notify.add_checkbutton(
-                label=i18n.t(_zh, _en), variable=var,
-                command=lambda k=_kind, v=var: self._set_notify("notify_" + k, v))
-        m_notify.add_separator()
-        m_notify.add_command(label=i18n.t("发一条测试通知", "Send a test notification"),
-                             command=self.on_test_notify)
-        m_notify.add_command(label=i18n.t("Windows 通知设置…",
-                                          "Windows notification settings..."),
-                             command=lambda: self.open_url("ms-settings:notifications"))
-        bar.add_cascade(label=i18n.t("通知", "Notifications"), menu=m_notify)
-
-        m_lang = newmenu(bar)
         self.lang_var = tk.StringVar(value=self._lang_setting())
-        for code, caption in i18n.choices():
-            m_lang.add_radiobutton(label=caption, value=code, variable=self.lang_var,
-                                   command=lambda c=code: self._switch_lang(c))
-        bar.add_cascade(label=i18n.t("语言", "Language"), menu=m_lang)
+        # 1.9.1 -- one switch per kind, because "tell me when it fails" and "do
+        # not tell me every time it starts" have to be answerable separately.
+        self.notify_var = tk.BooleanVar(value=bool(self.settings.get("notify", True)))
+        for _kind, _zh, _en in NOTIFY_KINDS:
+            var = tk.BooleanVar(
+                value=bool(self.settings.get("notify_" + _kind, True)))
+            # Kept on self: a Tk variable nothing references can be collected,
+            # and its switch would then quietly lose its value.
+            setattr(self, "_nvar_" + _kind, var)
+        self.chk_var = tk.BooleanVar(
+            value=bool(self.settings.get("check_updates", True)))
+        self.pre_upd_var = tk.BooleanVar(
+            value=bool(self.settings.get("check_prerelease", False)))
 
-        m_help = newmenu(bar)
-        m_help.add_command(label=i18n.t("使用说明", "Manual"), command=self.on_manual)
-        # The anchors are headings inside manual.py, which ships two complete
-        # manuals rather than one translated text -- so the anchor has to be the
-        # heading of the language in use, not the Chinese one.
-        m_help.add_command(label=i18n.t("常见问题", "Common questions"),
-                           command=lambda: self.on_manual(
-                               i18n.t("【六、常见问题】", "[6] Common questions")))
-        # 1.9.1 -- the questions that arrived with 1.8.4 and later have their own
-        # heading in the manual (and their own entry here): mixing them into the
-        # old list made people read eight answers to find the one that applied.
-        m_help.add_command(label=i18n.t("最近几版新出现的问题",
-                                        "Problems new in recent versions"),
-                           command=lambda: self.on_manual(
-                               i18n.t("—— 1.8.4 以后这几版新出现的问题 ——",
-                                      "-- problems new since 1.8.4 --")))
-        m_help.add_command(label=i18n.t("参数怎么选", "How to choose the settings"),
-                           command=lambda: self.on_manual(
-                               i18n.t("【五、参数怎么选】", "[5] How to choose the settings")))
-        m_help.add_separator()
-        m_help.add_command(label=i18n.t("项目主页（GitHub）", "Project home (GitHub)"),
-                           command=lambda: self.open_url(REPO_URL))
-        m_help.add_command(label=i18n.t("反馈问题 / 提建议", "Report a problem / suggest something"),
-                           command=lambda: self.open_url(ISSUES_URL))
-        m_help.add_command(label=i18n.t("检查更新…", "Check for updates..."),
-                           command=lambda: self.on_check_updates(manual=True))
-        # 1.8.3: the Huawei checklist is the one document a user with a device
-        # that will not connect actually needs, and it is too long to print in
-        # the log window.  This opens docs/HUAWEI.md on GitHub.
-        m_help.add_command(
-            label=i18n.t("华为 / 鸿蒙设备连不上？", "Huawei / HarmonyOS device will not connect?"),
-            command=lambda: self.open_url(HUAWEI_DOC_URL))
-        m_help.add_separator()
-        m_help.add_command(label=i18n.t("使用条款与隐私说明", "Terms and privacy"),
-                           command=self.on_show_privacy)
-        m_help.add_command(label=i18n.t("第三方组件许可", "Third-party licences"),
-                           command=self.on_licenses)
-        # 1.8.3: the only place the program ever asks for money, and it is only
-        # reachable from 帮助 -- no pop-up, no timer, nothing in the stream path.
-        m_help.add_command(label=i18n.t("请作者喝杯奶茶…", "Buy the author a milk tea..."),
-                           command=self.on_donate)
-        m_help.add_command(label=i18n.t("关于 ", "About ") + APP_NAME, command=self.on_about)
-        bar.add_cascade(label=i18n.t("帮助", "Help"), menu=m_help)
+    def _show_view(self, name):
+        """Exactly one of the two views is packed at any time."""
+        for v in (getattr(self, "view_main", None),
+                  getattr(self, "view_set", None)):
+            if v is None:
+                continue
+            try:
+                v.pack_forget()
+            except Exception:
+                pass
+        if name == "set" and getattr(self, "view_set", None) is not None:
+            self.view_set.pack(side="top", fill="both", expand=True)
+            return
+        self.view_main.pack(side="top", fill="both", expand=True,
+                            padx=(uk.px(24), uk.px(24)),
+                            pady=(uk.px(4), uk.px(20)))
 
     # --------------------------------------------------------------- language
     def _lang_setting(self):
@@ -1027,21 +909,6 @@ class App(tk.Tk):
         self._rgn_job = None
         _round_win(self, maxed=getattr(self, "_maxed", False))
 
-    def _popup_menu(self):
-        """The ≡ button: the five menus, as one popup."""
-        bar = getattr(self, "_menu_bar", None)
-        btn = getattr(self, "_menu_btn", None)
-        if bar is None or btn is None:
-            return
-        try:
-            bar.tk_popup(btn.winfo_rootx(),
-                         btn.winfo_rooty() + btn.winfo_height() + uk.px(2))
-        finally:
-            try:
-                bar.grab_release()
-            except Exception:
-                pass
-
     def on_toggle_log(self):
         """展开 / 收起: hand the whole window to the log, or give it back."""
         self._log_big = not getattr(self, "_log_big", False)
@@ -1136,6 +1003,62 @@ class App(tk.Tk):
                 x=0, y=uk.px(pad_top))
             return row, value
 
+        def sheet(title, width, height, parent=None):
+            """A secondary window that belongs to this program.
+
+            The main window lost its system frame and every dialog left behind
+            with one suddenly came from a different application: grey title
+            bar, white body, square corners.  This builds the same shell -- no
+            frame, 12px corners, one header row with a title and a close
+            button -- and hands back the body frame to fill in.
+            """
+            win = tk.Toplevel(parent or self)
+            win.configure(bg=pal["bg"])
+            win.geometry("%dx%d" % (uk.px(width), uk.px(height)))
+            win.title(title)
+            try:
+                win.transient(self)
+            except Exception:
+                pass
+            _borderless(win)
+            head = tk.Frame(win, bg=pal["bg"])
+            head.pack(side="top", fill="x", padx=uk.px(22),
+                      pady=(uk.px(16), uk.px(8)))
+            title_lab = lab(head, title, F13, pal["fg"])
+            title_lab.pack(side="left")
+            uk.RoundButton(head, pal, "✕", command=win.destroy, height=26,
+                           width=26, kind="ghost", border=False, font=F115,
+                           fg=pal["faint"], back=pal["bg"]).pack(side="right")
+            body = tk.Frame(win, bg=pal["bg"])
+            body.pack(side="top", fill="both", expand=True,
+                      padx=uk.px(22), pady=(uk.px(2), uk.px(18)))
+
+            # Drag by the header, exactly like the main window.
+            def _down(event):
+                win._drag = (event.x_root - win.winfo_x(),
+                             event.y_root - win.winfo_y())
+
+            def _move(event):
+                offset = getattr(win, "_drag", None)
+                if offset:
+                    win.geometry("+%d+%d" % (event.x_root - offset[0],
+                                             event.y_root - offset[1]))
+
+            for widget in (head, title_lab):
+                widget.bind("<Button-1>", _down)
+                widget.bind("<B1-Motion>", _move)
+            win.bind("<Escape>", lambda _e: win.destroy())
+            win.after(120, lambda: _round_win(win))
+            return win, body
+
+        self._sheet = sheet
+        # 2.2.1 -- the dialogs built by methods (update offer, download, close
+        # question, terms) sit outside this function, so the local label helper
+        # has to be reachable from there.  It was not, and every one of those
+        # windows raised NameError instead of appearing -- which is why the
+        # update notice never showed up.
+        self._lab = lab
+
         # -- frame and title bar ---------------------------------------------
         # The system title bar is gone (the drawing has its own) which also
         # takes the window off the taskbar; _borderless() puts it back.
@@ -1178,14 +1101,10 @@ class App(tk.Tk):
         win_btn("▢", self._toggle_max)
         win_btn("—", self._minimize)
         self._menu_btn = uk.RoundButton(
-            right, pal, "≡", command=self._popup_menu, height=28, width=28,
+            right, pal, "≡", command=self._open_settings, height=28, width=28,
             kind="ghost", border=False, font=fnt(14), fg=pal["dim"],
             back=pal["bg"])
         self._menu_btn.pack(side="right", padx=(0, uk.px(4)))
-        uk.RoundButton(right, pal, "⚙", command=self._open_settings, height=28,
-                       width=28, kind="ghost", border=False,
-                       font=fnt(12.5), fg=pal["dim"], back=pal["bg"]).pack(
-                           side="right", padx=(0, uk.px(2)))
 
         # -- body ------------------------------------------------------------
         # Two views share this body: the picture, and the settings.  Exactly
@@ -1247,28 +1166,13 @@ class App(tk.Tk):
                 side="left", padx=(uk.px(3), 0), anchor="s")
             self._metric_labels[key] = (var, lbl)
 
-        # -- the two device rows ---------------------------------------------
-        self.drv_var = tk.StringVar(value=i18n.t("检测中…", "Detecting..."))
-        drv_row, drv_val = row_with(top, i18n.t("虚拟显示器", "Virtual display"),
-                                    (uk.px(14), uk.px(14)))
-        lab(drv_val, "", F125, pal["fg"], textvariable=self.drv_var,
-            wraplength=uk.px(620), justify="left").pack(side="left")
-        # The install button only appears when there is something to install:
-        # on a working setup this row is a line of text, exactly as drawn.
-        self.btn_install = uk.RoundButton(drv_row, pal, "", kind="soft",
-                                          command=self.on_install_driver,
-                                          height=28, font=F12, back=pal["bg"])
-        self._drv_action = "install"
-
-        # Which graphics card is doing the capture.  On a laptop with two GPUs
-        # the answer decides whether a mode shows a picture at all.
-        self.gpu_var = tk.StringVar(value=i18n.t("——", "-"))
-        _grow, gpu_val = row_with(top, i18n.t("采集显卡", "Capture GPU"),
-                                  (uk.px(14), uk.px(14)))
-        lab(gpu_val, "", F125, pal["fg"], textvariable=self.gpu_var,
-            wraplength=uk.px(760), justify="left").pack(side="left")
-
-        # -- picture: four fields on one row ---------------------------------
+        # -- picture: three fields on one row --------------------------------
+        # The frame rate used to have a field of its own beside the refresh
+        # rate, which read as two answers to the same question: the host runs
+        # at min(fps, panel Hz) and the panel has the last word.  One field now
+        # sets both.  Quality Q moved into the settings; the bitrate is the
+        # number people reach for after a stutter, so it lives here and takes a
+        # typed value.
         _frow, fields = row_with(top, i18n.t("画面", "Picture"),
                                  (uk.px(16), uk.px(6)), pad_top=6, expand=True)
         self.res_var = tk.StringVar(value="1920x1080")
@@ -1276,44 +1180,55 @@ class App(tk.Tk):
         self.fps_var = tk.StringVar(value="60")
         self.q_var = tk.StringVar(value="20")
         self.q_hint_var = tk.StringVar(value="")
+        self.br_var = tk.StringVar(value=str(DEFAULTS["bitrate_mbps"]))
+        self.w_var = tk.StringVar(value="1920")
+        self.h_var = tk.StringVar(value="1080")
         selects = {}
-        for col, (cap, var, values, field_name) in enumerate((
+        for col, (cap, var, values, field_name, editable) in enumerate((
                 (i18n.t("分辨率", "Resolution"), self.res_var,
-                 ["%dx%d" % r for r in RESOLUTIONS] + [_custom_label()], "res"),
-                (i18n.t("刷新率", "Refresh rate"), self.hz_var,
-                 list(HZ_CHOICES), "hz"),
-                (i18n.t("帧率", "Frame rate"), self.fps_var,
-                 list(FPS_CHOICES), "fps"),
-                (i18n.t("画质 Q", "Quality Q"), self.q_var,
-                 list(QUALITY_CHOICES), "q"))):
+                 ["%dx%d" % r for r in RESOLUTIONS] + [_custom_label()],
+                 "res", False),
+                (i18n.t("刷新率 / 帧率", "Refresh / frame rate"), self.hz_var,
+                 list(HZ_CHOICES), "hz", False),
+                (i18n.t("码率 Mbps", "Bitrate, Mbps"), self.br_var,
+                 list(BITRATE_CHOICES), "br", True))):
             cell = tk.Frame(fields, bg=pal["bg"])
             cell.pack(side="left", fill="x", expand=True,
-                      padx=(0, 0 if col == 3 else uk.px(10)))
+                      padx=(0, 0 if col == 2 else uk.px(10)))
             lab(cell, cap, F115, pal["faint"]).pack(side="top", anchor="w",
                                                     pady=(0, uk.px(6)))
-            sel = uk.RoundSelect(cell, pal, values, var, height=34, back=pal["bg"])
+            sel = uk.RoundSelect(cell, pal, values, var, height=34,
+                                 back=pal["bg"], editable=editable)
             sel.pack(side="top", fill="x")
             selects[field_name] = sel
         self.res_cb = selects["res"]
         self.hz_cb = selects["hz"]
-        self.fps_cb = selects["fps"]
-        self.q_cb = selects["q"]
+        self.br_cb = selects["br"]
         self.res_cb.bind("<<ComboboxSelected>>", self._res_changed)
-        self.hz_cb.bind("<<ComboboxSelected>>", self._layout_changed)
+        self.hz_cb.bind("<<ComboboxSelected>>", self._hz_changed)
+        self.br_cb.bind("<<ComboboxSelected>>", self._bitrate_changed)
         self._load_resolutions()
 
-        # -- one option row --------------------------------------------------
-        orow = tk.Frame(top, bg=pal["bg"])
-        orow.pack(side="top", fill="x", pady=(uk.px(12), uk.px(12)))
-        self.mouse_var = tk.BooleanVar(value=False)
-        self.mouse_chk = uk.RoundCheck(
-            orow, pal, i18n.t("显示鼠标指针", "Draw the mouse pointer"),
-            variable=self.mouse_var, back=pal["bg"])
-        self.mouse_chk.pack(side="left")
-        more = lab(orow, i18n.t("更多设置 →", "More settings →"), F12,
-                   pal["dim"], cursor="hand2")
-        more.pack(side="right")
-        more.bind("<Button-1>", lambda _e: self._open_settings())
+        # The custom size is typed where the pick that asks for it was made.
+        # Sending people into the settings to type two numbers, one click after
+        # a dropdown that says "custom", was a detour through a door.
+        self.custom_row = tk.Frame(top, bg=pal["bg"])
+        self.custom_row.pack(side="top", fill="x")
+        self.custom_line, cval = row_with(self.custom_row,
+                                          i18n.t("自定义尺寸", "Custom size"),
+                                          (0, uk.px(6)))
+        uk.RoundEntry(cval, pal, textvariable=self.w_var, chars=6,
+                      height=30).pack(side="left", padx=(0, uk.px(7)))
+        lab(cval, "×", F125, pal["dim"]).pack(side="left", padx=(0, uk.px(7)))
+        uk.RoundEntry(cval, pal, textvariable=self.h_var, chars=6,
+                      height=30).pack(side="left", padx=(0, uk.px(11)))
+        lab(cval, i18n.t("改完立刻生效；跟随手机时以手机为准",
+                         "Applies at once; matching the phone takes precedence"),
+            F115, pal["faint"]).pack(side="left")
+        # A typed-in size changes the screen just as much as the dropdown does.
+        self.w_var.trace_add("write", self._layout_changed)
+        self.h_var.trace_add("write", self._layout_changed)
+        self.custom_line.pack_forget()
 
         # -- the action row --------------------------------------------------
         arow = tk.Frame(top, bg=pal["bg"])
@@ -1332,6 +1247,29 @@ class App(tk.Tk):
                                         icon="▶", command=self.on_start,
                                         back=pal["bg"])
         self.btn_start.pack(side="right", padx=(0, uk.px(8)))
+
+        # -- one quiet detail line -------------------------------------------
+        # 2.2.1 -- the display path and the capture card used to be the first
+        # two rows under the status line.  They answer a diagnostic question
+        # ("why is the picture black?"), not the one this window is opened for,
+        # so they share one dim line below the button now.  A driver that needs
+        # installing still gets a button here, in the same place as before.
+        drow = tk.Frame(top, bg=pal["bg"])
+        drow.pack(side="top", fill="x", pady=(0, uk.px(10)))
+        self.drv_var = tk.StringVar(value=i18n.t("检测中…", "Detecting..."))
+        self.gpu_var = tk.StringVar(value=i18n.t("——", "-"))
+        self.detail_var = tk.StringVar(value="")
+        lab(drow, "", F105, pal["faint"], textvariable=self.detail_var,
+            wraplength=uk.px(780), justify="left").pack(side="left")
+        # The install button only appears when there is something to install:
+        # on a working setup this is a line of text, exactly as drawn.
+        self.btn_install = uk.RoundButton(drow, pal, "", kind="soft",
+                                          command=self.on_install_driver,
+                                          height=26, font=F115, back=pal["bg"])
+        self._drv_action = "install"
+        for _dv in (self.drv_var, self.gpu_var):
+            _dv.trace_add("write", self._sync_detail)
+        self._sync_detail()
 
         # -- log -------------------------------------------------------------
         logcard = uk.Card(body, pal, fill=pal["mono_bg"], border=True,
@@ -1434,7 +1372,9 @@ class App(tk.Tk):
             ("codec", i18n.t("编码与画质", "Encoding")),
             ("device", i18n.t("设备", "Device")),
             ("boot", i18n.t("启动与退出", "Start-up")),
+            ("notify", i18n.t("通知", "Notifications")),
             ("look", i18n.t("外观", "Appearance")),
+            ("manual", i18n.t("使用说明", "Manual")),
             ("about", i18n.t("关于", "About")),
         )
         self._nav_btns = {}
@@ -1449,8 +1389,21 @@ class App(tk.Tk):
             b.pack(side="top", fill="x", pady=(0, uk.px(2)))
             self._nav_btns[key] = b
 
-        content = ttk.Frame(body, padding=(uk.px(10), uk.px(4), 0, 0))
-        content.pack(side="left", fill="both", expand=True)
+        colwrap = tk.Frame(body, bg=pal["bg"])
+        colwrap.pack(side="left", fill="both", expand=True)
+        colcv = tk.Canvas(colwrap, bg=pal["bg"], bd=0, highlightthickness=0,
+                          takefocus=0)
+        colcv.pack(side="left", fill="both", expand=True)
+        content = ttk.Frame(colcv, padding=(uk.px(10), uk.px(4), 0, 0))
+        content_window = colcv.create_window((0, 0), window=content,
+                                             anchor="nw")
+        self._set_cv = colcv
+        self._set_cv_win = content_window
+        content.bind("<Configure>", lambda _e: colcv.configure(
+            scrollregion=colcv.bbox("all")))
+        colcv.bind("<Configure>", lambda e: colcv.itemconfigure(
+            content_window, width=e.width))
+        colcv.bind("<MouseWheel>", self._page_wheel)
         content.columnconfigure(0, weight=1)
         content.rowconfigure(0, weight=1)
         self._pages = {}
@@ -1466,7 +1419,7 @@ class App(tk.Tk):
             column.pack(fill="both", expand=True, anchor="w")
             return column
 
-        def section(parent, title, gap=20):
+        def section(parent, title, gap=16):
             # One titled group.  Groups are told apart by spacing, like the
             # main window -- there is not a hairline anywhere.
             wrap = ttk.Frame(parent)
@@ -1513,30 +1466,10 @@ class App(tk.Tk):
         self.match_chk.grid(row=1, column=0, columnspan=2, sticky="w",
                             pady=(0, uk.px(9)))
 
-        s = section(pict, i18n.t("自定义分辨率", "Custom resolution"))
-        self.custom_frame = ttk.Frame(s)
-        self.w_var = tk.StringVar(value="1920")
-        self.h_var = tk.StringVar(value="1080")
-        ttk.Label(self.custom_frame, text=i18n.t("宽", "W")).pack(
-            side="left", padx=(0, uk.px(7)))
-        uk.RoundEntry(self.custom_frame, self.pal, textvariable=self.w_var,
-                      chars=6, height=30).pack(
-                          side="left", padx=(0, uk.px(11)))
-        ttk.Label(self.custom_frame, text=i18n.t("高", "H")).pack(
-            side="left", padx=(0, uk.px(7)))
-        uk.RoundEntry(self.custom_frame, self.pal, textvariable=self.h_var,
-                      chars=6, height=30).pack(
-                          side="left", padx=(0, uk.px(11)))
-        ttk.Label(self.custom_frame,
-                  text=i18n.t("（在主窗口的「分辨率」里选「自定义」）",
-                              "(pick Custom in the Resolution field of the main window)"),
-                  style="Dim.TLabel").pack(side="left", padx=(uk.px(6), 0))
-        # A typed-in size changes the screen just as much as the dropdown does.
-        self.w_var.trace_add("write", self._layout_changed)
-        self.h_var.trace_add("write", self._layout_changed)
-        self.custom_frame.grid(row=0, column=0, columnspan=2, sticky="w",
-                               pady=(0, uk.px(9)))
-        self.custom_frame.grid_remove()
+        # The custom width and height are typed on the main window now, right
+        # under the dropdown that asks for them.  Boxes here would be a second
+        # place to say the same thing -- and the second place is always the one
+        # that is out of date.
 
         s = section(pict, i18n.t("屏幕位置", "Position"))
         self.pos_var = tk.StringVar(value="right")
@@ -1579,11 +1512,23 @@ class App(tk.Tk):
             text=i18n.t("手机触摸控制电脑", "Phone touch controls the PC"))
         self.touch_chk.grid(row=1, column=0, columnspan=2, sticky="w",
                             pady=(0, uk.px(9)))
+        # 2.2.1 -- the pointer switch moved down here from the main window: it
+        # is a small on/off that nobody flips twice a day, and it belongs with
+        # the other input option rather than above the button that starts the
+        # stream.
+        self.mouse_var = tk.BooleanVar(value=False)
+        self.mouse_chk = uk.RoundCheck(
+            s, self.pal, variable=self.mouse_var,
+            text=i18n.t("显示鼠标指针", "Draw the mouse pointer"))
+        self.mouse_chk.grid(row=2, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(9)))
 
         note(pict, i18n.t(
-            "分辨率、刷新率、帧率和画质 Q 在主窗口上，改完立刻生效。",
-            "Resolution, refresh rate, frame rate and quality Q stay on the main "
-            "window -- they are what people change while watching a picture."))
+            "分辨率、刷新率和码率在主窗口的「画面」一格里，改完立刻生效；"
+            "选「自定义」后，宽高就在下面那行直接输入。",
+            "Resolution, refresh rate and bitrate sit in the Picture row of the "
+            "main window and apply at once; pick \"Custom\" and the width and "
+            "height are typed on the line right below it."))
 
         # -- 编码与画质 ------------------------------------------------------
         enc = newpage("codec", i18n.t("编码与画质", "Encoding and quality"))
@@ -1612,18 +1557,15 @@ class App(tk.Tk):
         self.rc_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
         self.rc_cb.bind("<<ComboboxSelected>>", self._rc_changed)
 
-        self.br_var = tk.StringVar(value=str(DEFAULTS["bitrate_mbps"]))
-        caption(s, 1, i18n.t("码率上限", "Bitrate ceiling"))
-        brf = ttk.Frame(s)
-        brf.grid(row=1, column=1, sticky="w", pady=(0, uk.px(9)))
-        self.br_cb = uk.RoundSelect(brf, self.pal, list(BITRATE_CHOICES),
-                                    self.br_var, width=96, editable=True,
-                                    back=self.pal["bg"])
-        self.br_cb.pack(side="left")
-        ttk.Label(brf, text="Mbps", style="Dim.TLabel").pack(side="left",
-                                                            padx=(uk.px(6), 0))
+        # The ceiling itself is typed in the Picture row of the main window; the
+        # only thing worth a box here is which rate control bends around it.
+        s = section(enc, i18n.t("画质", "Quality"))
+        caption(s, 0, i18n.t("画质 Q", "Quality Q"))
+        self.q_cb = uk.RoundSelect(s, self.pal, list(QUALITY_CHOICES),
+                                   self.q_var, width=96, back=self.pal["bg"])
+        self.q_cb.grid(row=0, column=1, sticky="w", pady=(0, uk.px(9)))
+        self.q_cb.bind("<<ComboboxSelected>>", self._rc_changed)
 
-        self.q_hint_var = tk.StringVar(value="")
         ttk.Label(enc, textvariable=self.q_hint_var, style="Dim.TLabel",
                   wraplength=uk.px(560), justify="left").pack(
                       anchor="w", pady=(0, uk.px(8)))
@@ -1671,7 +1613,8 @@ class App(tk.Tk):
 
         s = section(dev, i18n.t("虚拟显示器驱动", "Virtual display driver"), gap=0)
         drvf = ttk.Frame(s)
-        drvf.grid(row=0, column=0, columnspan=2, sticky="ew")
+        drvf.grid(row=0, column=0, columnspan=2, sticky="ew",
+                  pady=(0, uk.px(6)))
         uk.RoundButton(drvf, self.pal,
                        i18n.t("安装 / 修复虚拟显示器驱动…",
                               "Install / repair the virtual display driver..."),
@@ -1682,6 +1625,23 @@ class App(tk.Tk):
                               "Remove the virtual display driver..."),
                        command=self.on_uninstall_driver, kind="soft",
                        height=32).pack(side="left", padx=(uk.px(9), 0))
+
+        s = section(dev, i18n.t("诊断与工具", "Diagnosis and tools"), gap=0)
+        for _i, (_cap, _cmd) in enumerate((
+                (i18n.t("诊断连接问题…", "Diagnose a connection problem..."),
+                 self.on_diagnose),
+                (i18n.t("安装 USB 驱动…", "Install the USB driver..."),
+                 self.on_install_usb_driver),
+                (i18n.t("仅安装 APK 并启动", "Install the APK only and start"),
+                 self.on_install_apk),
+                (i18n.t("清理残留的虚拟屏", "Clean up a leftover virtual screen"),
+                 self.on_cleanup_orphans),
+                (i18n.t("彻底关闭虚拟屏", "Shut the virtual screen down for real"),
+                 self.on_vdd_off))):
+            uk.RoundButton(s, self.pal, _cap, kind="soft", height=32,
+                           command=_cmd).grid(row=_i // 2, column=_i % 2,
+                                              sticky="w", padx=(0, uk.px(9)),
+                                              pady=(0, uk.px(8)))
 
         # -- 启动与退出 ------------------------------------------------------
         boot = newpage("boot", i18n.t("启动与退出", "Start-up and closing"))
@@ -1782,7 +1742,12 @@ class App(tk.Tk):
                                       text=anim.label())
         self.anim_chk.grid(row=0, column=0, columnspan=2, sticky="w")
 
-        s = section(look, i18n.t("通知", "Notifications"), gap=0)
+        # -- 通知 ------------------------------------------------------------
+        # 2.2.1 -- a page of its own.  Ten switches folded into a grey group
+        # under "Appearance" hid the thing people come here for: which of these
+        # pop up at all.
+        ntf = newpage("notify", i18n.t("通知", "Notifications"))
+        s = section(ntf, i18n.t("总开关", "Master switch"))
         nf = ttk.Frame(s)
         nf.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, uk.px(9)))
         uk.RoundCheck(
@@ -1791,20 +1756,59 @@ class App(tk.Tk):
             text=i18n.t("使用 Windows 通知", "Use Windows notifications")).pack(
                 anchor="w")
         nf2 = ttk.Frame(s)
-        nf2.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, uk.px(9)))
+        nf2.grid(row=1, column=0, columnspan=2, sticky="w")
         uk.RoundButton(nf2, self.pal,
                        i18n.t("发一条测试通知", "Send a test notification"),
                        command=self.on_test_notify, kind="soft",
                        height=32).pack(side="left")
-        ttk.Button(nf2, text=i18n.t("Windows 通知设置…",
-                                    "Windows notification settings..."),
-                   style="Link.TButton",
-                   command=lambda: self.open_url("ms-settings:notifications")
-                   ).pack(side="left", padx=(uk.px(12), 0))
-        note(look, i18n.t(
-            "每一类通知（连上手机、连不上、驱动异常…）在菜单「通知」里单独开关。",
-            "Each kind of notification has its own switch under the Notifications "
-            "menu."))
+        uk.RoundButton(nf2, self.pal,
+                       i18n.t("Windows 通知设置…",
+                              "Windows notification settings..."),
+                       command=lambda: self.open_url("ms-settings:notifications"),
+                       kind="soft", height=32).pack(
+                           side="left", padx=(uk.px(9), 0))
+
+        s = section(ntf, i18n.t("哪一类要提醒我", "Which of these should tell me"),
+                    gap=0)
+        for _i, (_kind, _zh, _en) in enumerate(NOTIFY_KINDS):
+            _var = getattr(self, "_nvar_" + _kind, None)
+            if _var is None:
+                continue
+            uk.RoundCheck(
+                s, self.pal, variable=_var,
+                command=lambda k=_kind, v=_var: self._set_notify("notify_" + k, v),
+                text=i18n.t(_zh, _en)).grid(
+                    row=_i, column=0, columnspan=2, sticky="w",
+                    pady=(0, uk.px(7)))
+
+        # -- 使用说明 --------------------------------------------------------
+        man = newpage("manual", i18n.t("使用说明", "Manual"))
+        s = section(man, i18n.t("文档", "Documents"))
+        for _i, (_cap, _anchor) in enumerate((
+                (i18n.t("打开使用说明", "Open the manual"), None),
+                # The anchors are headings inside manual.py, which ships two
+                # complete manuals rather than one translated text -- so the
+                # anchor has to be the heading of the language in use.
+                (i18n.t("常见问题", "Common questions"),
+                 i18n.t("【六、常见问题】", "[6] Common questions")),
+                # 1.9.1 -- the questions that arrived with 1.8.4 and later have
+                # their own heading: mixing them into the old list made people
+                # read eight answers to find the one that applied.
+                (i18n.t("最近几版新出现的问题", "Problems new in recent versions"),
+                 i18n.t("—— 1.8.4 以后这几版新出现的问题 ——",
+                        "-- problems new since 1.8.4 --")),
+                (i18n.t("参数怎么选", "How to choose the settings"),
+                 i18n.t("【五、参数怎么选】", "[5] How to choose the settings")))):
+            uk.RoundButton(
+                s, self.pal, _cap, kind="soft", height=32,
+                command=(lambda a=_anchor: self.on_manual(a))).grid(
+                    row=_i, column=0, columnspan=2, sticky="w",
+                    pady=(0, uk.px(7)))
+        note(man, i18n.t(
+            "华为 / 鸿蒙设备连不上的那一份，是项目主页里的单独一页，"
+            "从「关于」页的链接打开。",
+            "The Huawei / HarmonyOS checklist is a page of its own on the "
+            "project site; the About page links to it."))
 
         # -- 关于 ------------------------------------------------------------
         abt = newpage("about", i18n.t("关于", "About"))
@@ -1819,6 +1823,8 @@ class App(tk.Tk):
                       row=1, column=0, columnspan=2, sticky="w")
 
         s = section(abt, i18n.t("链接", "Links"), gap=0)
+        lf = ttk.Frame(s)
+        lf.grid(row=0, column=0, columnspan=2, sticky="w")
         for i, (cap, cmd) in enumerate((
                 (i18n.t("项目主页（GitHub）", "Project home (GitHub)"),
                  lambda: self.open_url(REPO_URL)),
@@ -1831,21 +1837,69 @@ class App(tk.Tk):
                 (i18n.t("第三方组件许可", "Third-party licences"), self.on_licenses),
                 (i18n.t("请作者喝杯奶茶…", "Buy the author a milk tea..."),
                  self.on_donate))):
-            ttk.Button(s, text=cap, style="Link.TButton", command=cmd).grid(
-                row=i, column=0, columnspan=2, sticky="w", pady=uk.px(2))
+            ttk.Button(lf, text=cap, style="Link.TButton", command=cmd).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=(0, uk.px(18)),
+                pady=uk.px(1))
+
+        s = section(abt, i18n.t("更新", "Updates"))
+        uk.RoundCheck(
+            s, self.pal, variable=self.chk_var, command=self._save_settings,
+            text=i18n.t("启动时自动检查更新",
+                        "Check for updates on start")).grid(
+                            row=0, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(6)))
+        # 1.9.4 -- GitHub's /releases/latest never returns a pre-release, so
+        # looking at betas is a separate, opt-in switch.
+        uk.RoundCheck(
+            s, self.pal, variable=self.pre_upd_var,
+            command=self._save_settings,
+            text=i18n.t("也检查测试版（beta）",
+                        "Include beta releases")).grid(
+                            row=1, column=0, columnspan=2, sticky="w",
+                            pady=(0, uk.px(9)))
+        uf = ttk.Frame(s)
+        uf.grid(row=2, column=0, columnspan=2, sticky="w")
+        uk.RoundButton(uf, self.pal, i18n.t("立刻检查一次", "Check now"),
+                       kind="soft", height=32,
+                       command=lambda: self.on_check_updates(manual=True)).pack(
+                           side="left")
+
+        s = section(abt, i18n.t("日志与目录", "Log and folders"), gap=0)
+        lg = ttk.Frame(s)
+        lg.grid(row=0, column=0, columnspan=2, sticky="w")
+        for _i, (_cap, _cmd) in enumerate((
+                (i18n.t("复制全部日志到剪贴板", "Copy all logs to the clipboard"),
+                 self.on_copy_log),
+                (i18n.t("日志另存为…", "Save the log as..."), self.on_save_log),
+                (i18n.t("打开数据目录（设置与日志）",
+                        "Open the data folder (settings and log)"),
+                 self.on_open_config_dir),
+                (i18n.t("打开程序目录", "Open the program folder"),
+                 self.on_open_root_dir))):
+            ttk.Button(lg, text=_cap, style="Link.TButton",
+                       command=_cmd).grid(row=_i // 2, column=_i % 2,
+                                          sticky="w", padx=(0, uk.px(18)),
+                                          pady=uk.px(1))
 
         rf = ttk.Frame(abt)
         rf.pack(fill="x", anchor="w", pady=(uk.px(18), 0))
-        s = rf
-        uk.RoundButton(s, self.pal,
+        uk.RoundButton(rf, self.pal,
                        i18n.t("把设置恢复成默认值…", "Reset the settings..."),
                        command=self.on_reset_settings, kind="soft",
-                       height=32).grid(row=0, column=0, sticky="w")
+                       height=32).pack(side="left")
+        uk.RoundButton(rf, self.pal,
+                       i18n.t("退出 DroidExtend", "Quit DroidExtend"),
+                       command=self._on_close, kind="soft",
+                       height=32).pack(side="left", padx=(uk.px(9), 0))
+
+        for _f in self._pages.values():
+            self._bind_page_wheel(_f)
+        self._bind_page_wheel(colcv)
 
         # Every setting change is written straight out, so even a crash leaves
         # the next start on the settings you picked.  add="+" keeps the existing
         # handlers (which fix up presets and the Q field) running first.
-        for cb in (self.res_cb, self.hz_cb, self.fps_cb, self.br_cb, self.rc_cb,
+        for cb in (self.res_cb, self.hz_cb, self.br_cb, self.rc_cb,
                    self.q_cb, self.enc_cb, self.pre_cb, self.be_cb, self.pos_cb):
             cb.bind("<<ComboboxSelected>>", self._changed_any, add="+")
         for chk in (self.mouse_chk, self.inst_chk):
@@ -1877,47 +1931,41 @@ class App(tk.Tk):
     def _open_settings(self, page=None):
         if getattr(self, "view_set", None) is None:
             return
-        try:
-            self.view_main.pack_forget()
-            self.view_set.pack(side="top", fill="both", expand=True)
-        except Exception:
-            return
+        self._show_view("set")
         self._show_page(page or getattr(self, "_page", "picture"))
         self.after(30, self._fit_settings)
         self.after(60, lambda: self.mon_var.set(self._monitor_text()))
 
     def _fit_settings(self):
-        # Tall enough for the longest page, so paging does not make
-        # the window jump under the cursor.
-        try:
-            self.update_idletasks()
-        except Exception:
-            return
-        need = 0
-        for f in getattr(self, "_pages", {}).values():
-            try:
-                need = max(need, f.winfo_reqheight())
-            except Exception:
-                pass
-        h = max(uk.px(620), min(need + uk.px(120),
-                                self.winfo_screenheight() - uk.px(100)))
+        # One height for every page.  A settings view that grows and shrinks as
+        # you page through it reads as a different window each time, and the
+        # long pages scroll instead (see _page_wheel).
         if getattr(self, "_maxed", False):
             return
+        if int(self.winfo_height()) < uk.px(640):
+            try:
+                self.geometry("%dx%d" % (self.winfo_width(), uk.px(640)))
+            except Exception:
+                pass
+
+    def _page_wheel(self, event):
+        cv = getattr(self, "_set_cv", None)
+        if cv is None:
+            return
         try:
-            self.geometry("%dx%d" % (self.winfo_width(), h))
+            cv.yview_scroll(int(-event.delta / 120), "units")
         except Exception:
             pass
+
+    def _bind_page_wheel(self, widget):
+        widget.bind("<MouseWheel>", self._page_wheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_page_wheel(child)
 
     def _close_settings(self):
         if getattr(self, "view_set", None) is None:
             return
-        try:
-            self.view_set.pack_forget()
-        except Exception:
-            pass
-        self.view_main.pack(side="top", fill="both", expand=True,
-                            padx=(uk.px(24), uk.px(24)),
-                            pady=(uk.px(4), uk.px(20)))
+        self._show_view("main")
         if not getattr(self, "_maxed", False):
             try:
                 self.geometry("%dx%d" % (self.winfo_width(), uk.px(640)))
@@ -2340,15 +2388,29 @@ class App(tk.Tk):
     def _res_changed(self, *_):
         custom = self.res_var.get() == _custom_label()
         if custom:
-            self.custom_frame.grid()
+            self.custom_line.pack(side="top", fill="x")
         else:
-            self.custom_frame.grid_remove()
+            self.custom_line.pack_forget()
         if custom and self.match_var.get():
             # the two are mutually exclusive: picking a custom size means the
             # user wants that size, not whatever the phone reports
             self.match_var.set(False)
         self._sync_match()
         self._maybe_retarget()
+
+    def _hz_changed(self, *_):
+        """One field, two numbers.
+
+        Refresh rate and frame rate were two boxes with the same answer in
+        them: the host runs at min(fps, panel Hz) anyway, so picking 120 Hz and
+        then 60 fps here only made it 60, and picking 60 Hz with 120 fps only
+        made it 60.  Whatever the panel is asked for is what the host aims at.
+        """
+        self.fps_var.set(self.hz_var.get())
+        self._layout_changed()
+
+    def _bitrate_changed(self, *_):
+        self._layout_changed()
 
     def _match_changed(self):
         if self.match_var.get() and self.res_var.get() == _custom_label():
@@ -2465,7 +2527,8 @@ class App(tk.Tk):
             self.q_hint_var.set(i18n.t(
                 "CBR 下 Q 只作为上限，码率恒定占满上限",
                 "Under CBR, Q is only a ceiling -- the bitrate stays pinned at the ceiling"))
-        self.q_cb.configure(state="normal" if rc == "vbr" else "disabled")
+        if getattr(self, "q_cb", None) is not None:
+            self.q_cb.configure(state="normal" if rc == "vbr" else "disabled")
 
     # ------------------------------------------------------ terms and privacy
     def _check_privacy(self):
@@ -2867,6 +2930,22 @@ class App(tk.Tk):
             m["hz"], m["left"], m["top"],
             i18n.t("  [主]", "  [primary]") if m["primary"] else "") for m in mons)
         return text or i18n.t("（无）", "(none)")
+
+    def _sync_detail(self, *_args):
+        """One dim line: where the virtual display is, and which card captures.
+
+        Both strings are already written by the worker (drv_var from vd.status,
+        gpu_var from the encoder probe); this only joins them, so the main
+        window needs no extra polling.
+        """
+        parts = []
+        drv = str(self.drv_var.get() or "").strip()
+        if drv:
+            parts.append(drv)
+        gpu = str(self.gpu_var.get() or "").strip()
+        if gpu and gpu not in ("-", i18n.t("——", "-")):
+            parts.append(i18n.t("采集显卡 ", "Capture via ") + gpu)
+        self.detail_var.set("  ·  ".join(parts))
 
     def _sync_driver_button(self, st):
         """Paint install / turn-on / installed on the left panel's button.
@@ -3618,33 +3697,39 @@ class App(tk.Tk):
             win.lift()
             win.focus_force()
         else:
-            win = tk.Toplevel(self)
+            pal = self.pal
+            win, body = self._sheet(
+                i18n.t("使用说明 — %s v%s", "Manual - %s v%s")
+                % (APP_NAME, APP_VERSION), 760, 620)
             self._manual_win = win
-            win.title(i18n.t("使用说明 — %s v%s", "Manual - %s v%s")
-                      % (APP_NAME, APP_VERSION))
-            win.configure(bg=BG)
-            win.geometry("880x720")
-            win.minsize(560, 400)
-            win.rowconfigure(0, weight=1)
-            win.columnconfigure(0, weight=1)
-            txt = tk.Text(win, bg="#0f1115", fg="#c8d0da", insertbackground=FG,
-                          font=("Microsoft YaHei UI", 10), wrap="word", relief="flat",
-                          padx=16, pady=12, spacing1=1, spacing3=1)
+            body.rowconfigure(0, weight=1)
+            body.columnconfigure(0, weight=1)
+            txt = tk.Text(body, bg=pal["mono_bg"], fg=pal["mono_fg"],
+                          insertbackground=pal["mono_fg"],
+                          font=self._fnt(11.5, mono=True), wrap="word",
+                          relief="flat", bd=0, highlightthickness=0,
+                          padx=uk.px(14), pady=uk.px(11),
+                          spacing1=uk.px(1), spacing3=uk.px(2),
+                          selectbackground=pal["sel"],
+                          selectforeground=pal["sel_fg"])
             txt.grid(row=0, column=0, sticky="nsew")
-            sb = ttk.Scrollbar(win, command=txt.yview)
-            sb.grid(row=0, column=1, sticky="ns")
+            sb = ttk.Scrollbar(body, command=txt.yview)
+            sb.grid(row=0, column=1, sticky="ns", padx=(uk.px(8), 0))
             txt.configure(yscrollcommand=sb.set)
             txt.insert("1.0", mn.text())
             txt.configure(state="disabled")
             self._manual_txt = txt
-            foot = ttk.Frame(win, padding=(12, 8))
-            foot.grid(row=1, column=0, columnspan=2, sticky="ew")
-            ttk.Button(foot, text=i18n.t("项目主页", "Project home"),
-                       command=lambda: self.open_url(REPO_URL)).pack(side="left")
-            ttk.Button(foot, text=i18n.t("反馈问题", "Report a problem"),
-                       command=lambda: self.open_url(ISSUES_URL)).pack(side="left", padx=6)
-            ttk.Button(foot, text=i18n.t("关闭", "Close"),
-                       command=win.destroy).pack(side="right")
+            foot = tk.Frame(body, bg=pal["bg"])
+            foot.grid(row=1, column=0, columnspan=2, sticky="ew",
+                      pady=(uk.px(12), 0))
+            uk.RoundButton(foot, pal, i18n.t("项目主页", "Project home"),
+                           kind="soft", height=32,
+                           command=lambda: self.open_url(REPO_URL)).pack(
+                               side="left", padx=(0, uk.px(8)))
+            uk.RoundButton(foot, pal, i18n.t("反馈问题", "Report a problem"),
+                           kind="soft", height=32,
+                           command=lambda: self.open_url(ISSUES_URL)).pack(
+                               side="left")
         if anchor and self._manual_txt is not None:
             txt = self._manual_txt
             try:
@@ -3697,16 +3782,13 @@ class App(tk.Tk):
             win.lift()
             win.focus_force()
             return
-        win = tk.Toplevel(self)
+        pal = self.pal
+        win, body = self._sheet(
+            i18n.t("请作者喝杯奶茶", "Buy the author a milk tea"), 700, 690)
         self._donate_win = win
-        win.title(i18n.t("请作者喝杯奶茶", "Buy the author a milk tea"))
-        win.configure(bg=BG)
-        win.geometry("700x680")
-        win.minsize(560, 520)
-        win.transient(self)
         head = tk.Label(
-            win, bg=BG, fg=FG, justify="left", anchor="w", wraplength=640,
-            font=("Microsoft YaHei UI", 10),
+            body, bg=pal["bg"], fg=pal["dim"], justify="left", anchor="w",
+            wraplength=uk.px(620), font=self._fnt(11.5),
             text=i18n.t(
                 "DroidExtend 免费、没有广告、没有内购、没有功能锁，代码全在 GitHub 上。\n"
                 "如果它帮你省下了一块便携屏，或者只是觉得好用，可以请作者喝一杯奶茶，" ""
@@ -3719,9 +3801,9 @@ class App(tk.Tk):
                 "tokens: the project really is written by an AI, and tokens are "" "
                 "its electricity bill.\n"
                 "Not donating is completely fine.  Nothing is behind a paywall."))
-        head.pack(fill="x", padx=18, pady=(16, 10))
-        row = ttk.Frame(win)
-        row.pack(fill="both", expand=True, padx=12, pady=6)
+        head.pack(fill="x", pady=(0, uk.px(12)))
+        row = tk.Frame(body, bg=pal["bg"])
+        row.pack(fill="both", expand=True)
         photos = []
         # grid, not pack: the two source images have different aspect ratios
         # (1200x1459 vs 1080x1620), so packed captions end up at different
@@ -3740,30 +3822,33 @@ class App(tk.Tk):
             # 1200 px is wider than the window and Tk can only scale by an
             # integer factor -- nearest is fine for a QR code as long as the
             # factor divides evenly, and 1200 = 4 x 300 does.
-            factor = max(1, int(round(img.width() / 300.0)))
+            factor = max(1, int(round(img.width() / 260.0)))
             if factor > 1:
                 img = img.subsample(factor, factor)
-            tk.Label(row, image=img, bg=BG, bd=0).grid(
-                row=0, column=col_i, padx=10, sticky="n")
-            tk.Label(row, text=caption, bg=BG, fg=FG,
-                     font=("Microsoft YaHei UI", 10)).grid(
-                row=1, column=col_i, pady=(6, 0))
+            tk.Label(row, image=img, bg=pal["bg"], bd=0).grid(
+                row=0, column=col_i, padx=uk.px(10), sticky="n")
+            tk.Label(row, text=caption, bg=pal["bg"], fg=pal["fg"],
+                     font=self._fnt(11)).grid(
+                row=1, column=col_i, pady=(uk.px(8), 0))
             photos.append(img)
         # Tk keeps no reference to a PhotoImage of its own; the list is what
         # stops the garbage collector from blanking both codes.
         self._donate_photos = photos
         if not photos:
-            tk.Label(row, bg=BG, fg="#9aa4b2", wraplength=600,
+            tk.Label(row, bg=pal["bg"], fg=pal["faint"], wraplength=uk.px(600),
+                     font=self._fnt(11.5), justify="left",
                      text=i18n.t(
                          "这个安装包里没有带赞赏码，可以到项目主页看：%s",
-                         "This build does not carry the QR codes -- see the "" "
-                         "project page: %s") % REPO_URL).pack(padx=18, pady=20)
-        foot = ttk.Frame(win, padding=(12, 8))
-        foot.pack(fill="x", side="bottom")
-        ttk.Button(foot, text=i18n.t("项目主页", "Project home"),
-                   command=lambda: self.open_url(REPO_URL)).pack(side="left")
-        ttk.Button(foot, text=i18n.t("关闭", "Close"),
-                   command=win.destroy).pack(side="right")
+                         "This build does not carry the QR codes -- see the "
+                         "project page: %s") % REPO_URL).pack(padx=uk.px(18),
+                                                              pady=uk.px(20))
+        foot = tk.Frame(body, bg=pal["bg"])
+        foot.pack(fill="x", side="bottom", pady=(uk.px(12), 0))
+        uk.RoundButton(foot, pal, i18n.t("项目主页", "Project home"),
+                       kind="soft", height=32,
+                       command=lambda: self.open_url(REPO_URL)).pack(side="left")
+        uk.RoundButton(foot, pal, i18n.t("关闭", "Close"), kind="primary",
+                       height=32, command=win.destroy).pack(side="right")
 
     def on_reset_settings(self):
         if not messagebox.askyesno(
@@ -3823,14 +3908,28 @@ class App(tk.Tk):
             # window: someone who just booted the machine did not ask to read
             # release notes.  It becomes a balloon; the full window is one
             # menu click away (工具 -> 检查更新), and manual=True still gets it.
+            #
+            # 2.2.1 -- that was too quiet.  Windows notifications are off on a
+            # lot of machines (focus assist, the app's notification switched
+            # off, a stripped-down Windows build), so people went several
+            # versions without being told there was one.  The startup check now
+            # opens the same window the menu opens -- once per version, and
+            # only when nothing is streaming: a window appearing over a running
+            # stream is the one interruption that actually costs something.
+            key = str(r["latest"]) + (tag or "")
             if not manual:
                 self._notify(
                     "update",
                     i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready")
                     % (r["latest"] + tag),
-                    i18n.t("你现在是 v%s。「工具 → 检查更新」可以现在就装。",
-                           "You are on v%s. Tools -> Check for updates installs it now.")
+                    i18n.t("你现在是 v%s。≡ → 关于 →「立刻检查一次」可以现在就装。",
+                           "You are on v%s. ≡ → About → Check now installs it now.")
                     % APP_VERSION)
+                streaming = bool(self.session and getattr(self.session, "running", False))
+                if not streaming and str(self.settings.get("update_offered", "") or "") != key:
+                    self.settings["update_offered"] = key
+                    self._save_settings()
+                    self.after(900, lambda: self._offer_update(r))
             else:
                 self._offer_update(r)
         else:
@@ -3863,78 +3962,87 @@ class App(tk.Tk):
                 self.open_url(r["url"])
             return
 
-        win = tk.Toplevel(self)
-        win.title(i18n.t("发现新版本 v%s", "Version v%s is available") % r["latest"])
-        win.configure(bg=BG)
-        win.transient(self)
-        win.minsize(560, 420)
-        win.rowconfigure(2, weight=1)
-        win.columnconfigure(0, weight=1)
+        pal = self.pal
+        win, body = self._sheet(
+            i18n.t("发现新版本 v%s", "Version v%s is available") % r["latest"],
+            700, 680)
+        body.rowconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
 
-        head = ttk.Frame(win, padding=(16, 14, 16, 6))
-        head.grid(row=0, column=0, sticky="ew")
-        ttk.Label(head, text=i18n.t("DroidExtend v%s 可以用了",
-                                    "DroidExtend v%s is ready") % r["latest"],
-                  style="Head.TLabel").pack(anchor="w")
         mb = (s.get("size") or 0) / 1048576.0
         when = ("  ·  %s" % r["published"]) if r.get("published") else ""
-        ttk.Label(head, text=i18n.t("你现在是 v%s%s  ·  安装包 %.1f MB",
-                                    "You are on v%s%s  ·  installer %.1f MB")
-                  % (APP_VERSION, when, mb), style="Dim.TLabel").pack(anchor="w", pady=(4, 0))
+        head = tk.Frame(body, bg=pal["bg"])
+        head.grid(row=0, column=0, sticky="ew", pady=(0, uk.px(10)))
+        self._lab(head, i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready")
+            % r["latest"], self._fnt(14.5, "bold"), pal["fg"]).pack(anchor="w")
+        self._lab(head, i18n.t("你现在是 v%s%s  ·  安装包 %.1f MB",
+                         "You are on v%s%s  ·  installer %.1f MB")
+            % (APP_VERSION, when, mb), self._fnt(11.5), pal["faint"]).pack(
+                anchor="w", pady=(uk.px(5), 0))
 
-        box = ttk.Frame(win, padding=(16, 0, 16, 0))
-        box.grid(row=2, column=0, sticky="nsew")
+        box = tk.Frame(body, bg=pal["bg"])
+        box.grid(row=1, column=0, sticky="nsew")
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
-        txt = tk.Text(box, bg="#0f1115", fg="#c8d0da", font=("Microsoft YaHei UI", 9),
-                      wrap="word", relief="flat", padx=12, pady=10, height=12)
+        txt = tk.Text(box, bg=pal["mono_bg"], fg=pal["mono_fg"],
+                      font=self._fnt(11, mono=True), wrap="word", relief="flat",
+                      bd=0, highlightthickness=0, padx=uk.px(12),
+                      pady=uk.px(10), height=12,
+                      selectbackground=pal["sel"],
+                      selectforeground=pal["sel_fg"])
         txt.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(box, command=txt.yview)
-        sb.grid(row=0, column=1, sticky="ns")
+        sb.grid(row=0, column=1, sticky="ns", padx=(uk.px(8), 0))
         txt.configure(yscrollcommand=sb.set)
         self._insert_notes(txt, self._notes_for(r))
         txt.configure(state="disabled")
 
         # 下载位置与「装完删包」放在这一屏，因为用户正是在这一刻才会想到它们。
-        opt = ttk.Frame(win, padding=(16, 10, 16, 0))
-        opt.grid(row=3, column=0, sticky="ew")
+        opt = tk.Frame(body, bg=pal["bg"])
+        opt.grid(row=2, column=0, sticky="ew", pady=(uk.px(12), 0))
         opt.columnconfigure(1, weight=1)
-        ttk.Label(opt, text=i18n.t("下载到", "Download to"),
-                  style="Dim.TLabel").grid(row=0, column=0, sticky="w")
+        self._lab(opt, i18n.t("下载到", "Download to"), self._fnt(11.5), pal["faint"]).grid(
+            row=0, column=0, sticky="w")
         dir_var = tk.StringVar(value=upd.update_dir(self.settings.get("update_dir", "")))
-        ttk.Label(opt, textvariable=dir_var, style="Dim.TLabel").grid(
-            row=0, column=1, sticky="w", padx=8)
-        ttk.Button(opt, text=i18n.t("更改…", "Change…"), width=9,
-                   command=lambda: self._pick_update_dir(dir_var)).grid(row=0, column=2)
+        self._lab(opt, "", self._fnt(11.5), pal["dim"], textvariable=dir_var).grid(
+            row=0, column=1, sticky="w", padx=uk.px(9))
+        uk.RoundButton(opt, pal, i18n.t("更改…", "Change…"), kind="soft",
+                       height=30, command=lambda: self._pick_update_dir(dir_var)
+                       ).grid(row=0, column=2)
         keep_var = tk.BooleanVar(value=bool(self.settings.get("delete_installer", True)))
-        ttk.Checkbutton(opt, variable=keep_var,
-                        text=i18n.t("安装完成后删掉下载的安装包",
-                                    "Delete the downloaded installer after installing")
-                        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        uk.RoundCheck(opt, pal, variable=keep_var,
+                      text=i18n.t("安装完成后删掉下载的安装包",
+                                  "Delete the downloaded installer after installing")
+                      ).grid(row=1, column=0, columnspan=3, sticky="w",
+                             pady=(uk.px(9), 0))
 
-        foot = ttk.Frame(win, padding=(16, 12, 16, 14))
-        foot.grid(row=4, column=0, sticky="ew")
-        ttk.Label(foot, text=i18n.t(
+        foot = tk.Frame(body, bg=pal["bg"])
+        foot.grid(row=3, column=0, sticky="ew", pady=(uk.px(14), 0))
+        self._lab(foot, i18n.t(
             "安装包从 GitHub 官方地址下载，安装前会校验大小、SHA256 和文件格式。\n"
             "本程序没有代码签名证书，所以完整性靠这个校验和保证，不靠签名。",
             "The installer comes from the official GitHub release and is checked for "
             "size, SHA256 and file format before anything is run.\n"
             "This project has no code-signing certificate, so integrity rests on that "
             "checksum, not on a signature."),
-                  style="Dim.TLabel", justify="left").pack(anchor="w", pady=(0, 10))
-        row = ttk.Frame(foot)
+            self._fnt(11.5), pal["faint"], justify="left").pack(anchor="w", pady=(0, uk.px(11)))
+        row = tk.Frame(foot, bg=pal["bg"])
         row.pack(fill="x")
-        ttk.Button(row, text=i18n.t("以后再说", "Later"),
-                   command=win.destroy).pack(side="left")
-        ttk.Button(row, text=i18n.t("完整更新日志", "All release notes"),
-                   command=self.on_show_changelog).pack(side="left", padx=8)
-        ttk.Button(row, text=i18n.t("打开发布页", "Open release page"),
-                   command=lambda: self.open_url(r["url"])).pack(side="left")
-        ttk.Button(row, text=i18n.t("下载并安装", "Download and install"),
-                   style="Go.TButton",
-                   command=lambda: (win.destroy(),
-                                    self._start_download(r, dir_var, keep_var))
-                   ).pack(side="right")
+        uk.RoundButton(row, pal, i18n.t("以后再说", "Later"), kind="ghost",
+                       height=34, command=win.destroy).pack(side="left")
+        uk.RoundButton(row, pal, i18n.t("完整更新日志", "All release notes"),
+                       kind="ghost", height=34,
+                       command=self.on_show_changelog).pack(
+                           side="left", padx=(uk.px(4), 0))
+        uk.RoundButton(row, pal, i18n.t("打开发布页", "Open release page"),
+                       kind="ghost", height=34,
+                       command=lambda: self.open_url(r["url"])).pack(
+                           side="left", padx=(uk.px(4), 0))
+        uk.RoundButton(row, pal, i18n.t("下载并安装", "Download and install"),
+                       kind="primary", height=34,
+                       command=lambda: (win.destroy(),
+                                        self._start_download(r, dir_var, keep_var))
+                       ).pack(side="right")
 
     def _notes_for(self, r):
         """本地更新日志打头，GitHub 上那份要是更长就接在后面。
@@ -3972,31 +4080,31 @@ class App(tk.Tk):
 
     def on_show_changelog(self):
         """完整更新日志 —— 更新弹窗里那 12 行放不下所有版本。"""
-        win = tk.Toplevel(self)
-        win.title("%s — %s" % (cl.translator(), APP_NAME))
-        win.configure(bg=BG)
-        win.transient(self)
-        win.minsize(560, 460)
-        win.rowconfigure(1, weight=1)
-        win.columnconfigure(0, weight=1)
-        ttk.Label(win, text="%s v%s" % (APP_NAME, APP_VERSION),
-                  style="Head.TLabel", padding=(16, 14, 16, 6)).grid(row=0, column=0, sticky="w")
-        box = ttk.Frame(win, padding=(16, 0, 16, 0))
+        pal = self.pal
+        win, body = self._sheet("%s — %s" % (cl.translator(), APP_NAME), 720, 660)
+        body.rowconfigure(1, weight=1)
+        body.columnconfigure(0, weight=1)
+        self._lab(body, "%s v%s" % (APP_NAME, APP_VERSION), self._fnt(14.5, "bold"), pal["fg"]).grid(
+            row=0, column=0, sticky="w", pady=(0, uk.px(10)))
+        box = tk.Frame(body, bg=pal["bg"])
         box.grid(row=1, column=0, sticky="nsew")
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
-        txt = tk.Text(box, bg="#0f1115", fg="#c8d0da", font=("Microsoft YaHei UI", 9),
-                      wrap="word", relief="flat", padx=12, pady=10)
+        txt = tk.Text(box, bg=pal["mono_bg"], fg=pal["mono_fg"],
+                      font=self._fnt(11, mono=True), wrap="word", relief="flat",
+                      bd=0, highlightthickness=0, padx=uk.px(12),
+                      pady=uk.px(10), selectbackground=pal["sel"],
+                      selectforeground=pal["sel_fg"])
         txt.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(box, command=txt.yview)
-        sb.grid(row=0, column=1, sticky="ns")
+        sb.grid(row=0, column=1, sticky="ns", padx=(uk.px(8), 0))
         txt.configure(yscrollcommand=sb.set)
         self._insert_notes(txt, cl.all_text())
         txt.configure(state="disabled")
-        foot = ttk.Frame(win, padding=(16, 12, 16, 14))
-        foot.grid(row=2, column=0, sticky="ew")
-        ttk.Button(foot, text=i18n.t("关闭", "Close"),
-                   command=win.destroy).pack(side="right")
+        foot = tk.Frame(body, bg=pal["bg"])
+        foot.grid(row=2, column=0, sticky="ew", pady=(uk.px(12), 0))
+        uk.RoundButton(foot, pal, i18n.t("关闭", "Close"), kind="primary",
+                       height=34, command=win.destroy).pack(side="right")
 
     def _insert_notes(self, txt, notes):
         """Show the release notes as readable text rather than raw Markdown.
@@ -4043,28 +4151,30 @@ class App(tk.Tk):
         remove_after = bool(keep_var.get()) if keep_var is not None else True
         self._dl_cancel = False
 
-        win = tk.Toplevel(self)
-        win.title(i18n.t("正在下载 DroidExtend %s", "Downloading DroidExtend %s") % r["latest"])
-        win.configure(bg=BG)
-        win.transient(self)
-        win.resizable(False, False)
-        body = ttk.Frame(win, padding=16)
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text=i18n.t("正在下载 v%s 的安装包…",
-                                    "Downloading the v%s installer...") % r["latest"],
-                  style="Head.TLabel").pack(anchor="w")
-        ttk.Label(body, text=name, style="Dim.TLabel").pack(anchor="w", pady=(3, 12))
-        bar = ttk.Progressbar(body, mode="determinate", length=420, maximum=1000)
+        pal = self.pal
+        win, body = self._sheet(
+            i18n.t("正在下载 DroidExtend %s", "Downloading DroidExtend %s")
+            % r["latest"], 520, 270)
+        self._lab(body, i18n.t("正在下载 v%s 的安装包…", "Downloading the v%s installer...")
+            % r["latest"], self._fnt(14.5, "bold"), pal["fg"]).pack(anchor="w")
+        self._lab(body, name, self._fnt(11.5), pal["faint"]).pack(anchor="w",
+                                                pady=(uk.px(4), uk.px(13)))
+        bar = ttk.Progressbar(body, mode="determinate", length=uk.px(420),
+                              maximum=1000)
         bar.pack(fill="x")
-        note = ttk.Label(body, text=i18n.t("正在连接…", "Connecting..."), style="Dim.TLabel")
-        note.pack(anchor="w", pady=(8, 12))
+        note = self._lab(body, i18n.t("正在连接…", "Connecting..."), self._fnt(11.5), pal["faint"])
+        note.pack(anchor="w", pady=(uk.px(9), uk.px(13)))
 
         def do_cancel():
             self._dl_cancel = True
-            cancel.configure(state="disabled")
+            try:
+                cancel.set_enabled(False)
+            except Exception:
+                pass
             note.configure(text=i18n.t("正在取消…", "Cancelling..."))
 
-        cancel = ttk.Button(body, text=i18n.t("取消", "Cancel"), command=do_cancel)
+        cancel = uk.RoundButton(body, pal, i18n.t("取消", "Cancel"),
+                                kind="soft", height=32, command=do_cancel)
         cancel.pack(anchor="e")
         win.protocol("WM_DELETE_WINDOW", do_cancel)
 
@@ -4178,20 +4288,17 @@ class App(tk.Tk):
 
     def _ask_close_action(self):
         """× 被点了、设置还是「每次询问」。返回 "tray" / "quit" / None（取消）。"""
-        top = tk.Toplevel(self)
-        top.title(i18n.t("关闭窗口", "Close the window"))
-        top.transient(self)
-        top.resizable(False, False)
-        body = ttk.Frame(top, padding=16)
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text=i18n.t("关闭窗口时想怎样？",
-                                    "What should closing the window do?"),
-                  style="H2.TLabel").pack(anchor="w")
-        ttk.Label(body, text=i18n.t(
+        pal = self.pal
+        top, body = self._sheet(i18n.t("关闭窗口", "Close the window"), 480, 270)
+        self._lab(body, i18n.t("关闭窗口时想怎样？",
+                         "What should closing the window do?"),
+            self._fnt(14, "bold"), pal["fg"]).pack(anchor="w")
+        self._lab(body, i18n.t(
             "最小化到托盘后程序继续在后台跑，投屏不会断；双击托盘图标可以叫回来。",
             "Minimising keeps the program running in the background, so the stream is not "
             "interrupted. Double-click the tray icon to bring it back."),
-            style="Dim.TLabel", wraplength=430, justify="left").pack(anchor="w", pady=(6, 14))
+            self._fnt(11.5), pal["faint"], wraplength=uk.px(430),
+            justify="left").pack(anchor="w", pady=(uk.px(7), uk.px(16)))
         again = tk.BooleanVar(value=False)
         result = {"v": None}
 
@@ -4203,17 +4310,20 @@ class App(tk.Tk):
                 self.log("关闭窗口的行为已记住：%s" % self._close_action_label(value))
             top.destroy()
 
-        row = ttk.Frame(body)
+        row = tk.Frame(body, bg=pal["bg"])
         row.pack(fill="x")
-        ttk.Button(row, text=i18n.t("最小化到托盘", "Minimise to the tray"),
-                   command=lambda: pick("tray")).pack(side="left")
-        ttk.Button(row, text=i18n.t("直接退出", "Quit"),
-                   command=lambda: pick("quit")).pack(side="left", padx=8)
-        ttk.Button(row, text=i18n.t("取消", "Cancel"),
-                   command=top.destroy).pack(side="right")
-        ttk.Checkbutton(body, text=i18n.t("不再提醒（记住这次的选择）",
-                                          "Do not ask again (remember this choice)"),
-                        variable=again).pack(anchor="w", pady=(14, 0))
+        uk.RoundButton(row, pal, i18n.t("最小化到托盘", "Minimise to the tray"),
+                       kind="primary", height=34,
+                       command=lambda: pick("tray")).pack(side="left")
+        uk.RoundButton(row, pal, i18n.t("直接退出", "Quit"), kind="soft",
+                       height=34, command=lambda: pick("quit")).pack(
+                           side="left", padx=(uk.px(8), 0))
+        uk.RoundButton(row, pal, i18n.t("取消", "Cancel"), kind="ghost",
+                       height=34, command=top.destroy).pack(side="right")
+        uk.RoundCheck(body, pal, variable=again,
+                      text=i18n.t("不再提醒（记住这次的选择）",
+                                  "Do not ask again (remember this choice)")
+                      ).pack(anchor="w", pady=(uk.px(16), 0))
         self._center_over(top)
         try:
             top.grab_set()
@@ -4224,24 +4334,22 @@ class App(tk.Tk):
 
     def on_close_behavior(self):
         """工具菜单：改「关闭窗口时的行为」这个默认值。"""
-        top = tk.Toplevel(self)
-        top.title(i18n.t("关闭窗口时的行为", "What closing the window does"))
-        top.transient(self)
-        top.resizable(False, False)
-        body = ttk.Frame(top, padding=16)
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text=i18n.t("点 × 的时候：", "When the close button is pressed:"),
-                  style="H2.TLabel").pack(anchor="w", pady=(0, 8))
+        pal = self.pal
+        top, body = self._sheet(
+            i18n.t("关闭窗口时的行为", "What closing the window does"), 520, 340)
+        self._lab(body, i18n.t("点 × 的时候：", "When the close button is pressed:"),
+            self._fnt(14, "bold"), pal["fg"]).pack(anchor="w", pady=(0, uk.px(10)))
         var = tk.StringVar(value=self.close_action)
         for value, label in (("ask", i18n.t("每次问我", "Ask me every time")),
                              ("tray", i18n.t("最小化到托盘", "Minimise to the tray")),
                              ("quit", i18n.t("直接退出", "Quit"))):
-            ttk.Radiobutton(body, text=label, value=value,
-                            variable=var).pack(anchor="w", pady=2)
-        ttk.Label(body, text=i18n.t(
+            uk.RoundRadio(body, pal, text=label, value=value,
+                          variable=var).pack(anchor="w", pady=uk.px(4))
+        self._lab(body, i18n.t(
             "选「最小化到托盘」时，开机自启也会跟着缩在托盘里开始。",
             "With \"minimise to the tray\", starting with Windows also starts hidden."),
-            style="Dim.TLabel", wraplength=430, justify="left").pack(anchor="w", pady=(8, 0))
+            self._fnt(11.5), pal["faint"], wraplength=uk.px(430),
+            justify="left").pack(anchor="w", pady=(uk.px(12), 0))
 
         def ok():
             self.close_action = var.get()
@@ -4253,11 +4361,13 @@ class App(tk.Tk):
                 self._sync_autostart()
             top.destroy()
 
-        row = ttk.Frame(body)
-        row.pack(fill="x", pady=(14, 0))
-        ttk.Button(row, text=i18n.t("确定", "OK"), command=ok).pack(side="right")
-        ttk.Button(row, text=i18n.t("取消", "Cancel"),
-                   command=top.destroy).pack(side="right", padx=8)
+        row = tk.Frame(body, bg=pal["bg"])
+        row.pack(fill="x", pady=(uk.px(16), 0))
+        uk.RoundButton(row, pal, i18n.t("确定", "OK"), kind="primary",
+                       height=34, command=ok).pack(side="right")
+        uk.RoundButton(row, pal, i18n.t("取消", "Cancel"), kind="ghost",
+                       height=34, command=top.destroy).pack(
+                           side="right", padx=(0, uk.px(8)))
         self._center_over(top)
         try:
             top.grab_set()

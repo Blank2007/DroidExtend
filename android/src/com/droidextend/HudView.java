@@ -79,6 +79,7 @@ public class HudView extends View {
     private String status = "";
     private boolean streaming;
     private boolean panelWanted = true;
+    private boolean gearShown = true;
     private boolean everConnected;
 
     // Button position, as a fraction of the view, remembered across runs.
@@ -174,6 +175,18 @@ public class HudView extends View {
 
     public void setPanelWanted(boolean on) {
         panelWanted = on;
+        invalidate();
+    }
+
+    /**
+     * Hide the button itself.
+     *
+     * The settings sheet already covers the picture with its own scrim, and a
+     * button floating above that scrim at full brightness reads as something
+     * you can still press -- it cannot be, because the sheet is in the way.
+     */
+    public void setGearShown(boolean on) {
+        gearShown = on;
         invalidate();
     }
 
@@ -290,7 +303,9 @@ public class HudView extends View {
         } else {
             drawWaiting(c);
         }
-        drawGear(c);
+        if (gearShown) {
+            drawGear(c);
+        }
     }
 
     /**
@@ -413,7 +428,7 @@ public class HudView extends View {
                 // Only the button is ours.  Returning false for everything else
                 // is what keeps the desktop underneath fully clickable;
                 // FrameLayout then hands this touch to the surface.
-                if (!onGear(e)) {
+                if (!gearShown || !onGear(e)) {
                     return false;
                 }
                 dragging = true;

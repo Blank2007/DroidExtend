@@ -168,7 +168,7 @@ DroidExtend 使用说明   v{ver}
        ToDesk / 向日葵这类远程软件也枚举不到它，重启之后它仍然是关着的。
      · 只移出桌面 —— 退出时不碰驱动、不弹授权，屏还在系统里，只是不在桌面上。
      这两档都只影响退出时；平时的「停止」只摘桌面、不碰驱动。
-     想马上关掉：工具菜单「彻底关闭虚拟屏」。程序本身已经以管理员身份运行，
+     想马上关掉：≡ -> 设备 -> 诊断与工具 ->「彻底关闭虚拟屏」。程序本身已经以管理员身份运行，
      所以这一步不会额外弹授权。
      注意不能靠把驱动设置里的 <count> 写成 0 来实现：驱动把 0 当成非法值，照样建一块屏。
 
@@ -208,18 +208,18 @@ DroidExtend 使用说明   v{ver}
      · 「虚拟显示器驱动已安装」= 装好了、正开着，这时按钮是灰的。
 
   Q: 想彻底把虚拟显示器驱动从系统里去掉？（1.9.1）
-  A: 菜单 工具 -> 卸载虚拟显示器驱动…。它会删掉驱动包和虚拟屏的设备节点，
+  A: ≡ -> 设备 ->「卸载虚拟显示器驱动…」。它会删掉驱动包和虚拟屏的设备节点，
      但保留 C:\\VirtualDisplayDriver 里的分辨率表（自己加过的尺寸都还在）
      和本程序的全部设置。卸载后投屏用不了，要投屏时再装一次。
      正在投屏会先自动「停止」，不会留下一块挂在桌面上的空屏。
 
   Q: 通知能关吗？能只通知失败、不通知成功？（1.9.1）
-  A: 能。顶部菜单「通知」里是一个总开关加七类分开勾：投屏开始（自动那次）/
+  A: 能。设置里的「通知」页是一个总开关加七类分开勾：投屏开始（自动那次）/
      手动点开始也通知 / 失败或中断 / 驱动安装启用卸载 / 有新版本 / 手机端
      App 需要更新 / 其它提示。默认除了「手动点开始也通知」之外都是开的——
      自己刚点完的按钮再弹一条，多数人嫌吵。
      「发一条测试通知」可以立刻验证通不通。发不出来最常见的原因是 Windows
-     设置里关掉了本程序的通知，或者开着「专注助手」，菜单里有「Windows 通知设置…」。
+     设置里关掉了本程序的通知，或者开着「专注助手」，同一页有「Windows 通知设置…」。
 
   Q: 开机自动开始投屏，结果一直没开始 / 没画面？（1.9.0）
   A: 两个勾都要在：右栏「开机自动启动」和「开机后自动开始投屏」。
@@ -259,9 +259,9 @@ DroidExtend 使用说明   v{ver}
 【七、设置、更新与文件位置】
   · 你改过的参数会自动记住，下次打开软件还是上次的配置。
   · 设置文件： 程序目录里的 settings.json（1.6.6 起所有数据都在安装目录里）
-    （菜单 文件 -> 打开数据目录 可以直接打开）
-  · 菜单 工具 -> 检查更新 会去 GitHub 上查有没有新版本。
-  · 同一个菜单里的「也检查测试版（beta）」打开后，检查更新会把测试版一起看。
+    （≡ -> 关于 ->「打开数据目录」可以直接打开）
+  · ≡ -> 关于 ->「立刻检查一次」会去 GitHub 上查有没有新版本。
+  · 同一页的「也检查测试版（beta）」打开后，检查更新会把测试版一起看。
     测试版是拿来试新东西的，可能不稳；不想尝鲜就别勾。
   · 程序目录里的 README.md 有更完整的说明；开发日志.md 记录了它是怎么做出来的。
 
@@ -484,8 +484,8 @@ DroidExtend manual   v{ver}
      * Just take it off the desktop -- the driver is left alone and nothing asks
        for approval; the screen still exists, it is simply not on the desktop.
      Both choices only apply when the program exits; a plain Stop just takes the
-     screen off the desktop and touches neither.  To do it right now, use Tools
-     -> "Shut the virtual display down for real".  The program already runs as
+     screen off the desktop and touches neither.  To do it right now, use ≡ -> Device -> Diagnosis
+     and tools -> "Shut the virtual screen down".  The program already runs as
      administrator, so that step does not ask for approval.
      Writing <count> 0 into the driver settings does NOT achieve this: the
      driver treats 0 as invalid and creates one monitor anyway.
@@ -515,7 +515,7 @@ DroidExtend manual   v{ver}
   A: Since 1.6.8 the first × asks once: minimize to the tray (the program keeps
      running in the background, the stream stays up) or quit, with a
      "do not ask again (remember this choice)" box next to them. To change it
-     later use Tools -> Closing behaviour..., where "ask me every time" is always
+     later use ≡ -> Start-up and closing -> "Change...", where "ask me every time" is always
      available.
 
   Q: Can a tablet standing up act as a tall second screen, and why is the
@@ -553,21 +553,21 @@ DroidExtend manual   v{ver}
      . "The virtual display driver is installed" -- installed and running, greyed out.
 
   Q: How do I remove the virtual display driver completely? (1.9.1)
-  A: Tools -> Remove the virtual display driver...  It deletes the driver package and
+  A: ≡ -> Device -> Remove the virtual display driver...  It deletes the driver package and
      the device node, and keeps both the resolution table in C:\\VirtualDisplayDriver
      (every size you added is still there) and all of this program's settings.
      Streaming will not work until the driver is installed again.  A running stream is
      stopped first, so no empty screen is left on the desktop.
 
   Q: Can notifications be turned off, or limited to failures? (1.9.1)
-  A: Yes.  The "Notifications" menu at the top has a master switch and one box per
+  A: Yes.  The Notifications page in settings has a master switch and one box per
      kind: the stream started by itself / also when I press Start myself / failed or
      broke off / driver installed, turned on or removed / a newer version / the phone
      app needs updating / everything else.  All are on by default except "also when I
      press Start myself", which is noise for most people.
      "Send a test notification" says straight away whether it works.  When it does not,
      the usual reason is Windows itself: notifications for this app turned off, or
-     Focus Assist on.  The menu links to the Windows settings.
+     Focus Assist on.  The same page links to the Windows settings.
 
   Q: The stream should start by itself at boot, but nothing happens? (1.9.0)
   A: Both boxes have to be ticked: "Start with Windows" and "Stream after boot".
@@ -614,9 +614,9 @@ DroidExtend manual   v{ver}
   . Your settings are remembered; the next launch starts where you left off.
   . Settings file: settings.json in the program folder (since 1.6.6 every file the
     program writes lives in the install folder)
-    (File -> Open data folder opens it for you)
-  . Tools -> Check for updates asks GitHub whether a newer version exists.
-  . Tick "Include beta releases" in the same menu and that check looks at betas too.
+    (≡ -> About -> "Open the data folder" opens it for you)
+  . ≡ -> About -> "Check now" asks GitHub whether a newer version exists.
+  . Tick "Include beta releases" on the same page and that check looks at betas too.
     A beta exists to try new things and can be rough -- leave it off if you do not want that.
   . README.md in the program folder has the longer story, and the development log
     (Chinese) records how the thing was built.

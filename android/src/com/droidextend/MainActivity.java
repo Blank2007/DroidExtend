@@ -364,6 +364,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (sheet != null) {
             return;
         }
+        if (hud != null) {
+            hud.setGearShown(false);
+        }
         final FrameLayout scrim = new FrameLayout(this);
         scrim.setBackgroundColor(0x99000000);
         scrim.setOnClickListener(new View.OnClickListener() {
@@ -390,7 +393,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         TextView title = new TextView(this);
         title.setText(Lang.t("显示设置", "Display settings"));
         title.setTextColor(getResources().getColor(R.color.hud_text));
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         card.addView(title);
 
@@ -519,8 +522,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         // phone will actually find them -- not only in the README.
         TextView touchTitle = new TextView(this);
         touchTitle.setText(Lang.t("触摸操作", "Touch controls"));
-        touchTitle.setTextColor(getResources().getColor(R.color.hud_text));
-        touchTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        // Section headings are the host window's: dim, 12.5sp, medium.  White
+        // 14sp made one heading the loudest thing on the sheet.
+        touchTitle.setTextColor(getResources().getColor(R.color.hud_dim));
+        touchTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         touchTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         touchTitle.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(4)));
         card.addView(touchTitle);
@@ -597,8 +602,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         // manufacturer settings pages, so all we can do is hand out the links.
         TextView kaTitle = new TextView(this);
         kaTitle.setText(Lang.t("后台保活", "Staying alive in the background"));
-        kaTitle.setTextColor(getResources().getColor(R.color.hud_text));
-        kaTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        kaTitle.setTextColor(getResources().getColor(R.color.hud_dim));
+        kaTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         kaTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         kaTitle.setPadding(0, Math.round(dp(14)), 0, Math.round(dp(4)));
         card.addView(kaTitle);
@@ -915,6 +920,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         // removes the view it was given, not whatever "sheet" points at then.
         final View gone = sheet;
         sheet = null;
+        if (hud != null) {
+            hud.setGearShown(true);
+        }
         Anim.out(gone, this, prefs, new Runnable() {
             @Override
             public void run() {
