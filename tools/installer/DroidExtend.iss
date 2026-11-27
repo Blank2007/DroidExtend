@@ -32,7 +32,7 @@
 
 #define P "..\.."
 #define AppName "DroidExtend"
-#define AppVer "2.4.2-beta2"
+#define AppVer "2.4.2-beta3"
 
 [Setup]
 AppId={{7C4E1A62-9D3B-4F58-9E21-5B7A0C3D6E14}

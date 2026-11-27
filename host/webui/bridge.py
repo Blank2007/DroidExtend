@@ -4,6 +4,7 @@ Every method here returns plain data: pywebview turns the return value into
 JSON, so nothing that is not a dict/list/str/number may escape.  The window
 commands live here too because the page has no way to reach Win32.
 """
+import inspect
 import os
 import queue
 import threading
@@ -17,30 +18,50 @@ import window as fx
 
 class Bridge(object):
     def __init__(self, core, win=None):
-        self.core = core
-        self.win = win          # window.Win, once the handle is known
-        self.view = None        # the pywebview window, for quit/dialogs
-        self.tray = None
+        self._core = core
+        self._win = win          # window.Win, once the handle is known
+        self._view = None        # the pywebview window, for quit/dialogs
+        self._tray = None
         self._tray_q = queue.Queue()
         self._tray_thread = None
+
+    def __dir__(self):
+        # pywebview walks every public attribute of the js_api object and recurses
+        # into whatever is not a function.  The window, the core and the tray are
+        # objects, so that walk used to crawl from the .NET window into
+        # AccessibilityObject.Bounds.Empty... until it hit "maximum recursion
+        # depth exceeded" -- and every retry made the message longer, which is how
+        # a 10 MB log and a frozen window happened.  Only methods are callable from
+        # the page, so only methods are listed.
+        out = []
+        for n in object.__dir__(self):
+            if n.startswith("_"):
+                continue
+            try:
+                v = getattr(self, n)
+            except Exception:
+                continue
+            if inspect.ismethod(v) or inspect.isfunction(v):
+                out.append(n)
+        return out
 
     # ------------------------------------------------------------- the page
     def snapshot(self):
         try:
-            return self.core.snapshot()
+            return self._core.snapshot()
         except Exception:
             return {"error": traceback.format_exc(limit=2)}
 
     def logs(self, seq=0):
         try:
-            return self.core.log_since(seq)
+            return self._core.log_since(seq)
         except Exception:
             return []
 
     def act(self, name, payload=None):
         """One entry point for every button on the page."""
         payload = payload or {}
-        c = self.core
+        c = self._core
         try:
             if name == "set":
                 return c._set_field(payload.get("field"), payload.get("value"))
@@ -113,7 +134,7 @@ class Bridge(object):
 
     def _reset_settings(self):
         """Ask first, then hand it to Core -- the old button had the same two steps."""
-        v = self.view
+        v = self._view
         ok = True
         if v is not None:
             try:
@@ -123,17 +144,17 @@ class Bridge(object):
             except Exception:
                 ok = True
         if ok:
-            self.core.reset_settings()
+            self._core.reset_settings()
 
     def quit_app(self):
         """Close for real: the page asked for it and the settings agree."""
-        self.core._closing = True
+        self._core._closing = True
         self.stop_tray()
         try:
-            self.core.session.stop()
+            self._core.session.stop()
         except Exception:
             pass
-        view = self.view
+        view = self._view
         if view is not None:
             try:
                 view.destroy()
@@ -143,31 +164,31 @@ class Bridge(object):
     # ---------------------------------------------------------------- the tray
     def start_tray(self):
         """Put the icon in the notification area; False if this system has none."""
-        if self.tray is not None:
+        if self._tray is not None:
             return True
         try:
             import tray as tm
         except Exception:
             return False
         if not tm.available():
-            self.core.log("这个系统上用不了托盘图标。", "err")
+            self._core.log("这个系统上用不了托盘图标。", "err")
             return False
         icon = None
         for cand in ("icon.ico", "DroidExtend.ico", "app.ico"):
-            p = os.path.join(self.core.app_root, cand)
+            p = os.path.join(self._core.app_root, cand)
             if os.path.isfile(p):
                 icon = p
                 break
-        self.tray = tm.Tray(
-            tip="%s v%s" % (self.core.app_name, self.core.version),
+        self._tray = tm.Tray(
+            tip="%s v%s" % (self._core.app_name, self._core.version),
             on_command=self._tray_q.put,
             icon=icon,
             items=[(tm.CMD_SHOW, "显示主窗口"),
                    (None, None),
                    (tm.CMD_QUIT, "完全退出")],
-            log=self.core.log)
-        if not self.tray.start():
-            self.tray = None
+            log=self._core.log)
+        if not self._tray.start():
+            self._tray = None
             return False
         self._tray_thread = threading.Thread(target=self._tray_loop,
                                              name="dx-tray", daemon=True)
@@ -185,10 +206,10 @@ class Bridge(object):
                     self.quit_app()
                     return
             except Exception:
-                self.core.log("托盘命令失败: %s" % traceback.format_exc(limit=1), "err")
+                self._core.log("托盘命令失败: %s" % traceback.format_exc(limit=1), "err")
 
     def stop_tray(self):
-        t, self.tray = self.tray, None
+        t, self._tray = self._tray, None
         if t is not None:
             try:
                 t.stop()
@@ -196,12 +217,12 @@ class Bridge(object):
                 pass
 
     def show_window(self):
-        if self.win is not None:
+        if self._win is not None:
             try:
-                self.win.show()
+                self._win.show()
             except Exception:
                 pass
-        v = self.view
+        v = self._view
         if v is not None:
             try:
                 v.show()
@@ -211,17 +232,17 @@ class Bridge(object):
     def hide_to_tray(self):
         """Hide to the notification area; a system without one just minimizes."""
         if not self.start_tray():
-            if self.win is not None:
-                self.win.minimize()
+            if self._win is not None:
+                self._win.minimize()
             return False
-        self.core.log("已缩到托盘，双击托盘图标可以叫回来。")
-        if self.win is not None:
-            self.win.hide()
+        self._core.log("已缩到托盘，双击托盘图标可以叫回来。")
+        if self._win is not None:
+            self._win.hide()
         return True
 
     def close_asked(self):
         """The window's X: ask / hide to the tray / quit, per the settings."""
-        action = str(self.core.settings.get("close_action", "ask") or "ask")
+        action = str(self._core.settings.get("close_action", "ask") or "ask")
         if action == "quit":
             self.quit_app()
             return "quit"
@@ -232,12 +253,12 @@ class Bridge(object):
 
     # ----------------------------------------------------------- the window
     def drag(self, hit):
-        if self.win is not None:
-            fx.Dragger(self.win).start(int(hit))
+        if self._win is not None:
+            fx.Dragger(self._win).start(int(hit))
         return True
 
     def win(self, action):
-        w = self.win
+        w = self._win
         if w is None:
             return False
         if action == "min":

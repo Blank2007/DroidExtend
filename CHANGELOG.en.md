@@ -5739,6 +5739,24 @@ The packaged build (`DroidExtend.exe`, 6 215 531 bytes) was started from the rea
 - Packaging must be verified from the real checkout path. `D:\probe_test\` has no spaces; succeeding there proves the code is right, not that a user can install it.
 - When something is "not there", check the instrument before the code. Forty of the four hours here went into suspecting CSS, and CSS was never wrong.
 
+### 55.10 beta2 froze on start-up: pywebview goes through your objects
+
+Less than half an hour after 2.4.2-beta2 went out, the copy installed under `D:\DroidExtend` froze the moment it opened, and `%TEMP%\DroidExtend-boot.log` grew to 10 MB in tens of seconds, repeating one line:
+
+```
+[pywebview] Error while processing view.native.AccessibilityObject.Bounds.Empty.Empty.Empty...GenericSansSerif.Families: maximum recursion depth exceeded
+```
+
+When pywebview injects `window.pywebview.api` it calls `get_functions(window._js_api)` (`webview/util.py:180`): `for name in dir(obj)`, recursing into every attribute that is not a function and still carries `__module__`. My `Bridge` had four public attributes -- `self.view` (the pywebview Window), `self.win`, `self.core`, `self.tray`. As soon as `view` was assigned by the time the page loaded, the walk went `window -> native (.NET Form) -> AccessibilityObject -> Bounds -> Empty -> ...` to the recursion limit; each failure wrapped the previous message inside a fresh `Error while processing`, so every line was longer than the last, and the UI thread never got out of that message. The window stops responding.
+
+It did not reproduce on my machine because `bridge.view` is assigned in `after_start`, after the page load -- a fast machine escapes, a slow one (or an install under `D:\DroidExtend`) gets the other order. The fix: the four attributes became `_view/_win/_core/_tray`, and `Bridge` grew a `__dir__` that returns only public methods (the page only ever calls `snapshot`, `logs`, `act`, `drag`, `win`).
+
+Lessons:
+
+- Before handing an object to a framework as `js_api`, ask whether it reflects through you. A framework's walk goes into worlds you do not know, and those worlds have no floor.
+- Not reproducing is not the same as not being broken. A bug that only turns on timing is guaranteed to reproduce on somebody else's machine.
+- When a bug can push a log to 10 MB, the logging is not what is wrong -- there is a loop: error, then the error written into a new error, then error again.
+
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

@@ -360,12 +360,12 @@ def main():
     )
 
     def after_start(window):
-        bridge.view = window
+        bridge._view = window
         time.sleep(1.2)
         hwnd = fx.find_hwnd(TITLE, os.getpid())
         if hwnd:
             win = fx.Win(hwnd, scale)
-            bridge.win = win
+            bridge._win = win
             win.dark_frame()
             if x is not None:
                 win.set_rect(x, y, w, h)
