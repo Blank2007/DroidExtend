@@ -339,6 +339,15 @@ def _logical(px_size, scale):
     return max(1, int(round(px_size / (scale or 1.0))))
 
 
+def _push_maxed(window, maxed):
+    """Tell the page whether the window is maximized, so the icon can follow."""
+    try:
+        window.evaluate_js("window.setMaxed && window.setMaxed(%s)"
+                           % ("true" if maxed else "false"))
+    except Exception:
+        pass
+
+
 def main():
     scale = _scale()
     if not _webview2_installed():
@@ -364,12 +373,20 @@ def main():
         time.sleep(1.2)
         hwnd = fx.find_hwnd(TITLE, os.getpid())
         if hwnd:
-            win = fx.Win(hwnd, scale)
+            win = fx.Win(hwnd, scale, on_state=lambda m: _push_maxed(window, m))
             bridge._win = win
-            win.dark_frame()
+            dark = core.settings.get("theme", "dark") != "light"
+            win.dark_frame(dark)
+            win.frame_colors(fx.FRAME_BG_DARK if dark else fx.FRAME_BG_LIGHT,
+                             fx.FRAME_LINE_DARK if dark else fx.FRAME_LINE_LIGHT)
             if x is not None:
                 win.set_rect(x, y, w, h)
-            win.round_corners()
+            _push_maxed(window, win.is_zoomed())
+        try:
+            window.events.closing += bridge.on_closing
+        except Exception:
+            pass
+        core.on_quit = bridge.quit_app
         bridge.start_tray()
         core.log("界面已就绪")
         if MINIMIZED:

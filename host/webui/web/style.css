@@ -283,3 +283,17 @@ body.maxed #edges { display: none; }
 .modal .qrc img { width: 190px; height: auto; background: #fff; padding: 8px;
   border-radius: 8px; image-rendering: auto; }
 .modal .qrcap { font-size: 12px; color: var(--dim); }
+
+/* ----------------------------------------------------------------- updates */
+.modal .updbar { height:4px; border-radius:2px; background:var(--line2);
+  overflow:hidden; margin:14px 0 6px; }
+.modal .updbar > i { display:block; height:100%; width:0; background:var(--green-lt);
+  transition: width .2s linear; }
+.modal .updnote { font-size:12px; color:var(--dim); min-height:16px; }
+.modal .updbar.hidden, .modal .updnote.hidden { display:none; }
+.toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%);
+  max-width:620px; padding:10px 16px; border-radius:10px; z-index:80;
+  background:var(--card); border:1px solid var(--line); color:var(--fg);
+  font-size:13px; line-height:1.55; white-space:pre-wrap;
+  box-shadow:0 12px 32px rgba(0,0,0,.45); }
+.toast.hidden { display:none; }

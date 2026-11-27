@@ -12,6 +12,16 @@ async function call(name, ...args) {
   try { return await a[name](...args); } catch (e) { console.error(name, e); return null; }
 }
 
+/* The window is a real window now: Python tells the page when the system
+   maximized or restored it, so the button icon and the layout follow along. */
+window.setMaxed = (on) => {
+  S.maxed = !!on;
+  document.body.classList.toggle("maxed", S.maxed);
+  const b = $("#btnMax");
+  if (b) b.title = S.maxed ? "还原" : "最大化";
+  if (b) b.textContent = S.maxed ? "❐" : "▢";
+};
+
 /* ------------------------------------------------------------------ drawing */
 function setText(id, v) { const e = document.getElementById(id); if (e) e.textContent = v; }
 function setDot(kind) {
@@ -78,7 +88,7 @@ function addLogs(lines) {
 
 async function pump() {
   const snap = await call("snapshot");
-  if (snap && !snap.error) { S.snap = snap; renderMain(snap); offerUpdate(snap.update); offerAsk(snap.ask); }
+  if (snap && !snap.error) { S.snap = snap; renderMain(snap); offerUpdate(snap.update); offerAsk(snap.ask); pumpUpd(snap); }
   if (S.snap) {
     const lines = await call("logs", S.seq);
     if (lines && lines.length) {
@@ -139,32 +149,32 @@ function bindSelects() {
 /* ------------------------------------------------------------------ window */
 function bindWindow() {
   const tb = $("#tb");
+  // The page owns the title bar band: window.py deliberately reports it as client
+  // area, because the shell's move loop cannot be started from inside WebView and
+  // drops out at once. So the press is forwarded, and the window follows the
+  // pointer from there -- including snapping when it is dropped against an edge.
   tb.addEventListener("mousedown", (e) => {
     if (e.button !== 0 || e.target.closest(".wbtn")) return;
+    e.preventDefault();
     call("drag", 2);
   });
+  // A double click asks Windows for its own zoom, so the animation is the shell's.
   tb.addEventListener("dblclick", (e) => {
     if (e.target.closest(".wbtn")) return;
-    call("win", "max");
-    S.maxed = !S.maxed;
-    document.body.classList.toggle("maxed", S.maxed);
+    call("win", "dbl");
   });
-  for (const el of $$("#edges .e")) {
-    el.addEventListener("mousedown", (e) => {
-      e.stopPropagation();
-      if (e.button === 0) call("drag", parseInt(el.dataset.hit, 10));
-    });
-  }
+  // A right click asks for the window menu, again the shell's own.
+  tb.addEventListener("contextmenu", (e) => {
+    if (e.target.closest(".wbtn")) return;
+    e.preventDefault();
+    call("win", "menu");
+  });
   $("#btnMin").onclick = () => call("win", "min");
-  $("#btnMax").onclick = () => {
-    call("win", "max");
-    S.maxed = !S.maxed;
-    document.body.classList.toggle("maxed", S.maxed);
-  };
+  $("#btnMax").onclick = () => call("win", "max");
   $("#btnClose").onclick = async () => {
-  const r = await call("win", "close");
-  if (r === "ask") askClose();
-};
+    const r = await call("win", "close");
+    if (r === "ask") askClose();
+  };
   $("#btnMenu").onclick = () => showView(S.view === "settings" ? "main" : "settings");
 }
 
@@ -462,14 +472,16 @@ function renderAbout(box, f) {
   s1.appendChild(line("程序", "DroidExtend " + ((S.snap && S.snap.version) || "")));
   s1.appendChild(line("手机端", "随程序一起分发，连接时自动安装"));
   const b1 = el("div", "btns");
-  const check = el("button", "btn ghost", "检查更新");
-  check.onclick = () => call("act", "checkUpdate");
+  const chkOne = el("button", "btn ghost", "检查更新");
+  chkOne.onclick = () => call("act", "checkUpdate");
   const log = el("button", "btn ghost", "更新日志");
   log.onclick = () => openDoc("changelog");
   const abt = el("button", "btn ghost", "关于本程序");
   abt.onclick = () => openDoc("about");
-  b1.append(check, log, abt);
+  b1.append(chkOne, log, abt);
   s1.appendChild(line("", b1));
+  s1.appendChild(line("", check("checkUpdates", f.checkUpdates, "启动时自动检查新版本")));
+  s1.appendChild(line("", check("checkPrerelease", f.checkPrerelease, "测试版也算上")));
   box.appendChild(s1);
   const s2 = section("第三方组件");
   s2.appendChild(line("许可", el("div", "note",
@@ -731,6 +743,52 @@ function offerAsk(a) {
   document.body.appendChild(wrap);
 }
 
+/* ---------------------------------------------------------------- updates */
+/* The start-up check lands here as snap.update; the download reports its own
+   progress in snap.upd.  Both are plain data, so a poll is all the plumbing. */
+let updModal = null;      // the box we opened, so progress can land inside it
+let updMsgAt = 0;
+
+function updProgress(u) {
+  if (!u || !u.state) return "";
+  const done = u.done || 0, total = u.total || 0;
+  const mb = (done / 1048576).toFixed(1), tb = (total / 1048576).toFixed(1);
+  const pct = total ? Math.min(100, done * 100 / total).toFixed(0) : "0";
+  if (u.state === "downloading") return "正在下载 " + mb + " / " + tb + " MB（" + pct + "%）";
+  if (u.state === "installing") return "下载完成，正在启动安装程序…";
+  if (u.state === "quitting") return "安装程序已启动，程序即将退出…";
+  if (u.state === "error") return "没有装成：" + (u.error || "未知原因");
+  return "";
+}
+
+function pumpUpd(s) {
+  const u = s.upd;
+  if (updModal && updModal.isConnected) {
+    const n = updModal.querySelector(".updnote");
+    const bar = updModal.querySelector(".updbar");
+    const fill = updModal.querySelector(".updbar > i");
+    const txt = updProgress(u);
+    if (bar && n && txt) { bar.classList.remove("hidden"); n.classList.remove("hidden"); }
+    if (n && txt) n.textContent = txt;
+    if (fill && u) fill.style.width = (u.total ? Math.min(100, u.done * 100 / u.total) : 0) + "%";
+    if (u && u.state && u.state !== "downloading") {
+      const acts = updModal.querySelectorAll(".acts button");
+      acts.forEach((b) => { b.disabled = true; });
+    }
+  }
+  const m = s.updMsg;
+  if (m && m.at && m.at !== updMsgAt) { updMsgAt = m.at; toast(m.text); }
+}
+
+function toast(text) {
+  let t = document.getElementById("toast");
+  if (!t) { t = el("div", "", ""); t.id = "toast"; t.className = "toast"; document.body.appendChild(t); }
+  t.textContent = text;
+  t.classList.remove("hidden");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add("hidden"), 4600);
+}
+
 /* A newer release exists: the Tk build popped a box, so does this one. Once per
    version per run -- the log keeps the rest of the story. */
 let updSeen = "";
@@ -749,15 +807,28 @@ function offerUpdate(u) {
     body.textContent = u.notes;
     box.appendChild(body);
   }
+  const bar = el("div", "updbar hidden");
+  bar.appendChild(document.createElement("i"));
+  box.appendChild(bar);
+  const note = el("div", "updnote hidden");
+  box.appendChild(note);
   const acts = el("div", "acts");
   const later = el("button", "btn ghost", "以后再说");
-  later.onclick = () => wrap.remove();
+  later.onclick = () => { wrap.remove(); updModal = null; };
   acts.appendChild(later);
-  const go = el("button", "btn primary", "打开下载页");
-  go.onclick = () => { call("act", "open_url", { url: u.url }); wrap.remove(); };
-  acts.appendChild(go);
+  if (u.url) {
+    const go = el("button", "btn ghost", "打开下载页");
+    go.onclick = () => { call("act", "open_url", { url: u.url }); wrap.remove(); updModal = null; };
+    acts.appendChild(go);
+  }
+  if ((u.setup || {}).url) {
+    const dl = el("button", "btn primary", "下载并安装");
+    dl.onclick = () => { dl.disabled = true; later.disabled = true; call("act", "installUpdate"); };
+    acts.appendChild(dl);
+  }
   box.appendChild(acts);
   wrap.appendChild(box);
-  wrap.onmousedown = (e) => { if (e.target === wrap) wrap.remove(); };
+  wrap.onmousedown = (e) => { if (e.target === wrap) { wrap.remove(); updModal = null; } };
   document.body.appendChild(wrap);
+  updModal = wrap;
 }

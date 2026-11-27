@@ -24,6 +24,7 @@ class Bridge(object):
         self._tray = None
         self._tray_q = queue.Queue()
         self._tray_thread = None
+        self._quitting = False
 
     def __dir__(self):
         # pywebview walks every public attribute of the js_api object and recurses
@@ -58,13 +59,29 @@ class Bridge(object):
         except Exception:
             return []
 
+    def theme_frame(self):
+        """The system draws the border and the title area, so repaint it too."""
+        w = self._win
+        if w is None:
+            return
+        dark = self._core.settings.get("theme", "dark") != "light"
+        try:
+            w.dark_frame(dark)
+            w.frame_colors(fx.FRAME_BG_DARK if dark else fx.FRAME_BG_LIGHT,
+                           fx.FRAME_LINE_DARK if dark else fx.FRAME_LINE_LIGHT)
+        except Exception:
+            pass
+
     def act(self, name, payload=None):
         """One entry point for every button on the page."""
         payload = payload or {}
         c = self._core
         try:
             if name == "set":
-                return c._set_field(payload.get("field"), payload.get("value"))
+                ok = c._set_field(payload.get("field"), payload.get("value"))
+                if payload.get("field") == "theme":
+                    self.theme_frame()
+                return ok
             if name == "start":
                 c.start()
                 return True
@@ -101,7 +118,9 @@ class Bridge(object):
             if name == "testNotify":
                 c.test_notify(); return True
             if name == "checkUpdate":
-                c.check_update(); return True
+                return c.check_update()
+            if name == "installUpdate":
+                return c.install_update()
             if name == "saveLog":
                 return c.save_log()
             if name == "doc":
@@ -148,6 +167,7 @@ class Bridge(object):
 
     def quit_app(self):
         """Close for real: the page asked for it and the settings agree."""
+        self._quitting = True
         self._core._closing = True
         self.stop_tray()
         try:
@@ -240,6 +260,23 @@ class Bridge(object):
             self._win.hide()
         return True
 
+    def on_closing(self):
+        """Alt+F4 and the taskbar's Close take the same path as our own X."""
+        if self._quitting:
+            return True
+        try:
+            r = self.close_asked()
+        except Exception:
+            return True
+        if r == "ask" and self._view is not None:
+            # Alt+F4 on a window whose answer is "ask" gets the same card the X
+            # opens, not a stuck window.
+            try:
+                self._view.evaluate_js("window.askClose && window.askClose()")
+            except Exception:
+                pass
+        return False
+
     def close_asked(self):
         """The window's X: ask / hide to the tray / quit, per the settings."""
         action = str(self._core.settings.get("close_action", "ask") or "ask")
@@ -253,8 +290,9 @@ class Bridge(object):
 
     # ----------------------------------------------------------- the window
     def drag(self, hit):
+        """Let Windows run the drag loop: snap, monitor hopping, everything."""
         if self._win is not None:
-            fx.Dragger(self._win).start(int(hit))
+            self._win.drag(int(hit) if hit is not None else None)
         return True
 
     def win(self, action):
@@ -265,6 +303,10 @@ class Bridge(object):
             w.minimize()
         elif action == "max":
             w.toggle_max()
+        elif action == "dbl":
+            w.double_click()
+        elif action == "menu":
+            w.system_menu()
         elif action == "close":
             return self.close_asked()
         return True

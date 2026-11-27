@@ -97,6 +97,12 @@ class Core(object):
         self._hz_list = [str(h) for h in HZ_CHOICES]
         self._closing = False
         self.update_info = None
+        self.upd = {}                 # download progress for the page
+        self.upd_msg = None           # one answer to a manual check
+        self._upd_busy = False
+        self._upd_dl_busy = False
+        self._upd_auto = False
+        self.on_quit = None           # main.py points this at bridge.quit_app
         self._ask_rec = None
         self._ask_ev = None
         self._ask_seq = 0
@@ -413,6 +419,8 @@ class Core(object):
             try:
                 self._refresh_status()
                 tick += 1
+                if tick == 6:                       # ~3 s in: the page has painted
+                    self.auto_check_update()
                 if tick % 8 == 0:                   # every ~4 s: cable plugged in
                     self._refresh_device()
             except Exception:
@@ -623,31 +631,168 @@ class Core(object):
         except Exception as e:
             self.log("通知发送失败: %s" % e, "err")
 
-    def check_update(self):
-        threading.Thread(target=self._check_update_work, name="dx-upd",
-                         daemon=True).start()
+    def check_update(self, manual=True):
+        """Ask GitHub.  manual=True is the button; False is the start-up check."""
+        if self._upd_busy:
+            if manual:
+                self.log("上一次检查还没结束，稍等一下。")
+            return False
+        self._upd_busy = True
+        threading.Thread(target=self._check_update_work, args=(bool(manual),),
+                         name="dx-upd", daemon=True).start()
+        return True
 
-    def _check_update_work(self):
+    def auto_check_update(self):
+        """The check that used to run 2.5 s after the Tk window appeared.
+
+        Once per run, only with the setting on and the terms already behind us:
+        the first start, with a privacy dialog on screen, is not the moment to
+        also throw a version window at someone.
+        """
+        if self._upd_auto or self._closing:
+            return
+        self._upd_auto = True
+        if not bool(self.settings.get("check_updates", True)):
+            return
+        try:
+            import privacy as pv
+            if pv.needs_accept(self.settings):
+                return
+        except Exception:
+            pass
+        self.check_update(manual=False)
+
+    def _check_update_work(self, manual):
         import update as upd
         pre = bool(self.settings.get("check_prerelease", False))
         self.log("正在向 GitHub 查询最新版本%s…" % ("（含测试版）" if pre else ""))
         try:
             r = upd.check(prerelease=pre)
         except Exception as e:
-            self.log("检查更新失败：%s" % e, "err")
-            return
+            r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        self._upd_busy = False
         if not r.get("ok"):
-            self.log("检查更新失败：%s" % r.get("error"), "err")
+            err = str(r.get("error") or "").replace("\n", " ")
+            self.log("检查更新失败：%s" % err, "err")
+            if manual:
+                self.upd_msg = {
+                    "kind": "error", "at": time.time(),
+                    "text": "查询 GitHub 失败：%s\n\n（离线或被墙都不影响正常使用，"
+                            "可以手动打开：%s）" % (err, RELEASES_URL)}
             return
-        if r.get("newer"):
-            tag = i18n.t("（测试版）", " (beta)") if r.get("pre") else ""
-            self.log("发现新版本 v%s%s（当前 v%s）：%s"
-                     % (r["latest"], tag, APP_VERSION, r["url"]), "ok")
-            self.update_info = {"latest": r["latest"], "url": r["url"],
-                                "pre": bool(r.get("pre")),
-                                "notes": r.get("notes") or ""}
-        else:
-            self.log("已是最新版本（v%s）" % APP_VERSION, "ok")
+        if not r.get("newer"):
+            self.log("已是最新版本 v%s。" % APP_VERSION, "ok")
+            if manual:
+                self.upd_msg = {"kind": "latest", "at": time.time(),
+                                "text": "已经是最新版本 v%s。" % APP_VERSION}
+            return
+        tag = i18n.t("（测试版）", " (beta)") if r.get("pre") else ""
+        self.log("发现新版本 v%s%s（当前 v%s）：%s"
+                 % (r["latest"], tag, APP_VERSION, r["url"]), "ok")
+        info = {"latest": r["latest"], "url": r["url"], "pre": bool(r.get("pre")),
+                "notes": r.get("notes") or "", "setup": r.get("setup") or None}
+        if manual:
+            self.update_info = info
+            return
+        # The start-up check: the balloon always, the window only when nothing
+        # is streaming -- a box appearing over a live stream is the one
+        # interruption that actually costs something.
+        self._update_notify(r, tag)
+        key = str(r["latest"]) + tag
+        if self.streaming:
+            return
+        if str(self.settings.get("update_offered", "") or "") == key:
+            return
+        self.settings["update_offered"] = key
+        self._save()
+        self.update_info = info
+
+    def _update_notify(self, r, tag):
+        if not self.settings.get("notify", True):
+            return
+        if not self.settings.get("notify_update", True):
+            return
+        try:
+            import notify as nf
+            nf.toast(i18n.t("DroidExtend v%s 可以用了", "DroidExtend v%s is ready")
+                     % (r["latest"] + tag),
+                     i18n.t("你现在是 v%s。「检查更新」可以现在就装。",
+                            "You are on v%s. Check for updates installs it now.")
+                     % APP_VERSION, log=self.log)
+        except Exception:
+            pass
+
+    def install_update(self):
+        """Download the installer the check found, verify it, then hand over."""
+        info = self.update_info or {}
+        setup = info.get("setup") or {}
+        if self._upd_dl_busy:
+            return False
+        if not info.get("latest"):
+            self.log("还没检查到可用的新版本。", "err")
+            return False
+        if not setup.get("url"):
+            self.log("这一版没有附带安装包，只能打开下载页面。", "err")
+            try:
+                os.startfile(info.get("url") or RELEASES_URL)
+            except Exception:
+                pass
+            return False
+        self._upd_dl_busy = True
+        self.upd = {"state": "downloading", "done": 0,
+                    "total": int(setup.get("size") or 0), "error": ""}
+        threading.Thread(target=self._install_update_work, args=(info, setup),
+                         name="dx-dl", daemon=True).start()
+        return True
+
+    def _install_update_work(self, info, setup):
+        import update as upd
+        name = setup.get("name") or ("DroidExtend-Setup-%s.exe" % info.get("latest"))
+        total = int(setup.get("size") or 0)
+        try:
+            where = upd.update_dir(str(self.settings.get("update_dir", "") or ""))
+            dest = os.path.join(where, name)
+            self.log("开始下载 %s（%d 字节）→ %s" % (name, total, where))
+
+            def prog(done, tot):
+                self.upd = {"state": "downloading", "done": int(done or 0),
+                            "total": int(tot or total or 0), "error": ""}
+
+            res = upd.download(setup["url"], dest, sha256=setup.get("sha256", ""),
+                               size=total, on_progress=prog)
+            if not res.get("ok"):
+                raise RuntimeError(str(res.get("error") or "").replace("\n", " "))
+            self.log("下载完成并通过校验：%s（sha256 %s）"
+                     % (res["path"], res["sha256"]), "ok")
+            self.upd = {"state": "installing", "done": total, "total": total,
+                        "error": ""}
+            ok, err, script = upd.run_installer(
+                res["path"],
+                install_dir=(os.path.dirname(HOST)
+                             if getattr(sys, "frozen", False) else ""),
+                delete_installer=True,
+                work_dir=str(self.settings.get("update_dir", "") or ""))
+            if not ok:
+                raise RuntimeError(str(err or "安装程序没能启动"))
+            self.log("即将退出，由 %s 安装新版本并重新启动。" % script, "ok")
+            try:
+                self.session.skip_vdd_off = True
+            except Exception:
+                pass
+            self._upd_dl_busy = False
+            self.upd = {"state": "quitting", "done": total, "total": total,
+                        "error": ""}
+            cb = self.on_quit
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:
+                    pass
+        except Exception as e:
+            msg = str(e).replace("\n", " ")
+            self._upd_dl_busy = False
+            self.upd = {"state": "error", "done": 0, "total": 0, "error": msg}
+            self.log("更新没有继续下去：%s" % msg, "err")
 
     def save_log(self):
         try:
@@ -1060,6 +1205,8 @@ class Core(object):
             "date": APP_DATE,
             "seq": self.log_seq,
             "update": self.update_info,
+            "upd": dict(self.upd) if self.upd else None,
+            "updMsg": self.upd_msg,
             "terms": self.terms_pending,
             "ask": self._ask_rec,
         }

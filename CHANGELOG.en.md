@@ -5757,6 +5757,48 @@ Lessons:
 - Not reproducing is not the same as not being broken. A bug that only turns on timing is guaranteed to reproduce on somebody else's machine.
 - When a bug can push a log to 10 MB, the logging is not what is wrong -- there is a loop: error, then the error written into a new error, then error again.
 
+### 55.11 Giving the frame back to the system: the window is a real window now
+
+Before 2.4.2-beta3 the main window had no frame at all: the page painted its own title bar, its own minimise / zoom / close buttons and its own resize strips. It looked tidy, but it was a fake:
+
+- Win+Left / Win+Right did not snap, Win+Up did not maximise;
+- a double click on the title bar was our own toggle, with no zoom animation;
+- Alt+Space opened nothing, and the taskbar right click had no Move / Size / Minimise;
+- dropping the window against a screen edge showed no snap preview, and dragging across monitors had no behaviour;
+- minimising and restoring had no animation, and resizing relied on eight invisible strips in the page.
+
+This release hands the frame back. The window carries ##BQ@WS_THICKFRAME|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX@## again, and we take over @##WM_NCCALCSIZE@##: the client area is the window rectangle minus one border width, **without** insetting the caption. The system therefore never paints a title bar, and the page fills the client area from the top left corner; but those nine pixels around the window (at 125% scaling) stay real non-client area, so eight-way resizing, the drop shadow, the Windows 11 rounded corners, Aero Snap, the taskbar menu and Alt+Space are all the system's own work.
+
+@##WM_GETMINMAXINFO@## sets the minimum tracking size to 880×600 in page units (1100×750 physical) and computes the maximised position and size from the work area. Measured: a maximised client area is 2560×1540, exactly the work area (a 2560×1600 screen minus the 60 pixel taskbar), not a pixel more.
+
+Dragging by the title bar took a detour. The plan was to let the system run its own move loop: answer @##HTCAPTION@## for the title bar band and let @##DefWindowProc@## take the press. That does not work here -- pressing inside the WebView child window delivers exactly two messages, @##WM_NCLBUTTONDOWN@## and @##WM_ENTERMENULOOP@##, and then **no mouse message at all**, so the move loop drops out at once (with synthetic and real pointers alike, because Chromium's child window swallows the rest). Dragging is therefore ours: @##SetCapture@## on press, cursor position read every 12 milliseconds and applied with @##SetWindowPos@##, and on release the **window's** edges (not the pointer's) decide the snap -- top maximises, left and right take half the screen. Dragging a maximised title bar restores first and then follows the pointer proportionally, the way the shell does it.
+
+Double click and right click are not reimplemented: a double click posts @##WM_NCLBUTTONDBLCLK@## and a right click posts @##SC_KEYMENU + space@##. The zoom animation is the system's, and so is the window menu (the one that appears is the native @###32768@## class).
+
+The last trap: after a round trip through the taskbar or a maximise/restore the window got **smaller every time** -- 1232×753 became 1214×750, and kept shrinking. The cause is Windows' stored "normal position", @##rcNormalPosition@##, which it computed before our frame code was in place, so every restore put the old value back. The fix is a new @##sync_placement()@##: take the monitor rectangle from @##MonitorFromWindow@##, write the current rect into @##rcNormalPosition@## and call @##SetWindowPlacement@##; a @##_watch@## thread also corrects it every 250 milliseconds whenever the window is not maximised, not minimised, not moving and has just come back. Measured: three taskbar round trips and three maximise/restore cycles, not one pixel of drift.
+
+One more detail that only a screenshot shows. Once the frame was back, the dark window grew a bright blue strip eight pixels tall along its top edge. Counting pixels explained it: those eight pixels above the client area are still non-client area, and DWM fills them with @##DWMWA_CAPTION_COLOR@## (the system accent by default); only the outermost pixel obeys @##DWMWA_BORDER_COLOR@##, while the left, right and bottom edges already follow the page background. Hence a new @##frame_colors(bg, border)@##: on every theme change the caption colour becomes the page background (dark #0E0F12 / light #F5F7FA) and the border colour becomes the UI hairline (#26282C / #E7E9ED). Measured afterwards: the first row of the top edge is #26282C and everything below it is #0E0F12. The window now looks frameless, yet every pixel around it is still a real, draggable system border.
+
+The installer is 41.6 MB, still inside the 50 MB budget.
+
+
+### 55.12 The path the rewrite dropped: update checks at start-up
+
+The 2.4.3 beta went onto the user's machine, he looked at it for two minutes and asked: "and my automatic update check, where did you move it".
+
+It really was gone. The old `host/app.py` asked GitHub two and a half seconds after start-up (`if self.settings.get("check_updates", True) and not priv.needs_accept(self.settings): self.after(2500, lambda: self.on_check_updates(manual=False))`); the pywebview build had no such path at all, and nothing even read @##settings["check_updates"]@##.
+
+This is the lesson worth writing down. Section 55.5 is literally titled "feature parity": I walked through `--stream`, the tray, the terms dialog, the close prompt, the About page and the device line one by one -- and missed exactly the kind of feature that has no interface and only side effects. It sits on no settings page, it never shows in a screenshot, it appears in the log a few times a year, so it read as "never existed". The checklist was written in terms of interface elements, and this is not one.
+
+The replacement is a little more complete than the original. The sixth tick after start-up (about three seconds, when the page is drawn) calls `auto_check_update()`, and `_upd_auto` keeps it to once per run; turning off "check for new versions at start-up" or not having accepted the privacy terms skips it entirely. When a newer version exists there are two paths: a notification (subject to the notification settings) and `update_info` so the page can open its dialog -- **but never while streaming**, where only the notification appears so a dialog cannot jump in front of a session in progress. One dialog per version, remembered in @##settings["update_offered"]@##, which is also how the old build did it.
+
+Pressing "check for updates" by hand now answers with a toast inside the page instead of a system message box: a new version, already up to date, or why the request failed (network, proxy, what GitHub returned). That used to be a chain of message boxes in Tk; now that the whole interface is painted by the page, a native box stands out badly.
+
+"Download and install" in that dialog really works: `upd.download()` verifies sha256 and size, `on_progress` writes a percentage into `self.upd`, and that is the green bar in the dialog. Once verified it calls `upd.run_installer(..., install_dir=..., delete_installer=True)`, after setting @##session.skip_vdd_off = True@## -- the installer has to replace files that are in use, so the program must really quit, but the normal quit path takes the virtual display down and the installer needs it right afterwards. When the installer has run, `on_quit()` gives the process a normal exit.
+
+The trap was a common one: adding two checkboxes to the About page ran into an existing `const check = el("button", ..., "check for updates")`, which shadowed the new `check()` helper, so opening the About page threw `TypeError: check is not a function`. The nasty part is that rendering stopped there while the window, the title bar and the log stayed alive -- in a screenshot it looked like "the About page is just missing a few lines". The real cause only showed up in the line where pywebview hands a JavaScript exception back to Python. One variable name, one whole page.
+
+The unit test pins six situations: a new version found at start-up (`update_info` complete, `update_offered` written, toast text correct), no second dialog on the next start, a manual check that finds nothing, a manual check that fails, a release without a setup asset falling back to opening the download page, and streaming where only the notification appears. Then it ran against the real network: the log went "asking GitHub for the latest version..." and then "already up to date, v2.4.2." (the public release is still 2.3.0 while the local build is newer), and nothing interrupted the interface.
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*
