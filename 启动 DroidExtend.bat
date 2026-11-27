@@ -26,5 +26,5 @@ if not defined PY (
 )
 
 echo ÕýÔÚÆô¶¯ DroidExtend ...
-start "" "%PY%" "%~dp0host\app.py"
+start "" "%PY%" "%~dp0host\webui\main.py"
 exit /b 0

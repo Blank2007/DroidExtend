@@ -274,7 +274,7 @@ DroidExtend 使用说明   v{ver}
     https://ffmpeg.org/  本机用的是 gyan.dev 的 6.0-essentials 构建
   · Android SDK Platform-Tools (adb)  —— Apache License 2.0
   · R8 / D8 (Android SDK build-tools)  —— BSD 3-Clause
-  · Python / Tcl-Tk / PyInstaller  —— 见各自的许可文件
+  · Python / PyInstaller / pywebview / pythonnet  —— 见各自的许可文件
   · 安装包由 Inno Setup 生成；图标是用脚本画的，没有用现成素材。
 
 【九、关于这个项目】
@@ -630,7 +630,7 @@ DroidExtend manual   v{ver}
     process)  https://ffmpeg.org/  this build is gyan.dev's 6.0-essentials
   . Android SDK Platform-Tools (adb) -- Apache License 2.0
   . R8 / D8 (Android SDK build-tools) -- BSD 3-Clause
-  . Python / Tcl-Tk / PyInstaller -- see their own licence files
+  . Python / PyInstaller / pywebview / pythonnet -- see their own licence files
   . The installer is built with Inno Setup; the icon is drawn by a script, no
     stock artwork was used.
 

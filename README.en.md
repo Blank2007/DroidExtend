@@ -151,25 +151,29 @@ second screen.
 
 ## 2. The interface
 
-The title bar is drawn by the window itself: `DroidExtend`, `安卓拓展屏` and the version on the
-left; the **≡** button (opens settings), and minimise / maximise / close on the right. 2.3.0 removed the
-menu entirely: ≡ opens the settings page itself, and everything the menu used to hold lives in the
+The title bar is drawn by the window itself: a **D** mark, `DroidExtend`, `安卓拓展屏` and the version
+on the left; the **≡** button (opens settings), and minimise / maximise / close on the right. 2.3.0 removed
+the menu entirely: ≡ opens the settings page itself, and everything the menu used to hold lives in the
 navigation column on its left.
 
-The window has no system frame (the title bar and the rounded corners are drawn by hand), but
-maximising, dragging the title bar, resizing from any of the eight edges and double-clicking the
-title bar to restore all behave like a system window. The one thing missing is Aero Snap -- dragging
-to the top of the screen does not maximise it.
+The window has no system frame (the title bar, the rounded corners and the window shape are drawn in
+HTML/CSS), but maximising, dragging the title bar, resizing from any of the eight edges (the pointer
+turns into the matching double arrow) and double-clicking the title bar to restore all behave like a
+system window. The one thing missing is Aero Snap -- dragging to the top of the screen does not
+maximise it.
 
-The main window is one page from top to bottom, with no dividers -- seven groups separated by whitespace:
+Since 2.4.2 the interface is no longer drawn by Tk: it is HTML/CSS rendered by the WebView2 that ships
+with Windows. Tk's home-grown controls only reached about eighty percent of that design, and the last
+twenty percent (font weights, spacing, translucency, anti-aliased corners) was patch after patch; one
+replacement settled all of it.
 
-1. **Status line**: a green dot, `已连接`, the phone model / `USB 3.0` / link rate; and four live metrics on the right -- capture fps, send Mbps, phone fps, display ms (the last one in green).
-2. **Virtual display**: the path currently on the desktop, e.g. `\\.\DISPLAY24 · 2560 × 1600 @ 120 Hz · right`.
-3. **Capture GPU**: which adapter is grabbing the picture (ddagrab only saw one adapter on dual-GPU machines; since 1.8.5 every adapter's outputs are probed).
-4. **Picture**: resolution / refresh rate / frame rate / quality Q, four dropdowns, applied immediately.
-5. **Show mouse pointer** and **More settings →**.
-6. **Current configuration** (e.g. `HEVC · auto bitrate · low latency`) and **Start / Stop**.
-7. **Log card**: copy / save as / clear / expand.
+The main window is one page from top to bottom, with no dividers -- five blocks separated by whitespace:
+
+1. **Status line**: a green dot, the state (`就绪` / `已连接` / `投屏中`) and the device (e.g. `24091RPADC  [device]  d1de99c4`, refreshed when a cable goes in or out); four live metrics on the right -- capture fps, send Mbps, phone fps, display ms (the last one in green).
+2. **Picture**: resolution / refresh rate and frame rate / bitrate Mbps, three dropdowns, applied immediately; choosing "custom" adds a width x height row underneath.
+3. **Current configuration** (e.g. `h264_nvenc · VBR · 2560x1600@120`) and **Start / Stop**.
+4. **One grey detail line**: the virtual display path (e.g. `\.\DISPLAY24 · 2560 × 1600 @ 120 Hz · right`) and the capture GPU (which adapter is grabbing the picture). Switches such as "show mouse pointer" live on the Device page of the settings.
+5. **Log card**: copy / save as / clear / expand (expanding fills the whole window).
 
 Clicking ≡ neither drops a menu nor opens a second window -- it **swaps the content area in place**: eight nav entries on the left (Picture / Encoding / Device / Start-up / Notifications / Appearance / Manual / About), "←" top left and "Done" top right. The window height is fixed at 640 (800 pixels at 125% scaling) and a page with more content scrolls on its own, so pages never change the size of the window.
 
@@ -821,7 +825,9 @@ all:
 | **NVIDIA Video Codec SDK** | `nvEncodeAPI.h` headers and the zero-copy NVENC interface (`RegisterResource` / `MapInputResource`); the native capturer calls it directly since 2.0.0 | NVIDIA SDK License | [developer.nvidia.com/video-codec-sdk](https://developer.nvidia.com/video-codec-sdk) |
 | **Android SDK Platform-Tools (adb)** | Installing the phone-side APK and establishing the two `adb reverse` tunnels | Apache-2.0 | [developer.android.com](https://developer.android.com/tools/releases/platform-tools) |
 | **R8 / D8** | Compiles Java to dex only **when building** the APK (not distributed at runtime) | BSD-3-Clause | [r8.googlesource.com/r8](https://r8.googlesource.com/r8) |
-| **Python / Tcl-Tk** | The program itself and its GUI | PSF-2.0 / BSD-style | [python.org](https://www.python.org/) · [tcl.tk](https://www.tcl.tk/) |
+| **Python** | The program itself | PSF-2.0 | [python.org](https://www.python.org/) |
+| **Microsoft Edge WebView2** | Renders the interface (since 2.4.2 the UI is HTML/CSS shown in the WebView2 that ships with Windows) | Free redistributable component (Microsoft) | [learn.microsoft.com](https://learn.microsoft.com/microsoft-edge/webview2/) |
+| **pywebview / pythonnet** | Bridges WebView2 into Python and lets JS and Python call each other | BSD-3-Clause / MIT | [pywebview](https://pywebview.flowrl.com/) · [pythonnet](https://pythonnet.github.io/) |
 | **PyInstaller** | Packaging into `DroidExtend.exe` | GPL-2.0 + bootloader exception | [pyinstaller.org](https://pyinstaller.org/) |
 | **Inno Setup** | Generating the installer | Inno Setup License | [jrsoftware.org](https://jrsoftware.org/isinfo.php) |
 

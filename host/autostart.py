@@ -45,7 +45,7 @@ def command(extra=None):
     pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
     if os.path.isfile(pyw):
         exe = pyw
-    app = os.path.join(_host_dir(), "app.py")
+    app = os.path.join(_host_dir(), "webui", "main.py")
     parts = [exe, app] + args
     return '"%s"' % '" "'.join(parts)
 

@@ -5646,6 +5646,99 @@ PASS 12 / 12. The resize behaviour regression passed 10 / 10 as well (eight dire
 ---
 
 
+## 55. Release 2.4.2: the interface is no longer drawn by Tk
+
+2.4.1 fixed where the resize border was hit; 2.4.2-beta fixed the shape the cursor took. Both were the same move: take over a system message and do by hand what `DefWindowProc` used to do. By the third one (frameless, rounded corners, maximize, eight-way resize, dragging) the conclusion was hard to avoid: there is a ceiling to what Tk can draw, and it sits just below the design.
+
+So the interface was rewritten: the shell stays Python, the UI became HTML/CSS, and the rendering was handed to the WebView2 that ships with Windows.
+
+### 55.1 Why pywebview
+
+Three candidates: Electron (150 MB and up once packaged), Tauri (needs a Rust toolchain), pywebview (drives the WebView2 the system already has on Win10/11). We took the third: 6.2 MB installed, a real HTML/CSS interface, and a single `js_api` object on the Python side.
+
+The costs are real too:
+
+- every value read back crosses JSON; Python and JS share no memory;
+- window behaviour moved from "hook Tk's window procedures" to "talk to Win32 directly" -- same logic, different place;
+- debugging became indirect: the UI lives inside WebView2, so screenshots, coordinates and introspection all needed new answers (55.7).
+
+### 55.2 Three kinds of pixels
+
+The same screen carries three numbers at once: CSS logical pixels (1000x640), physical pixels (1250x800), and the Windows DPI scale (125%). `webview.create_window(width, height, min_size=)` takes logical pixels; `SetWindowPos` takes physical ones. The first attempt passed physical sizes, `min_size` inflated the window to 1375x937, and the page kept laying out against the old viewport -- the screenshot showed a large empty block under the log card, which looks like a broken layout but was a unit error.
+
+The fix is one conversion, `_logical(px, scale)`, plus a more hidden one: `work_area()` first returned the monitor's `rcMonitor`, so maximizing covered the taskbar (2560x1600 instead of 2560x1540). The right field is `MONITORINFO`'s `rcWork` (`info[5..8]`; `rcMonitor` is `info[1..4]`).
+
+### 55.3 Packaging: the CLR cannot load from a path with spaces
+
+PyInstaller's `--onedir --windowed --collect-all webview --hidden-import clr` worked first try, but the exe died on start-up with:
+
+    Failed to execute script 'main' due to unhandled exception: Failed to resolve
+    Python.Runtime.Loader.Initialize from
+    D:\dsh projects\droid-extend\_internal\pythonnet\runtime\Python.Runtime.dll
+
+The file was there, its sha256 identical to the copy in site-packages, and renaming the directory to a short path (`D:\DSHPRO~1\...`) changed nothing. The real experiment was this: the same PyInstaller arguments, applied to a three-line test script, produced `D:\probe_test\wv\pt2\` (no spaces) which printed `clr ok` / `webview ok`; copying that whole directory to `D:\dsh projects\ptest3\` made the identical binary fail with the identical error.
+
+**Conclusion: the assembly path clr-loader hands to the .NET Framework must not contain a space**, and PyInstaller has nothing to do with it. The install directory, `C:\Program Files\DroidExtend`, has spaces too, so this is not an artefact of the test location.
+
+Two fixes, both in `host/webui/main.py`:
+
+1. rewrite `pythonnet.__file__` to the 8.3 short path from `GetShortPathNameW` (`_short_path()`, which also checks the result has no space and exists) before calling `pythonnet.load()`;
+2. replace `webview.util.interop_dll_path` with a function that looks in a copied directory first, and copy the whole of `webview/lib` (`Microsoft.Web.WebView2.Core.dll` and friends) to `%LOCALAPPDATA%\DroidExtend\clr\webview-lib` (no spaces); both `__init__` and `__init__.win-x64` resolve through it.
+
+The boot log now shows the sequence: `clr copy` -> `clr: C:\Users\...\clr\__init__.py` -> `clr ok` -> `webview imported` -> `webview lib: C:\Users\...\clr\webview-lib` -> `core ready`.
+
+### 55.4 One window, eight pages
+
+Settings are no longer a second Toplevel: the ≡ button opens the settings view itself -- a 150 px navigation column on the left, content on the right, "完成" top-right and "←" top-left. Everything the old menu held (language, notifications, check for updates, changelog, manual, about, quit...) became a navigation entry, so the whole UI has exactly one shape.
+
+Top to bottom, the main window is: a self-drawn title bar (D mark + name + version pill + ≡ — ▢ ✕), the status row (green dot, state, device, four metrics), three picture fields (resolution / refresh rate and frame rate / bit rate), the configuration row with start and stop, one grey detail line (virtual display path + capture GPU), and the black log card. There is not a single divider line -- grouping is done with whitespace.
+
+Window behaviour moved into `host/webui/window.py`: frameless, rounded, eight-way resize, double-click to maximize, snap to the work area when maximized. The hit-testing and the cursor lookup table came over from `host/frameless.py` unchanged; only the target changed from "every Tk child window" to "the one top-level window".
+
+### 55.5 Feature parity
+
+Replacing a shell usually means losing features, so every one was checked off:
+
+- `--stream` starts mirroring at boot; when the setting is off it writes exactly one honest log line ("command line carried --stream, but 'start mirroring at boot' is off in settings, so nothing starts this time") instead of pretending;
+- `--minimized` goes to the notification area; the tray offers show and quit, and a system without a tray degrades to minimising;
+- the first-run terms prompt (`privacy.needs_accept`); declining quits;
+- the close prompt: hide to tray / quit / remember this choice;
+- the about page: version, check for updates, changelog, about, third-party components and licences, four links, program and config directories, privacy and terms, donations, reset settings;
+- the device row no longer shows `session.describe()`'s `extend 0x0@60 -` but the `adb devices` label (`24091RPADC  [device]  d1de99c4`), refreshed every four seconds, so plugging or unplugging a cable updates it; once mirroring starts, the detail line shows the virtual display's path.
+
+### 55.6 The tablet side
+
+The overlay has used the same greys since 2.2.0. Two details were added: the gear hides while the settings sheet is open (`HudView.setGearShown(false)`, otherwise it floats on top of the 60% scrim), the sheet title drops 18sp -> 15sp, and section titles drop from the main colour to `hud_dim` and 14sp -> 12.5sp.
+
+### 55.7 A dialog nobody could see: suspect the instrument first
+
+The terms prompt produced the most expensive stretch of this release: `document.querySelectorAll('.modal').length` was 1, `getBoundingClientRect()` returned `[160, 63.2, 680, 513.6]`, `z-index` was 60, `elementFromPoint` hit it -- **the dialog was there and clickable, but no screenshot showed it**.
+
+The cause had nothing to do with the UI: an older python process was still alive with a window at exactly the same place, and `ImageGrab.grab()` captures the DWM-composited screen, so it captured that old window. The evidence: three "different" screenshots whose log timestamps all stood still at 14:09:45.
+
+Since then UI acceptance uses `PrintWindow(hwnd, hdc, 2)` plus `GetDIBits` (the `grab()` in `D:/probe_test/wv/shot3.py`): it asks the window for its own content, and whatever is in front does not matter.
+
+Two more:
+
+- introspect layout with `evaluate_js` (`getBoundingClientRect`, `getComputedStyle`, `elementFromPoint`) rather than scanning pixels. When the checkboxes "looked native white", reading them back gave `appearance:none`, `background:rgb(59,62,68)`, `checked:true` -- the styling had been working all along;
+- `Access is denied` from `Stop-Process` / `taskkill` means that process runs at a higher integrity level; it has to be killed through the elevated helper (127.0.0.1:47123), otherwise it keeps sitting in front of the screen and lying to the screenshots.
+
+### 55.8 Measurements
+
+The packaged build (`DroidExtend.exe`, 6 215 531 bytes) was started from the real checkout path, `D:\dsh projects\droid-extend\`, and verified item by item with PrintWindow:
+
+- main window at 1250x800: title bar, green "就绪", four metrics, three picture fields, configuration `h264_nvenc · VBR · 2304x1440@120`, start and stop, black log card;
+- all eight settings pages (picture / codec / device / boot / notifications / appearance / manual / about), plus the same pages in the light theme;
+- the terms prompt, the close prompt, the phone-app-outdated prompt and the update prompt;
+- the tray: `start_tray()` -> window hidden (`visible False`) -> tray icon -> window back;
+- a real mirroring session (Xiaomi tablet 24091RPADC over USB): `手机分辨率 3200x2136（横屏）` -> `虚拟屏按手机分辨率 3200x2136@60 撑满` -> `拓展屏就绪: \\.\DISPLAY31 -> 3200x2136@60 at (2560,0)` -> `启动采集: native / h264_nvenc` -> `first frame rendered`, with the tablet overlay reading `39.56 Mbps · 23 ms`.
+
+### 55.9 Lessons
+
+- Changing a UI stack costs little in drawing and a lot in re-answering every question that used to be answered for free by a window handle or by Tk introspection: sizes, screen coordinates, maximizing, grabbing, screenshots, cursors.
+- Packaging must be verified from the real checkout path. `D:\probe_test\` has no spaces; succeeding there proves the code is right, not that a user can install it.
+- When something is "not there", check the instrument before the code. Forty of the four hours here went into suspecting CSS, and CSS was never wrong.
+
 ---
 
 *This log was written by an AI coding agent. All of the project's code was written by it as well.*

@@ -294,6 +294,7 @@ def build_apk():
 def build_exe():
     say("  building DroidExtend.exe (PyInstaller) ...")
     pb = os.path.join(HERE, "pybuild")
+    webui = os.path.join(HOST, "webui")
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
            "--onedir", "--windowed", "--name", "DroidExtend",
            # 1.6.9: the exe asks for administrator on every start.  Touch
@@ -304,10 +305,16 @@ def build_exe():
            "--uac-admin",
            "--icon", os.path.join(ROOT, "DroidExtend.ico"),
            "--paths", HOST,
+           "--paths", webui,
+           # 2.5.0: the interface is a WebView2 page now, so the page has to
+           # travel with the exe, and pywebview ships .NET helpers of its own.
+           "--add-data", os.path.join(webui, "web") + os.pathsep + "web",
+           "--collect-all", "webview",
+           "--hidden-import", "clr",
            "--distpath", os.path.join(pb, "out"),
            "--workpath", os.path.join(pb, "work"),
            "--specpath", pb,
-           os.path.join(HOST, "app.py")]
+           os.path.join(webui, "main.py")]
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True)
     out = (p.stdout + p.stderr).decode("utf-8", "replace")
     if "Build complete!" not in out:

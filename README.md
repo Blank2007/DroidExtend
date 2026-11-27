@@ -133,19 +133,19 @@
 
 ## 二、界面说明
 
-标题栏是窗口自己画的：左边 `DroidExtend`、`安卓拓展屏`、版本号，右边是 **≡**（打开设置）和最小化 / 最大化 / 关闭。2.3.0 起菜单整个取消了 —— ≡ 打开的就是设置页本身，原来菜单里的东西全在左边那列导航里。
+标题栏是窗口自己画的：左边是 **D** 徽标、`DroidExtend`、`安卓拓展屏`、版本号，右边是 **≡**（打开设置）和最小化 / 最大化 / 关闭。2.3.0 起菜单整个取消了 —— ≡ 打开的就是设置页本身，原来菜单里的东西全在左边那列导航里。
 
-窗口没有系统边框（标题栏和圆角都是自己画的），但最大化、拖动标题栏、拖四边四角缩放、双击标题栏还原都跟系统窗口一样；唯一没有的是「拖到屏幕顶端自动最大化」。
+窗口没有系统边框（标题栏、圆角和窗口形状都由样式表画在 HTML 里），但最大化、拖动标题栏、拖四边四角缩放（鼠标在边上会变成对应的双箭头）、双击标题栏还原都跟系统窗口一样；唯一没有的是「拖到屏幕顶端自动最大化」。
 
-主窗口从上到下一屏到底，没有分割线，靠留白分七组：
+2.4.2 起界面不再由 Tk 绘制，而是 HTML/CSS 交给 Windows 自带的 WebView2 渲染。原因是 Tk 那套自绘控件在这份设计上只能还原到八成，剩下两成（字重、间距、半透明、圆角抗锯齿）每一点都是补丁，换掉之后一次到位。
 
-1. **状态行**：绿点 + `已连接` + 手机型号 / `USB 3.0` / 链路速率；右侧四个实时指标 —— `采集 fps`、`发送 Mbps`、`手机 fps`、`上屏 ms`（最后一个是绿色）。
-2. **虚拟显示器**：这一轮挂在桌面上的路径，例如 `\\.\DISPLAY24 · 2560 × 1600 @ 120 Hz · 右侧`。
-3. **采集显卡**：这次是哪块卡在抓画面。双显卡机器上旧的 ddagrab 只看得到一张卡，1.8.5 起会把每张卡的输出都探一遍。
-4. **画面**：分辨率 / 刷新率 / 帧率 / 画质 Q 四个下拉，改完立刻生效。
-5. **显示鼠标指针** 与 **更多设置 →**。
-6. **当前配置**（例如 `HEVC · 自动码率 · 低延迟`）与 **开始投屏 / 停止**。
-7. **日志卡**：复制 / 另存 / 清空 / 展开。
+主窗口从上到下一屏到底，没有分割线，靠留白分五段：
+
+1. **状态行**：绿点 + 状态（`就绪` / `已连接` / `投屏中`）+ 设备（例如 `24091RPADC  [device]  d1de99c4`，插拔线会自己刷新）；右侧四个实时指标 —— `采集 fps`、`发送 Mbps`、`手机 fps`、`上屏 ms`（最后一个是绿色）。
+2. **画面**：分辨率 / 刷新率·帧率 / 码率 Mbps 三组下拉，改完立刻生效；选了「自定义」会在下面多出一行宽 × 高输入框。
+3. **当前配置**（例如 `h264_nvenc · VBR · 2560x1600@120`）与 **开始投屏 / 停止**。
+4. **一行灰字细节**：虚拟显示器路径（例如 `\.\DISPLAY24 · 2560 × 1600 @ 120 Hz · 右侧`）· 采集显卡（这次是哪块卡在抓画面）。「显示鼠标指针」这类开关都在设置的「设备」页。
+5. **日志卡**：复制 / 另存 / 清空 / 展开（展开后铺满整个窗口）。
 
 点 ≡ 既不是弹菜单，也不是开第二个窗口，而是**内容区原地换页**：左侧八项导航（画面 / 编码与画质 / 设备 / 启动与退出 / 通知 / 外观 / 使用说明 / 关于），左上「←」、右上「完成」。窗口高度固定 640（125% 缩放下 800 像素），内容多的页在右侧自己滚 —— 翻页时窗口不会忽高忽矮。
 
@@ -703,7 +703,9 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed `
 | **NVIDIA Video Codec SDK** | `nvEncodeAPI.h` 头文件与 NVENC 零拷贝接口（`RegisterResource` / `MapInputResource`）；2.0.0 起原生采集器直接调它 | NVIDIA SDK License | [developer.nvidia.com/video-codec-sdk](https://developer.nvidia.com/video-codec-sdk) |
 | **Android SDK Platform-Tools (adb)** | 安装手机端 APK、建立两条 `adb reverse` 隧道 | Apache-2.0 | [developer.android.com](https://developer.android.com/tools/releases/platform-tools) |
 | **R8 / D8** | 只在**构建** APK 时把 Java 编成 dex（运行期不分发） | BSD-3-Clause | [r8.googlesource.com/r8](https://r8.googlesource.com/r8) |
-| **Python / Tcl-Tk** | 程序本体与图形界面 | PSF-2.0 / BSD-style | [python.org](https://www.python.org/) · [tcl.tk](https://www.tcl.tk/) |
+| **Python** | 程序本体 | PSF-2.0 | [python.org](https://www.python.org/) |
+| **Microsoft Edge WebView2** | 界面渲染（2.4.2 起界面是 HTML/CSS，用系统自带的 WebView2 显示） | 免费可再分发组件（微软） | [learn.microsoft.com](https://learn.microsoft.com/microsoft-edge/webview2/) |
+| **pywebview / pythonnet** | 把 WebView2 接进 Python、JS 与 Python 互相调用 | BSD-3-Clause / MIT | [pywebview](https://pywebview.flowrl.com/) · [pythonnet](https://pythonnet.github.io/) |
 | **PyInstaller** | 打包成 `DroidExtend.exe` | GPL-2.0 + bootloader exception | [pyinstaller.org](https://pyinstaller.org/) |
 | **Inno Setup** | 生成安装程序 | Inno Setup License | [jrsoftware.org](https://jrsoftware.org/isinfo.php) |
 

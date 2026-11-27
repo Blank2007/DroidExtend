@@ -56,12 +56,12 @@ import applog                                                                   
 import anim                                                                       # noqa: E402
 import autostart as auto                                                          # noqa: E402
 import changelog as cl                                                            # noqa: E402
+from credits import credits as _credits, LICENSES                                 # noqa: E402
 import i18n                                                                       # noqa: E402
 import manual as mn                                                               # noqa: E402
 import paths                                                                      # noqa: E402
 import privacy as priv                                                            # noqa: E402
 import settings as st                                                             # noqa: E402
-import frameless as fr                                                           # noqa: E402
 import frameless as fr                                                           # noqa: E402
 import ui_kit as uk                                                               # noqa: E402
 import theme                                                                      # noqa: E402
@@ -127,36 +127,8 @@ ACCENT = "#4c9aff"
 PANEL = "#1c1f26"
 
 
-def _credits():
-    """(component, licence, where it comes from) rows for the About window.
-
-    Also mirrored in 使用说明 and in the README, because two of these are
-    redistributed inside the installer and MIT asks for the notice to travel
-    with the copy.
-
-    A function rather than a constant: the names are proper nouns and read the
-    same in both languages except for Inno Setup, whose row carries a note, and
-    a table built at import time would freeze the language before the settings
-    file has even been read.
-    """
-    return [
-        ("Virtual Display Driver (VDD)", "MIT", "github.com/VirtualDrivers/Virtual-Display-Driver"),
-        ("nefcon", "MIT", "github.com/nefarius/nefcon"),
-        ("FFmpeg 6.0 (gyan.dev essentials)", "GPL-3.0", "ffmpeg.org"),
-        ("Android SDK Platform-Tools / adb", "Apache-2.0", "developer.android.com/tools/releases/platform-tools"),
-        ("R8 / D8 (Android build-tools)", "BSD-3-Clause", "r8.googlesource.com/r8"),
-        ("Python", "PSF-2.0", "python.org"),
-        ("Tcl/Tk", "BSD-style", "tcl.tk"),
-        ("PyInstaller", "GPL-2.0 + bootloader exception", "pyinstaller.org"),
-        (i18n.t("Inno Setup（只用于生成安装包）",
-                "Inno Setup (used only to build the installer)"),
-         "Inno Setup License", "jrsoftware.org/isinfo.php"),
-    ]
-
-
-# Shipped next to DroidExtend.exe by the installer; MIT/Apache/BSD all want the
-# notice to travel with the binary copy.
-LICENSES = "第三方组件许可.txt"
+# _credits() and LICENSES moved to credits.py: the pywebview shell prints the
+# same rows, and a licence notice copied into two windows drifts.
 
 
 def _label_for(pairs, key, default=""):
@@ -917,7 +889,20 @@ class App(tk.Tk):
         self._grip = grip
 
     def _minimize(self):
-        """The — button: whatever Windows does with a frameless window."""
+        """The — button.
+
+        Tk's iconify() is a request to the window manager, and a window with
+        overrideredirect set has none -- the call returns quietly and nothing
+        happens.  Ask Windows itself instead; the taskbar entry it creates is
+        what brings the window back (its SC_RESTORE comes through the window
+        procedure we already installed).
+        """
+        if getattr(self, "_fx", None) is not None:
+            try:
+                fr.minimize(self)
+                return
+            except Exception:
+                pass
         try:
             self.iconify()
         except Exception:

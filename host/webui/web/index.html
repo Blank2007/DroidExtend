@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DroidExtend</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="dark">
+<div id="win">
+  <header class="tb" id="tb">
+    <div class="logo">D</div>
+    <div class="ttl">DroidExtend</div>
+    <div class="sub" id="tbSub">安卓拓展屏</div>
+    <div class="ver" id="ver">v2.4.2</div>
+    <div class="sp"></div>
+    <button class="wbtn" id="btnMenu" title="菜单"><span class="ico-menu"></span></button>
+    <button class="wbtn" id="btnMin" title="最小化">—</button>
+    <button class="wbtn" id="btnMax" title="最大化">▢</button>
+    <button class="wbtn close" id="btnClose" title="关闭">✕</button>
+  </header>
+
+  <main id="main">
+    <section class="status">
+      <span class="dot" id="dot"></span>
+      <span class="stat" id="stat">就绪</span>
+      <span class="dev" id="dev"></span>
+      <span class="note" id="note"></span>
+      <div class="sp"></div>
+      <div class="metrics">
+        <div class="m"><div class="mk">采集</div><div class="mv"><b id="mCap">—</b><i>fps</i></div></div>
+        <div class="m"><div class="mk">发送</div><div class="mv"><b id="mSend">—</b><i>Mbps</i></div></div>
+        <div class="m"><div class="mk">手机</div><div class="mv"><b id="mPhone">—</b><i>fps</i></div></div>
+        <div class="m hi"><div class="mk">上屏</div><div class="mv"><b id="mLat">—</b><i>ms</i></div></div>
+      </div>
+    </section>
+
+    <section class="params">
+      <div class="row">
+        <div class="lab">画面</div>
+        <div class="fields">
+          <label class="fld"><span>分辨率</span>
+            <div class="sel" id="selRes" data-k="res"><b>—</b><i class="caret"></i></div>
+          </label>
+          <label class="fld"><span>刷新率 / 帧率</span>
+            <div class="dual">
+              <div class="sel" id="selHz" data-k="hz"><b>—</b><i class="caret"></i></div>
+              <div class="sel" id="selFps" data-k="fps"><b>—</b><i class="caret"></i></div>
+            </div>
+          </label>
+          <label class="fld"><span>码率 Mbps</span>
+            <div class="sel" id="selBr" data-k="bitrate"><b>—</b><i class="caret"></i></div>
+          </label>
+        </div>
+      </div>
+      <div class="row custom-row hidden" id="customRow">
+        <div class="lab"></div>
+        <div class="fields">
+          <label class="fld small"><span>自定义尺寸</span>
+            <div class="dual">
+              <input class="inp" id="inpW" value="2560" spellcheck="false">
+              <span class="x">x</span>
+              <input class="inp" id="inpH" value="1600" spellcheck="false">
+            </div>
+          </label>
+          <div class="fld"></div>
+          <div class="fld"></div>
+        </div>
+      </div>
+      <div class="row actions">
+        <div class="lab dim" id="summary">—</div>
+        <div class="sp"></div>
+        <button class="btn primary" id="btnStart"><span class="play">▶</span>开始投屏</button>
+        <button class="btn ghost" id="btnStop"><span class="sq">■</span>停止</button>
+      </div>
+      <div class="row detail">
+        <div class="lab"></div>
+        <div class="detail-text">
+          <span id="dispPath">虚拟显示器 —</span>
+          <span class="sep-dot">·</span>
+          <span id="gpuName">采集显卡 —</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="logwrap">
+      <div class="lbar">
+        <div class="ltit">日志</div>
+        <div class="sp"></div>
+        <button class="lact" data-act="copyLog">复制</button>
+        <button class="lact" data-act="saveLog">另存</button>
+        <button class="lact" data-act="clearLog">清空</button>
+        <button class="lact" data-act="expandLog">展开 ▾</button>
+      </div>
+      <div class="lbody" id="logBody"></div>
+    </section>
+  </main>
+
+  <main id="settings" class="view hidden">
+    <div class="head">
+      <button class="btn ghost back" id="btnBack">←</button>
+      <div class="htitle">设置</div>
+      <div class="sp"></div>
+      <button class="btn primary" id="btnDone">完成</button>
+    </div>
+    <div class="sbody">
+      <nav class="nav" id="nav"></nav>
+      <section class="pages" id="pages"></section>
+    </div>
+  </main>
+</div>
+
+<div id="edges">
+  <div class="e n" data-hit="12"></div>
+  <div class="e s" data-hit="15"></div>
+  <div class="e w" data-hit="10"></div>
+  <div class="e e" data-hit="11"></div>
+  <div class="e nw" data-hit="13"></div>
+  <div class="e ne" data-hit="14"></div>
+  <div class="e sw" data-hit="16"></div>
+  <div class="e se" data-hit="17"></div>
+</div>
+<div id="pop" class="pop hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>
