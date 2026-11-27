@@ -503,15 +503,17 @@ function renderAbout(box, f) {
     a.onclick = () => call("act", "open_url", { url });
     wrap.appendChild(a);
   }
-  const dirs = el("div", "btns");
+  s3.appendChild(line("", wrap));
+  box.appendChild(s3);
+  const s3b = section("目录");
+  const dirs = el("div", "btns col2");
   for (const [label, which] of [["打开程序目录", "root"], ["打开配置目录", "config"]]) {
     const b = el("button", "btn ghost", label);
     b.onclick = () => call("act", "openDir", { which });
     dirs.appendChild(b);
   }
-  s3.appendChild(line("目录", dirs));
-  s3.appendChild(line("", wrap));
-  box.appendChild(s3);
+  s3b.appendChild(line("", dirs));
+  box.appendChild(s3b);
   const s5 = section("隐私与捐赠");
   s5.appendChild(line("条款", el("div", "note",
     "所有数据只在自己的电脑与手机之间经 USB 传输，不收集、不上传任何东西。")));
